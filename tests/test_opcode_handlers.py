@@ -80,6 +80,7 @@ from custom_components.sofabaton_x1s.lib.protocol_const import (
     OP_X1_DEVICE,
     OP_X2_REMOTE_LIST_ROW,
 )
+from custom_components.sofabaton_x1s.lib.hub_versions import HUB_VERSION_X2
 from custom_components.sofabaton_x1s.lib.x1_proxy import X1Proxy
 from custom_components.sofabaton_x1s.const import HUB_VERSION_X1, HUB_VERSION_X1S
 
@@ -1872,6 +1873,116 @@ def test_hub_disconnect_clears_ack_ready_refresh_window() -> None:
 
     proxy._notify_hub_state(False)
     assert not proxy._ack_ready_refresh_pending
+
+
+def _queued_refresh_proxy() -> X1Proxy:
+    """X2 proxy on the real request queue; only transport I/O is stubbed."""
+
+    proxy = X1Proxy(
+        "127.0.0.1",
+        proxy_udp_port=0,
+        proxy_enabled=False,
+        diag_dump=False,
+        diag_parse=False,
+        hub_version=HUB_VERSION_X2,
+    )
+    proxy.transport.can_issue_commands = lambda: True  # type: ignore[assignment]
+    proxy.transport.send_local = lambda frame: None  # type: ignore[assignment]
+    proxy.state.activities = {
+        0x65: {"id": 0x65, "name": "Watch TV", "active": True, "needs_confirm": False},
+        0x66: {"id": 0x66, "name": "Music", "active": False, "needs_confirm": False},
+    }
+    proxy.state.set_hint(0x65)
+    proxy.state.update_activity_state()
+    proxy._activities_catalog_ready = True
+    proxy.state.buttons[0x65] = {}
+    return proxy
+
+
+def _expire_current_burst(proxy: X1Proxy) -> None:
+    assert proxy._burst.active
+    proxy._burst.tick(
+        proxy._burst.last_ts + proxy._burst.idle_s + 0.01,
+        can_issue=proxy.can_issue_commands,
+        sender=proxy._send_cmd_frame,
+    )
+
+
+def _complete_activities_burst(proxy: X1Proxy, *, active: int) -> None:
+    for row, act_id in enumerate((0x65, 0x66), 1):
+        proxy.ingest_activity_row(
+            row_idx=row,
+            expected_rows=2,
+            act_id=act_id,
+            activity={
+                "id": act_id,
+                "name": "Activity",
+                "active": act_id == active,
+                "needs_confirm": False,
+            },
+        )
+    if proxy._burst.active:
+        assert proxy._burst.finish(
+            "activities", can_issue=proxy.can_issue_commands, sender=proxy._send_cmd_frame
+        )
+    assert proxy.last_activities_burst_committed
+
+
+def test_older_read_completion_keeps_queued_ack_ready_refresh_window() -> None:
+    # Issue #282: ordinary read A is in flight when ACK_READY arrives, so
+    # the ACK refresh B queues behind it. A's completion must not clear
+    # the window that belongs to B: the MQTT push for the acknowledged
+    # transition landing before B commits would otherwise arm a settle
+    # gate that no later ACK_READY releases (a full-timeout command hold).
+    proxy = _queued_refresh_proxy()
+    assert proxy.request_activities()  # read A
+    AckReadyHandler().handle(
+        _build_payload_context(proxy, OP_ACK_READY, b"\x00", "ACK_READY")
+    )
+    assert proxy._ack_ready_refresh_pending
+    assert [kind for *_, kind in proxy._burst.queue] == ["activities"]
+
+    _expire_current_burst(proxy)  # A unanswered; scheduler starts B
+    assert proxy._burst.active and not proxy._burst.queue
+    assert proxy._ack_ready_refresh_pending
+
+    assert proxy.apply_external_activity_state(0x66) is True
+    assert proxy.state.current_activity == 0x66
+    assert proxy._external_settle_event.is_set()
+
+    # B lands and agrees with the push: window closed, gate still open.
+    _complete_activities_burst(proxy, active=0x66)
+    assert not proxy._ack_ready_refresh_pending
+    assert proxy._external_settle_event.is_set()
+
+    # The next transition's push (normal MQTT-before-ACK order) arms again.
+    assert proxy.apply_external_activity_state(0x65) is True
+    assert not proxy._external_settle_event.is_set()
+
+
+def test_ack_ready_refresh_window_closes_after_last_queued_read() -> None:
+    # The window may outlive the ACK refresh by one read when another
+    # REQ_ACTIVITIES was queued behind it (accepted trade-off), but it must
+    # close when that read ends rather than stick and disable the gate.
+    proxy = _queued_refresh_proxy()
+    assert proxy.request_activities()  # read A
+    AckReadyHandler().handle(
+        _build_payload_context(proxy, OP_ACK_READY, b"\x00", "ACK_READY")
+    )
+    _expire_current_burst(proxy)  # B starts
+    assert proxy.request_activities()  # ordinary read C queued behind B
+    assert proxy._ack_ready_refresh_pending
+
+    _complete_activities_burst(proxy, active=0x65)  # B ends, C starts
+    assert proxy._burst.active and not proxy._burst.queue
+    assert proxy._ack_ready_refresh_pending
+
+    _complete_activities_burst(proxy, active=0x65)  # C ends
+    assert not proxy._burst.active
+    assert not proxy._ack_ready_refresh_pending
+
+    assert proxy.apply_external_activity_state(0x66) is True
+    assert not proxy._external_settle_event.is_set()
 
 
 def test_ack_ready_after_external_off_does_not_fire_redundant_off() -> None:

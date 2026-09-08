@@ -673,9 +673,9 @@ class X1Proxy(FrameDecodeMixin, IrBlobMixin, CatalogMixin, ExchangeMixin, AckWai
 
     def handle_active_state(self, trigger: str) -> None:
         if trigger == "activities":
-            # Whatever triggered this burst, the ACK_READY refresh (if one
-            # was in flight) is over, even when it went unanswered.
-            self._ack_ready_refresh_pending = False
+            # The ACK_READY refresh is over unless it is still queued (#282).
+            if not self._activities_read_queued():
+                self._ack_ready_refresh_pending = False
             if not self._last_activities_burst_committed:
                 # Scheduler timeout, nothing committed: the hint is unchanged
                 # and there is no state to publish (evaluating here turned an

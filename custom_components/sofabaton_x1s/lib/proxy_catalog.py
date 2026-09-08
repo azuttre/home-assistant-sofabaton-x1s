@@ -778,6 +778,25 @@ class CatalogMixin:
         self.state.set_hint(self._activity_pending_hint)
         self._activities_catalog_ready = True
 
+    def _activities_read_queued(self) -> bool:
+        """True while a REQ_ACTIVITIES still waits behind the current burst.
+
+        Consulted by :meth:`handle_active_state` when an activities burst
+        ends. Whatever triggered that burst, the ACK_READY refresh window
+        normally closes with it, even when the read went unanswered. Not
+        when another REQ_ACTIVITIES is still queued: then the ending burst
+        is an older read and the ACK_READY refresh has not even been sent.
+        Closing the window there would let the MQTT push for that already
+        acknowledged transition arm a settling gate that no later ACK_READY
+        releases, holding commands for the full timeout (issue #282).
+        Burst-end listeners run before the scheduler pops the queue, so
+        the queued refresh is visible here. The window may outlive the
+        refresh by one read when an ordinary read queued behind it; it
+        closes when that read ends, so it can never stick.
+        """
+
+        return any(kind == "activities" for _op, _payload, _burst, kind in self._burst.queue)
+
     def _on_activities_burst_end(self, key: str) -> None:
         generation = self._activity_request_inflight
         complete = generation is not None and self._activity_pending_generation == generation and self._activity_snapshot_complete()
