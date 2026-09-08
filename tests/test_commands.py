@@ -18,6 +18,7 @@ ensure_stub_package("custom_components.sofabaton_x1s", ROOT / "custom_components
 ensure_stub_package("custom_components.sofabaton_x1s.lib", ROOT / "custom_components" / "sofabaton_x1s" / "lib")
 
 from custom_components.sofabaton_x1s.lib.commands import (
+    hub_command_label,
     DeviceButtonAssembler,
     DeviceCommandAssembler,
     build_denonk_ir_blob,
@@ -2657,3 +2658,46 @@ def test_build_denonk_ir_blob_matches_observed_descriptor(kwargs, expected_blob)
     generated = build_denonk_ir_blob(**kwargs)
 
     assert generated == expected_blob[:-1]
+
+
+# ── hub_command_label: the fixed-width slot projection ─────────────────────
+
+LONG_NAME = "PC Show Audio Device"  # 20 chars, the card's maximum
+
+
+def test_hub_command_label_short_labels_round_trip_unchanged():
+    for hub in (HUB_VERSION_X1, HUB_VERSION_X1S, HUB_VERSION_X2):
+        assert hub_command_label("Dehumidifier", hub) == "Dehumidifier"
+        assert hub_command_label("  padded  ", hub) == "padded"
+        assert hub_command_label("", hub) == ""
+
+
+def test_hub_command_label_cuts_long_press_label_at_30_on_every_model():
+    # 20-char name + " Long Press" = 31 chars; the slot holds 30 (X1: 30
+    # ASCII bytes, X1S/X2: 60 UTF-16 bytes). This is the exact label the
+    # 2026-09-07 X1 diagnostics showed coming back from the hub.
+    label = f"{LONG_NAME} Long Press"
+    assert len(label) == 31
+    for hub in (HUB_VERSION_X1, HUB_VERSION_X1S, HUB_VERSION_X2):
+        assert hub_command_label(label, hub) == "PC Show Audio Device Long Pres"
+    # 19-char name + suffix = 30 chars fits exactly.
+    assert hub_command_label("PC Set Audio Device Long Press", HUB_VERSION_X1) == (
+        "PC Set Audio Device Long Press"
+    )
+
+
+def test_hub_command_label_is_idempotent():
+    label = f"{LONG_NAME} Long Press"
+    for hub in (HUB_VERSION_X1, HUB_VERSION_X1S):
+        once = hub_command_label(label, hub)
+        assert hub_command_label(once, hub) == once
+
+
+def test_hub_command_label_x1_drops_non_ascii_like_the_writer():
+    assert hub_command_label("Küche", HUB_VERSION_X1) == "Kche"
+    assert hub_command_label("Küche", HUB_VERSION_X1S) == "Küche"
+
+
+def test_hub_command_label_rejects_unknown_hub_version():
+    with pytest.raises(ValueError):
+        hub_command_label("x", "X9")

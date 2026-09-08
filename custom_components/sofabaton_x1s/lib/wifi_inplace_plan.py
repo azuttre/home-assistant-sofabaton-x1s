@@ -48,7 +48,7 @@ exists (``command_rename``, ``member_replay``, ``favorite_add/delete``,
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .activity_sync import (
     DEVICE_INPUT_REF_COMMAND,
@@ -174,9 +174,17 @@ def build_wifi_inplace_plan(
     desired: ManagedWifiSnapshot,
     *,
     deployed: ManagedWifiSnapshot | None = None,
+    label_key: Callable[[str], str] | None = None,
 ) -> WifiInplacePlan:
     """Diff ``baseline`` (current live device state) against ``desired``
     (target from the store config) and return the in-place write plan.
+
+    ``label_key`` projects a command label onto what the hub actually
+    stores (the fixed-width slot, see ``commands.hub_command_label``);
+    the rename diff compares projected labels so a desired name that only
+    differs from the live one past the slot boundary is not a rename.
+    Rename steps still carry the full desired name. ``None`` compares
+    labels verbatim.
 
     ``deployed`` — the expansion of the store's frozen last-deployed config —
     scopes the OWNERSHIP of per-activity references (favorites, hard-button
@@ -206,6 +214,7 @@ def build_wifi_inplace_plan(
             f"managed device id changed ({baseline.device_id} → {desired.device_id})"
         )
     dev = baseline.device_id
+    _label_key = label_key if label_key is not None else (lambda text: text)
 
     command_steps: list[SyncStep] = []
     power_steps: list[SyncStep] = []
@@ -244,7 +253,7 @@ def build_wifi_inplace_plan(
                     payload={"device_id": dev, "command_id": cid, "command_name": d_slot.label},
                 )
             )
-        elif b_slot.label != d_slot.label:
+        elif _label_key(b_slot.label) != _label_key(d_slot.label):
             command_steps.append(
                 SyncStep(
                     kind="command_rename",

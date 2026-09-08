@@ -75,7 +75,7 @@ from .lib.blob_decoders import (
     try_decode_blob as try_decode_command_blob,
 )
 from .lib.backup_export import PAYLOAD_PROFILE_FULL, build_device_button_rows
-from .lib.commands import split_play_blob_tail
+from .lib.commands import hub_command_label, split_play_blob_tail
 from .lib.devices import DeviceConfig, parse_device_record
 from .lib.wifi_inplace_plan import (
     baseline_snapshot_from_bundle,
@@ -1516,6 +1516,19 @@ class SofabatonHub:
             ent_lo in self._proxy.state.entities("device")
             or ent_lo in self._proxy.state.ip_devices
         )
+
+    def _hub_command_label(self, label: str) -> str:
+        """Project a command label onto the hub's fixed-width label slot.
+
+        Wraps :func:`lib.commands.hub_command_label` for this hub's model;
+        identity (stripped) while the model is not known yet, so the
+        comparison paths never raise on an unclassified hub.
+        """
+
+        try:
+            return hub_command_label(label, self._proxy.hub_version)
+        except ValueError:
+            return str(label or "").strip()
 
     def _commands_ready_for(self, ent_id: int) -> bool:
         if self._looks_like_activity(ent_id):
@@ -4404,13 +4417,18 @@ class SofabatonHub:
         # so re-running simply resumes: applied steps no-op, the rest
         # re-emit. Only records matching NEITHER side are foreign edits
         # (the Sofabaton app) and force the replace-path rebase.
+        # Labels are compared as the hub stores them: the slot is 30
+        # characters, so "<20-char name> Long Press" legitimately reads
+        # back one character short and is not drift.
         drift: list[int] = []
         resumed: list[int] = []
         for cid, slot in baseline.slots.items():
-            if expected_labels.get(cid) == slot.label:
+            live_label = self._hub_command_label(slot.label)
+            expected_label = expected_labels.get(cid)
+            if expected_label is not None and self._hub_command_label(expected_label) == live_label:
                 continue
             desired_slot = desired.slots.get(cid)
-            if desired_slot is not None and desired_slot.label == slot.label:
+            if desired_slot is not None and self._hub_command_label(desired_slot.label) == live_label:
                 resumed.append(cid)
                 continue
             drift.append(cid)
@@ -4443,7 +4461,12 @@ class SofabatonHub:
             slot_count=slot_count,
             long_press_offset=slot_count,
         )
-        plan = build_wifi_inplace_plan(baseline, desired, deployed=deployed_snapshot)
+        plan = build_wifi_inplace_plan(
+            baseline,
+            desired,
+            deployed=deployed_snapshot,
+            label_key=self._hub_command_label,
+        )
         if plan.is_fallback:
             _LOGGER.info(
                 "[%s] in-place sync declined by planner: %s",
@@ -4933,15 +4956,39 @@ class SofabatonHub:
                             )
                         )
                     )
+                    # Compare labels as the hub stores them (fixed-width
+                    # slot): a 31-character "<name> Long Press" comes back
+                    # cut to 30 and is still the row we wrote.
                     actual_commands = {
-                        int(command_id) & 0xFF: str(label)
+                        int(command_id) & 0xFF: self._hub_command_label(str(label))
                         for command_id, label in dict(command_rows or {}).items()
                     }
                     expected_commands = {
-                        idx + 1: str(command["display_name"])
+                        idx + 1: self._hub_command_label(str(command["display_name"]))
                         for idx, command in enumerate(command_defs)
                     }
                     if not commands_ready or actual_commands != expected_commands:
+                        mismatched = sorted(
+                            cid
+                            for cid in set(actual_commands) | set(expected_commands)
+                            if actual_commands.get(cid) != expected_commands.get(cid)
+                        )
+                        _LOGGER.warning(
+                            "[%s] sync_command_config: replacement Wifi Device %d failed "
+                            "command readback (table complete=%s, %d rows read, %d expected); "
+                            "mismatched ids: %s",
+                            self.entry_id,
+                            wifi_device_id,
+                            commands_ready,
+                            len(actual_commands),
+                            len(expected_commands),
+                            "; ".join(
+                                f"{cid}: hub={actual_commands.get(cid)!r} "
+                                f"expected={expected_commands.get(cid)!r}"
+                                for cid in mismatched[:10]
+                            )
+                            or "none",
+                        )
                         await self.async_delete_device(wifi_device_id)
                         raise HomeAssistantError(
                             "The replacement Wifi Device did not pass command "
