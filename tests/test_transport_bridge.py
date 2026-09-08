@@ -469,3 +469,134 @@ def test_stop_closes_wake_channel_safely():
     assert closed == ["reader", "writer"]
     assert bridge._wake_reader is None
     assert bridge._wake_writer is None
+
+
+def test_stop_joins_bridge_thread_before_closing_descriptors():
+    """Issue #283: stop() must not close sockets the bridge is about to register.
+
+    Pause the real worker between capturing its sockets and syncing the
+    selector, call stop() from the test thread, then release the worker.
+    Before the fix the worker registered freshly closed descriptors and
+    recorded a selector failure plus a wake-channel recreation during an
+    intentional shutdown.
+    """
+
+    bridge = TransportBridge(
+        "127.0.0.1", 8102, 0, 0, proxy_id="proxy", mdns_instance="proxy", mdns_txt={}
+    )
+    left, right = socket.socketpair()
+    left.setblocking(False)
+    bridge._hub_sock = left
+    bridge._init_wake_channel()
+
+    captured = threading.Event()
+    release = threading.Event()
+    original_sync = bridge._sync_selector
+
+    def paused_sync(selector, desired):
+        captured.set()
+        assert release.wait(3), "worker was not released"
+        return original_sync(selector, desired)
+
+    bridge._sync_selector = paused_sync
+    worker = threading.Thread(target=bridge._bridge_forever, daemon=True)
+    bridge._bridge_thr = worker
+    worker.start()
+    try:
+        assert captured.wait(3), "worker did not reach the selector sync"
+
+        stopper = threading.Thread(target=bridge.stop, daemon=True)
+        stopper.start()
+        # stop() is now blocked in join(); the worker only proceeds once released.
+        time.sleep(0.05)
+        assert bridge._hub_sock is left, "stop() closed the hub socket before the worker exited"
+        release.set()
+        stopper.join(5.0)
+        worker.join(5.0)
+
+        assert not stopper.is_alive()
+        assert not worker.is_alive()
+        stats = bridge.get_bridge_stats()
+        assert stats["select_errors"] == 0, stats
+        assert stats["last_select_error"] is None
+        assert bridge._hub_sock is None
+        assert bridge._wake_reader is None
+    finally:
+        bridge._stop.set()
+        release.set()
+        worker.join(3.0)
+        for sock in (left, right):
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+
+def test_stop_does_not_join_when_called_from_bridge_thread():
+    bridge = TransportBridge(
+        "127.0.0.1", 8102, 0, 0, proxy_id="proxy", mdns_instance="proxy", mdns_txt={}
+    )
+    bridge._init_wake_channel()
+    finished = threading.Event()
+
+    def run():
+        bridge._bridge_thr = threading.current_thread()
+        bridge.stop()
+        finished.set()
+
+    thr = threading.Thread(target=run, daemon=True)
+    thr.start()
+    assert finished.wait(3), "stop() blocked when invoked from the bridge thread"
+    thr.join(3.0)
+    assert bridge._wake_reader is None
+
+
+def test_stop_fallback_after_join_timeout_does_not_count_selector_errors():
+    """Issue #283, fallback path: the worker stays paused past stop()'s join cap.
+
+    stop() then closes the descriptors anyway; when the worker finally
+    syncs the selector the failure must be treated as shutdown noise and
+    not recorded or handled as a bridge fault.
+    """
+
+    bridge = TransportBridge(
+        "127.0.0.1", 8102, 0, 0, proxy_id="proxy", mdns_instance="proxy", mdns_txt={}
+    )
+    left, right = socket.socketpair()
+    left.setblocking(False)
+    bridge._hub_sock = left
+    bridge._init_wake_channel()
+
+    captured = threading.Event()
+    release = threading.Event()
+    original_sync = bridge._sync_selector
+
+    def paused_sync(selector, desired):
+        captured.set()
+        assert release.wait(5), "worker was not released"
+        return original_sync(selector, desired)
+
+    bridge._sync_selector = paused_sync
+    worker = threading.Thread(target=bridge._bridge_forever, daemon=True)
+    bridge._bridge_thr = worker
+    worker.start()
+    try:
+        assert captured.wait(3), "worker did not reach the selector sync"
+        bridge.stop()  # blocks for the join cap, then closes descriptors
+        assert bridge._hub_sock is None
+        release.set()
+        worker.join(5.0)
+        assert not worker.is_alive()
+        stats = bridge.get_bridge_stats()
+        assert stats["select_errors"] == 0, stats
+        assert stats["last_select_error"] is None
+        assert bridge._wake_reader is None
+    finally:
+        bridge._stop.set()
+        release.set()
+        worker.join(3.0)
+        for sock in (left, right):
+            try:
+                sock.close()
+            except OSError:
+                pass
