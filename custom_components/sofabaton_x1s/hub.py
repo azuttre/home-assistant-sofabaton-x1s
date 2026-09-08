@@ -3038,6 +3038,45 @@ class SofabatonHub:
                 result[ent_id] = cmds
         return result
 
+    def get_ui_activity_list(self) -> list[dict[str, Any]]:
+        """Activities for the remote entity's ``activities`` attribute.
+
+        Presentation-layer view mirroring ``get_ui_device_list``: ordered
+        like the physical remote and the app, i.e. by the record's sort
+        byte (body[6] of the shared device-record schema) first, rows
+        without a stored sort falling back to id order at the end. The
+        remote card renders this list as-is, so the order has to be settled
+        here. ``raw_body`` is stripped from the hub-level activity views, so
+        the sort byte is read straight from proxy state.
+        """
+
+        rows: list[dict[str, Any]] = []
+        state_activities = getattr(self._proxy.state, "activities", {})
+        if not isinstance(state_activities, dict):
+            state_activities = {}
+        for act_id, activity in self.activities.items():
+            if not isinstance(activity, dict):
+                continue
+            sort_value = 0
+            state_activity = state_activities.get(act_id)
+            raw_body = (
+                state_activity.get("raw_body")
+                if isinstance(state_activity, dict)
+                else None
+            )
+            if isinstance(raw_body, (bytes, bytearray)) and len(raw_body) > 6:
+                sort_value = int(raw_body[6])
+            rows.append(
+                {
+                    "id": act_id,
+                    "name": activity.get("name"),
+                    "sort": sort_value,
+                }
+            )
+
+        rows.sort(key=lambda r: (0, r["sort"], r["id"]) if r["sort"] else (1, 0, r["id"]))
+        return rows
+
     def get_ui_device_list(self) -> list[dict[str, Any]]:
         """Devices for frontend dropdowns (remote-card device mode).
 
