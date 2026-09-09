@@ -152,6 +152,15 @@ def _publish_ws_components(app: FastAPI) -> None:
             for name, definition in schema.pop("$defs", {}).items():
                 components.setdefault(name, definition)
             components[message_type.__name__] = schema
+        # The document is committed and compared byte for byte, so nothing
+        # in it may depend on the framework version. FastAPI's default 422
+        # description changed wording between releases ("Unprocessable
+        # Entity" / "Unprocessable Content"); the contract states its own.
+        for operations in spec.get("paths", {}).values():
+            for operation in operations.values():
+                responses = operation.get("responses", {}) if isinstance(operation, dict) else {}
+                if "422" in responses:
+                    responses["422"]["description"] = "Validation error"
         blank = chr(10) + chr(10)
         spec["info"]["description"] = (
             spec["info"].get("description", "")

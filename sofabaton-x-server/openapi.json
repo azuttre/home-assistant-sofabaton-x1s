@@ -1300,7 +1300,7 @@
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Validation error"
           }
         },
         "summary": "Listen for hub advertisements for a while, then return the table",
@@ -1374,7 +1374,7 @@
                 }
               }
             },
-            "description": "Unprocessable Content"
+            "description": "Validation error"
           }
         },
         "summary": "Register a hub",
@@ -1419,7 +1419,7 @@
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Validation error"
           }
         },
         "summary": "Forget a hub (stops and releases it first)",
@@ -1469,7 +1469,7 @@
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Validation error"
           }
         },
         "summary": "One configured hub",
@@ -1535,7 +1535,7 @@
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Validation error"
           },
           "503": {
             "content": {
@@ -1630,7 +1630,7 @@
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Validation error"
           },
           "503": {
             "content": {
@@ -1725,7 +1725,7 @@
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Validation error"
           },
           "503": {
             "content": {
@@ -1816,7 +1816,7 @@
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Validation error"
           },
           "503": {
             "content": {
@@ -1907,7 +1907,7 @@
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Validation error"
           },
           "503": {
             "content": {
@@ -1997,7 +1997,7 @@
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Validation error"
           }
         },
         "summary": "The running activity, or null when the hub is idle",
@@ -2075,7 +2075,7 @@
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Validation error"
           },
           "503": {
             "content": {
@@ -2170,7 +2170,7 @@
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Validation error"
           },
           "503": {
             "content": {
@@ -2242,7 +2242,7 @@
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Validation error"
           }
         },
         "summary": "Disconnect a hub but keep its configuration",
@@ -2294,7 +2294,7 @@
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Validation error"
           }
         },
         "summary": "Reconnect a disabled hub",
@@ -2369,7 +2369,7 @@
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Validation error"
           },
           "503": {
             "content": {
@@ -2451,7 +2451,7 @@
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Validation error"
           },
           "503": {
             "content": {
@@ -2545,7 +2545,7 @@
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Validation error"
           },
           "503": {
             "content": {
@@ -2637,7 +2637,7 @@
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Validation error"
           },
           "503": {
             "content": {
@@ -2709,7 +2709,7 @@
                 }
               }
             },
-            "description": "Validation Error"
+            "description": "Validation error"
           }
         },
         "summary": "Live connection state (pure state read)",

@@ -197,8 +197,14 @@ pytest sofabaton-x-server/tests -q
 app's document differs. After an API change:
 
 ```
+pip install -r sofabaton-x-server/openapi-toolchain.txt
 PYTHONPATH=sofabaton-x-server/src python -m sofabaton_server.openapi
 ```
+
+The toolchain file pins the FastAPI and pydantic versions the document
+is generated with; CI installs the same set before the drift test, so a
+framework's own wording (the 422 description changed between FastAPI
+releases, for instance) never shows up as API drift.
 
 The codegen smoke (also in CI) proves the document feeds a generator and
 the generated types are usable:

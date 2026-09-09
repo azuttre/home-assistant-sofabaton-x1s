@@ -35,7 +35,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install pytest httpx zeroconf fastapi "uvicorn[standard]"
+      - run: pip install pytest zeroconf -r sofabaton-x-server/openapi-toolchain.txt
       - name: Server tests (in-tree library, no network)
         run: pytest sofabaton-x-server/tests -q
       - name: OpenAPI document is current
