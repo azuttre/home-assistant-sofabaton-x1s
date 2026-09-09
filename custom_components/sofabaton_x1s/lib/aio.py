@@ -15,7 +15,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
-from typing import Any, AsyncIterator, Callable, Iterable, Optional
+from typing import Any, AsyncIterator, Callable, Iterable, Optional, Sequence
 
 from .config import HubConfig
 from .discovery import (
@@ -24,10 +24,21 @@ from .discovery import (
     HubBrowser,
     discover_hubs,
 )
-from .errors import FetchTimeoutError, HubBusyError, HubNotConnectedError
+from .backup_export import normalize_dump_to_blobs, now_iso as _now_iso
+from .errors import (
+    FetchTimeoutError,
+    HubBusyError,
+    HubNotConnectedError,
+    HubRejectedError,
+    IrLearnError,
+    SnapshotIncompleteError,
+    SnapshotOutdatedError,
+    StateDocumentError,
+)
 from .hub_listener import release_hub_from_listener
 from .hub_versions import HVER_BY_HUB_VERSION
 from .devices import parse_device_record
+from .device_class_profiles import supported_create_classes
 from .models import (
     Activity,
     ActivityChanged,
@@ -36,14 +47,25 @@ from .models import (
     Command,
     ConnectionState,
     Device,
+    DeviceRemoved,
     Favorite,
     HubEvent,
     HubInfo,
+    HubSnapshot,
     HubStatus,
     Macro,
+    RestoreResult,
     RunningActivity,
+    SnapshotChanged,
+    SnapshotEntity,
     StatusChanged,
+    SyncResult,
+    WriteProgress,
+    SYNC_PRE_WRITE_FAILURES,
+    snapshot_content_id,
 )
+from .payloads import MIN_PAYLOAD_BYTES, IrPayload
+from .version import __version__
 from .protocol_const import BUTTONNAME_BY_CODE, ButtonName
 from .x1_proxy import X1Proxy
 
@@ -58,6 +80,11 @@ DEFAULT_FETCH_TIMEOUT = 10.0
 # Pause before the connect-time initial sync is retried after a failure
 # with the hub still connected (a burst that never landed, for instance).
 INITIAL_SYNC_RETRY_S = 5.0
+# Schema of the opaque state document (export_state / import_state).
+STATE_DOCUMENT_KIND = "sofabaton_state"
+STATE_DOCUMENT_SCHEMA = 1
+# Learn timeout, matching the hub's own silent exit from learn mode.
+DEFAULT_LEARN_TIMEOUT = 60.0
 
 
 def _marshal_callback(loop: asyncio.AbstractEventLoop, callback: Callable) -> Callable:
@@ -111,6 +138,60 @@ def _device_from_row(dev_id: int, row: dict, hub_version: Optional[str]) -> Devi
     )
 
 
+def _bundle_entity(bundle: Any, kind: str, entity_id: int) -> Optional[dict]:
+    """The ``device_backup`` / ``activity_backup`` payload for one entity id."""
+
+    if not isinstance(bundle, dict):
+        return None
+    rows = bundle.get("devices" if kind == "device" else "activities") or []
+    want = int(entity_id) & 0xFF
+    for payload in rows:
+        if not isinstance(payload, dict):
+            continue
+        block = payload.get("device") or {}
+        try:
+            if int(block.get("device_id", -1)) & 0xFF == want:
+                return payload
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _snapshot_entity(kind: str, payload: dict) -> SnapshotEntity:
+    block = payload.get("device") or {}
+    try:
+        entity_id = int(block.get("device_id", 0)) & 0xFF
+    except (TypeError, ValueError):
+        entity_id = 0
+    name = block.get("name")
+    return SnapshotEntity(
+        kind=kind,  # type: ignore[arg-type]
+        entity_id=entity_id,
+        name=str(name) if name is not None else None,
+        complete=bool(payload.get("complete")),
+        editable=bool(payload.get("editable", payload.get("complete"))),
+        stale_risk=bool(payload.get("stale_risk")),
+        fetched_at=payload.get("fetched_at"),
+    )
+
+
+class _ProgressReporter:
+    """Deliver :class:`WriteProgress` to a consumer callback from the loop."""
+
+    def __init__(self, loop: asyncio.AbstractEventLoop, callback: Optional[Callable]) -> None:
+        self._loop = loop
+        self._callback = callback
+
+    def __call__(self, **payload: Any) -> None:
+        if self._callback is None:
+            return
+        progress = WriteProgress.from_engine(**payload)
+        if inspect.iscoroutinefunction(self._callback):
+            self._loop.create_task(self._callback(progress))
+        else:
+            self._callback(progress)
+
+
 class AsyncXProxy:
     """Asyncio proxy for a Sofabaton X1/X1S/X2 hub — the library's entry point.
 
@@ -147,9 +228,31 @@ class AsyncXProxy:
       derived ``status_changed`` when the mode flips.
     * **control** — :meth:`press`, :meth:`start_activity`,
       :meth:`stop_activity`, :meth:`find_remote`.
+    * **snapshot** — :meth:`snapshot`: the hub's structural configuration
+      (everything but IR payloads) projected from the cache with no hub
+      traffic, as a :class:`HubSnapshot` with a content-hash id and
+      per-entity provenance; :meth:`refresh` is the only structural hub
+      read (whole hub, minutes on a real hub, or one entity), always
+      user-initiated; :meth:`export_state` / :meth:`import_state` carry
+      the engine's cache across a consumer restart so the snapshot is
+      complete straight away.
     * **live edit** — :meth:`sync_activity`, :meth:`sync_device`: diff a
-      captured backup bundle against an edited copy and write the
-      difference in place (see the "live edit surface" section below).
+      snapshot bundle against an edited copy and write the difference in
+      place (see the "live edit surface" section below), returning a
+      :class:`SyncResult`. Every write ends with a rebase: the entity is
+      re-read and a ``snapshot_changed`` event carries the new id.
+    * **intents** — whole-entity writes a bundle diff cannot express:
+      :meth:`add_device`, :meth:`add_activity`, :meth:`remove_device`,
+      :meth:`remove_activity`, :meth:`reorder_devices`, :meth:`reorder_activities`,
+      :meth:`set_hub_name`, :meth:`erase`, :meth:`backup`, :meth:`restore`.
+      They raise :class:`HubBusyError` / :class:`HubNotConnectedError`
+      when the hub cannot be written and :class:`HubRejectedError` when
+      the hub refused, and rebase like a sync.
+    * **payloads** — :class:`IrPayload` built from Pronto, raw timings, a
+      descriptor or hub hex; :meth:`read_payload`, :meth:`play`,
+      :meth:`learn_ir` / :meth:`cancel_learn`. Saving a payload as a new
+      command is a row edit: :meth:`IrPayload.to_command_row` then
+      :meth:`sync_device`.
 
     Anything else in :data:`PROXY_METHODS` (provisioning, cache export,
     explicit requests) is awaitable too and delegates to the engine in
@@ -183,30 +286,20 @@ class AsyncXProxy:
             "request_activities",
             "request_devices",
             "request_activity_mapping",
-            "request_ir_command_dump",
             "fetch_device_input_record",
             "fetch_device_key_sort",
             # actions
-            "set_hub_name",
             "set_diag_dump",
             "resync_remote",
             "update_discovery_identity",
             "enable_proxy",
             "disable_proxy",
-            # provisioning / mutation (whole-entity operations a bundle
-            # diff cannot express; row-level edits go through sync_*)
-            "delete_device",
-            "reorder_activities",
-            "create_activity",
-            "play_ir_blob",
-            "erase_configuration",
-            # backup / restore (symmetric, schema-versioned)
+            # per-entity backup / restore (the whole-hub forms are the
+            # explicit backup() / restore() coroutines)
             "backup_device",
             "backup_activity",
-            "backup_hub_bundle",
             "restore_device",
             "restore_activity",
-            "restore_hub_bundle",
         }
     )
 
@@ -247,6 +340,25 @@ class AsyncXProxy:
             "fetch_banner_info",
             "get_banner_info",
             "get_proxy_status",
+            # snapshot / state document (phase 3 plan, W0)
+            "assemble_hub_bundle_from_state",
+            "export_cache_state",
+            "import_cache_state",
+            "bump_cache_generation",
+            # intents and payloads (phase 3 plan, W3)
+            "create_device",
+            "create_activity",
+            "delete_device",
+            "reorder_devices",
+            "reorder_activities",
+            "set_hub_name",
+            "erase_configuration",
+            "backup_hub_bundle",
+            "restore_hub_bundle",
+            "request_ir_command_dump",
+            "play_ir_blob",
+            "ir_learn_command",
+            "cancel_ir_learn",
         }
     )
 
@@ -371,6 +483,16 @@ class AsyncXProxy:
         # Bumped on every hub disconnect so a sync started for an earlier
         # session can never mark a later one ready.
         self._session_gen = 0
+        # Structural refreshes and writes hold the hub session one at a
+        # time; a second whole-hub refresh joins the one in flight.
+        self._refresh_lock = asyncio.Lock()
+        self._whole_refresh_task: Optional[asyncio.Task] = None
+        # Id of the last projection handed out or announced; a rebase
+        # emits ``snapshot_changed`` only when the id moved past it.
+        self._last_snapshot_id: Optional[str] = None
+        # W1: an ended app session flags the cache (engine side); tell
+        # the event consumers so they can offer a refresh.
+        self._proxy.on_client_state_change(self._on_app_link_for_snapshot)
 
     # -- escape hatches ----------------------------------------------------
 
@@ -1058,6 +1180,8 @@ class AsyncXProxy:
         """Iterate over hub events as they happen, as typed :class:`HubEvent`.
 
         Kinds: ``activity_changed`` (:class:`ActivityChanged`),
+        ``snapshot_changed`` (:class:`SnapshotChanged`: a refresh landed,
+        a write was rebased or an app session flagged the cache),
         ``activity_list_updated`` (no payload), ``hub_state`` and
         ``app_state`` (:class:`ConnectionState`), ``status_changed``
         (:class:`StatusChanged`, derived: fires once whenever the mode
@@ -1137,27 +1261,40 @@ class AsyncXProxy:
         baseline: dict,
         edited: dict,
         activity_id: int,
-        progress_callback: Optional[Callable] = None,
-    ) -> dict:
+        progress: Optional[Callable] = None,
+        snapshot_id: Optional[str] = None,
+    ) -> SyncResult:
         """Write the ``baseline`` → ``edited`` diff for one activity to the hub.
 
-        Returns the engine's result dict: ``{"status": "success",
-        "completed_steps", "total_steps", "counters"}`` on success, or
-        ``{"status": "failed", "failed_at", "message", ...}`` when the plan
-        is out of scope, the activity changed on the hub since ``baseline``
-        was captured (``failed_at: "stale_check"``), or the hub rejected a
-        step. ``progress_callback`` (sync or async) receives keyword-only
-        progress payloads (``phase``, ``message``, ``completed_steps``,
-        ``total_steps``, ...) on the event loop.
+        ``baseline`` is a snapshot bundle (:attr:`HubSnapshot.bundle`) and
+        ``edited`` a modified copy. Pass ``snapshot_id`` to have the edit
+        refused up front (:class:`SnapshotOutdatedError`, no hub traffic)
+        when it was made on a snapshot that is no longer current; the
+        engine's stale preflight still runs afterwards as the authoritative
+        check against the hub. A baseline activity that is not editable
+        (never fetched, or fetched incomplete) raises
+        :class:`SnapshotIncompleteError` before anything is written.
+
+        Returns a :class:`SyncResult`; a hub-side failure is reported there
+        (``failed_at``), never raised. Only the preconditions raise:
+        :class:`HubBusyError` / :class:`HubNotConnectedError` when the hub
+        cannot be written, and the two snapshot guards below. ``progress`` (sync or async) receives
+        a :class:`WriteProgress` per step on the event loop. After a write
+        the entity is re-read by the engine and a ``snapshot_changed``
+        event carries the new snapshot id.
         """
 
-        return await self.run(
+        self._raise_if_cannot_fetch(f"sync_activity({int(activity_id) & 0xFF})")
+        await self._check_sync_baseline(baseline, "activity", activity_id, snapshot_id)
+        result = await self.run(
             self._proxy.sync_activity,
             baseline=baseline,
             edited=edited,
             activity_id=activity_id,
-            progress_callback=self._marshal_optional(progress_callback),
+            progress_callback=self._engine_progress(progress),
         )
+        new_id = await self._rebase_after_write(result, activity_ids=(int(activity_id) & 0xFF,))
+        return SyncResult.from_engine(result, snapshot_id=new_id)
 
     async def sync_device(
         self,
@@ -1165,22 +1302,571 @@ class AsyncXProxy:
         baseline: dict,
         edited: dict,
         device_id: int,
-        progress_callback: Optional[Callable] = None,
-    ) -> dict:
+        progress: Optional[Callable] = None,
+        snapshot_id: Optional[str] = None,
+    ) -> SyncResult:
         """Device-scoped counterpart of :meth:`sync_activity`.
 
-        Same bundle-pair contract and result dict, with the device id as
-        the entity being edited (command adds/renames/payload edits, idle
-        behaviour, input records).
+        Same bundle-pair contract, guards, result and rebase, with the
+        device id as the entity being edited (command adds and renames,
+        payload edits, idle behaviour, input records).
         """
 
-        return await self.run(
+        self._raise_if_cannot_fetch(f"sync_device({int(device_id) & 0xFF})")
+        await self._check_sync_baseline(baseline, "device", device_id, snapshot_id)
+        result = await self.run(
             self._proxy.sync_device,
             baseline=baseline,
             edited=edited,
             device_id=device_id,
-            progress_callback=self._marshal_optional(progress_callback),
+            progress_callback=self._engine_progress(progress),
         )
+        new_id = await self._rebase_after_write(result, device_ids=(int(device_id) & 0xFF,))
+        return SyncResult.from_engine(result, snapshot_id=new_id)
+
+    def _engine_progress(self, progress: Optional[Callable]) -> Optional[Callable]:
+        """An engine-side progress callback that delivers :class:`WriteProgress`
+        on the loop, or None when the consumer passed none."""
+
+        if progress is None:
+            return None
+        reporter = _ProgressReporter(self._loop, progress)
+
+        def relay(**payload: Any) -> None:
+            self._loop.call_soon_threadsafe(functools.partial(reporter, **payload))
+
+        return relay
+
+    async def _check_sync_baseline(
+        self, baseline: Any, kind: str, entity_id: int, snapshot_id: Optional[str]
+    ) -> None:
+        if snapshot_id is not None:
+            current = await self.snapshot()
+            if current.snapshot_id != snapshot_id:
+                raise SnapshotOutdatedError(
+                    f"the edit was made on snapshot {snapshot_id[:12]}..., the current "
+                    f"snapshot is {current.snapshot_id[:12]}...; take a new snapshot "
+                    "and re-apply the edit"
+                )
+        payload = _bundle_entity(baseline, kind, entity_id)
+        if payload is None:
+            return  # unknown entity: the engine's planner reports it
+        editable = payload.get("editable", payload.get("complete"))
+        if editable is False:
+            raise SnapshotIncompleteError(
+                f"{kind} {int(entity_id) & 0xFF} is not editable in this snapshot "
+                "(never fetched, or fetched incomplete); refresh it first"
+            )
+
+    async def _rebase_after_write(
+        self,
+        result: Any,
+        *,
+        device_ids: tuple[int, ...] = (),
+        activity_ids: tuple[int, ...] = (),
+        force: bool = False,
+    ) -> Optional[str]:
+        """Re-project after a write, announce the move (decision 6) and
+        return the snapshot id the consumer should hold now."""
+
+        if isinstance(result, dict) and result.get("status") == "failed":
+            if result.get("failed_at") in SYNC_PRE_WRITE_FAILURES:
+                return self._last_snapshot_id  # nothing was written
+        await self.run(self._proxy.bump_cache_generation)
+        snap = await self.snapshot(_announce=False)
+        if force or snap.snapshot_id != self._last_snapshot_id:
+            self._announce_snapshot(snap, device_ids, activity_ids)
+        return snap.snapshot_id
+
+    # -- intents (phase 3 plan, W3) -----------------------------------------
+
+    async def _write(self, what: str, func: Callable, *args: Any, **kwargs: Any) -> Any:
+        """Run an engine write: typed refusal before, typed rejection after."""
+
+        self._raise_if_cannot_fetch(what)
+        result = await self.run(func, *args, **kwargs)
+        if result is None or result is False:
+            raise HubRejectedError(f"the hub did not accept {what}")
+        return result
+
+    async def add_device(self, name: str, device_class: str) -> int:
+        """Create an empty device of ``device_class`` and return its hub id.
+
+        ``device_class`` is one of the library's create classes for this
+        hub model (``ir`` on every hub; ``wifi_roku``, ``wifi_hue``,
+        ``wifi_sonos``, and on the X1S/X2 the further network classes;
+        see ``supported_create_classes``); anything else raises
+        ``ValueError`` before the hub is touched. Commands and bindings
+        come afterwards through :meth:`sync_device`.
+        """
+
+        clean = str(name or "").strip()
+        if not clean:
+            raise ValueError("a device needs a name")
+        hub_version = getattr(self._proxy, "hub_version", None)
+        allowed = supported_create_classes(hub_version)
+        if allowed and device_class not in allowed:
+            raise ValueError(
+                f"device class {device_class!r} cannot be created on a {hub_version}; "
+                f"one of: {', '.join(allowed)}"
+            )
+        result = await self._write(
+            f"add_device({clean!r})", self._proxy.create_device, clean, device_class=device_class
+        )
+        device_id = int(result.get("device_id") or 0) & 0xFF
+        await self._rebase_after_write(result, device_ids=(device_id,), force=True)
+        return device_id
+
+    async def add_activity(self, name: str) -> int:
+        """Create an empty activity and return its hub id."""
+
+        clean = str(name or "").strip()
+        if not clean:
+            raise ValueError("an activity needs a name")
+        result = await self._write(f"add_activity({clean!r})", self._proxy.create_activity, clean)
+        activity_id = int(result.get("activity_id") or 0) & 0xFF
+        await self._rebase_after_write(result, activity_ids=(activity_id,), force=True)
+        return activity_id
+
+    async def remove_device(self, device_id: int) -> DeviceRemoved:
+        """Delete a device; the hub cascades the removal into its activities."""
+
+        dev_lo = int(device_id) & 0xFF
+        result = await self._write(f"remove_device({dev_lo})", self._proxy.delete_device, dev_lo)
+        removed = DeviceRemoved(
+            device_id=dev_lo,
+            confirmed_activity_ids=tuple(int(a) & 0xFF for a in result.get("confirmed_activities") or ()),
+            impacted_activity_ids=tuple(int(a) & 0xFF for a in result.get("impacted_activities") or ()),
+        )
+        await self._rebase_after_write(
+            result, device_ids=(dev_lo,), activity_ids=removed.impacted_activity_ids, force=True
+        )
+        return removed
+
+    async def remove_activity(self, activity_id: int) -> None:
+        """Delete an activity. The hub's delete keys purely by id (devices
+        and activities share one table), so this is the device delete
+        with an activity id; nothing cascades."""
+
+        act_lo = int(activity_id) & 0xFF
+        if act_lo < 101:
+            raise ValueError(f"{act_lo} is not an activity id (activities start at 101)")
+        result = await self._write(f"remove_activity({act_lo})", self._proxy.delete_device, act_lo)
+        await self._rebase_after_write(result, activity_ids=(act_lo,), force=True)
+
+    async def _check_order(self, kind: str, ordered_ids: Sequence[int]) -> tuple[int, ...]:
+        ids = tuple(int(i) & 0xFF for i in ordered_ids)
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"{kind} order repeats an id")
+        ready_attr, getter_name = {
+            "device": ("_devices_catalog_ready", "get_known_device_ids"),
+            "activity": ("_activities_catalog_ready", "get_known_activity_ids"),
+        }[kind]
+        if getattr(self._proxy, ready_attr, False):
+            getter = getattr(self._proxy, getter_name)
+            known = {int(i) & 0xFF for i in await self.run(getter)}
+            if set(ids) != known:
+                missing = sorted(known - set(ids))
+                unknown = sorted(set(ids) - known)
+                raise ValueError(
+                    f"{kind} order must list every {kind} exactly once "
+                    f"(missing {missing}, unknown {unknown})"
+                )
+        return ids
+
+    async def reorder_devices(self, ordered_ids: Sequence[int]) -> None:
+        """Store ``ordered_ids`` as the hub's device display order (all devices, once each)."""
+
+        ids = await self._check_order("device", ordered_ids)
+        result = await self._write("reorder_devices", self._proxy.reorder_devices, list(ids))
+        await self._rebase_after_write(result, device_ids=ids, force=True)
+
+    async def reorder_activities(self, ordered_ids: Sequence[int]) -> None:
+        """Store ``ordered_ids`` as the hub's activity display order (all activities, once each)."""
+
+        ids = await self._check_order("activity", ordered_ids)
+        result = await self._write("reorder_activities", self._proxy.reorder_activities, list(ids))
+        await self._rebase_after_write(result, activity_ids=ids, force=True)
+
+    async def set_hub_name(self, name: str, *, timeout: float = 5.0) -> None:
+        """Rename the hub (the name the app and discovery show)."""
+
+        clean = str(name or "").strip()
+        if not clean:
+            raise ValueError("the hub needs a name")
+        await self._write(f"set_hub_name({clean!r})", self._proxy.set_hub_name, clean, timeout=timeout)
+        await self._rebase_after_write(None, force=True)
+
+    async def erase(self, *, timeout: float = 120.0) -> None:
+        """Wipe every device and activity on the hub. Destructive and final."""
+
+        await self._write("erase", self._proxy.erase_configuration, timeout=timeout)
+        await self._rebase_after_write(None, force=True)
+
+    async def backup(
+        self,
+        *,
+        include_blobs: bool = True,
+        device_ids: Optional[Sequence[int]] = None,
+        progress: Optional[Callable] = None,
+        timeout: float = DEFAULT_FETCH_TIMEOUT,
+    ) -> dict[str, Any]:
+        """Read a ``hub_bundle`` from the hub.
+
+        With ``include_blobs`` (default) every IR payload is dumped too and
+        the bundle is restorable (``payload_profile: "full_backup"``); it
+        takes minutes and is meant as a user action with ``progress``.
+        ``include_blobs=False`` is the structural read :meth:`refresh`
+        performs. ``device_ids`` narrows the bundle to those devices (no
+        activities). Either way the cache is warmed and
+        ``snapshot_changed`` follows.
+        """
+
+        self._raise_if_cannot_fetch("backup")
+        async with self._refresh_lock:
+            bundle = await self.run(
+                self._proxy.backup_hub_bundle,
+                include_blobs=include_blobs,
+                device_ids=[int(i) & 0xFF for i in device_ids] if device_ids else None,
+                wait_timeout=timeout,
+                progress=self._engine_progress(progress),
+            )
+        await self._rebase_after_write(None, force=True)
+        return bundle
+
+    async def restore(
+        self,
+        bundle: dict[str, Any],
+        *,
+        replace: bool = False,
+        progress: Optional[Callable] = None,
+    ) -> RestoreResult:
+        """Write a full ``hub_bundle`` (from :meth:`backup`) onto the hub.
+
+        Additive: devices and activities are created next to what the hub
+        holds, with fresh ids. ``replace=True`` erases the hub first (see
+        :meth:`erase`). No rollback on a mid-bundle failure; the result
+        says where it stopped and the rebased snapshot shows the hub.
+        Cannot be cancelled.
+        """
+
+        if not isinstance(bundle, dict) or bundle.get("kind") != "hub_bundle":
+            raise ValueError("restore() takes a hub_bundle document")
+        self._raise_if_cannot_fetch("restore")
+        if replace:
+            await self.erase()
+        async with self._refresh_lock:
+            result = await self.run(
+                self._proxy.restore_hub_bundle,
+                bundle,
+                progress_callback=self._engine_progress(progress),
+            )
+        new_id = await self._rebase_after_write(None, force=True)
+        return RestoreResult.from_engine(result, snapshot_id=new_id)
+
+    # -- payloads (phase 3 plan, W3) ----------------------------------------
+
+    async def read_payload(
+        self, device_id: int, command_id: int, *, timeout: float = DEFAULT_FETCH_TIMEOUT
+    ) -> Optional[IrPayload]:
+        """Read one command's stored payload from the hub, None when it has none."""
+
+        dev_lo, cmd_lo = int(device_id) & 0xFF, int(command_id) & 0xFF
+        self._raise_if_cannot_fetch(f"payload:{dev_lo}:{cmd_lo}")
+        dump = await self.run(self._proxy.request_ir_command_dump, dev_lo, cmd_lo, timeout=timeout)
+        if dump is None:
+            raise FetchTimeoutError(f"the hub did not return the payload of {dev_lo}/{cmd_lo}")
+        normalized = normalize_dump_to_blobs(
+            dump, resolve_device_class=self._proxy._resolve_device_class, fallback_device_id=dev_lo
+        )
+        for command in (normalized or {}).get("commands") or []:
+            if int(command.get("command_id") or 0) & 0xFF != cmd_lo:
+                continue
+            body_hex = str(command.get("command_blob") or "").strip()
+            if len(bytes.fromhex(body_hex)) >= MIN_PAYLOAD_BYTES if body_hex else False:
+                return IrPayload.from_hex(body_hex)
+            return None
+        return None
+
+    async def play(self, payload: "IrPayload | bytes") -> None:
+        """Fire a payload from the hub's IR blaster once; nothing is saved."""
+
+        blob = payload.blob if isinstance(payload, IrPayload) else IrPayload.from_bytes(payload).blob
+        await self._write("play", self._proxy.play_ir_blob, blob)
+
+    async def learn_ir(self, *, timeout: float = DEFAULT_LEARN_TIMEOUT) -> IrPayload:
+        """Arm the hub's IR receiver and wait for one captured command.
+
+        Point the original remote at the hub and press the key. Returns
+        the captured :class:`IrPayload` (save it with
+        :meth:`IrPayload.to_command_row` and :meth:`sync_device`). Raises
+        :class:`IrLearnError` with the reason when nothing usable arrived;
+        :meth:`cancel_learn` ends the wait early from another task. The hub
+        itself leaves learn mode after about a minute or on any other
+        traffic, so keep the window short and the hub idle.
+        """
+
+        result = await self._write("learn_ir", self._proxy.ir_learn_command, timeout=timeout)
+        state = str(result.get("state") or "unknown")
+        if state != "learned":
+            raise IrLearnError(state)
+        payload_hex = result.get("payload_hex")
+        if not payload_hex:
+            raise IrLearnError("undecodable", "a capture arrived but no payload could be extracted")
+        return IrPayload.from_hex(str(payload_hex))
+
+    async def cancel_learn(self) -> bool:
+        """End an in-flight :meth:`learn_ir`; False when none is waiting."""
+
+        return bool(await self.run(self._proxy.cancel_ir_learn))
+
+    # -- snapshot / refresh / state document (phase 3 plan, W0) ------------
+
+    async def snapshot(self, *, _announce: bool = True) -> HubSnapshot:
+        """The hub's structural configuration as the cache holds it, no hub traffic.
+
+        Every device and activity in the catalog is projected, whether or
+        not its detail was ever fetched: :attr:`SnapshotEntity.complete`
+        and :attr:`SnapshotEntity.editable` say which ones a sync may use
+        as a baseline. Works in every mode, including observe mode and
+        before the hub has connected (an empty catalog then). Use
+        :meth:`refresh` to read from the hub.
+        """
+
+        snap = await self.run(self._project_snapshot)
+        if _announce:
+            self._last_snapshot_id = snap.snapshot_id
+        return snap
+
+    def _project_snapshot(self) -> HubSnapshot:
+        # Executor thread: pure state reads through the engine.
+        proxy = self._proxy
+        bundle = proxy.assemble_hub_bundle_from_state(include_unfetched=True) or {}
+        bundle.setdefault("devices", [])
+        bundle.setdefault("activities", [])
+        state = getattr(proxy, "state", None)
+        generation = int(getattr(state, "generation", 0) or 0)
+        devices = [_snapshot_entity("device", p) for p in bundle["devices"]]
+        activities = [_snapshot_entity("activity", p) for p in bundle["activities"]]
+        catalog_known = bool(getattr(proxy, "_devices_catalog_ready", True)) and bool(
+            getattr(proxy, "_activities_catalog_ready", True)
+        )
+        complete = catalog_known and all(e.complete for e in devices + activities)
+        bundle["complete"] = complete
+        return HubSnapshot(
+            snapshot_id=snapshot_content_id(bundle),
+            captured_at=str(bundle.get("captured_at") or _now_iso()),
+            engine_generation=generation,
+            complete=complete,
+            stale_risk=any(e.stale_risk for e in devices + activities),
+            hub=dict(bundle.get("hub") or {}),
+            devices=devices,
+            activities=activities,
+            bundle=bundle,
+        )
+
+    def _on_app_link_for_snapshot(self, connected: bool) -> None:
+        # Engine thread, possibly inside the transport's locks: only hop.
+        if not connected:
+            self._loop.call_soon_threadsafe(self._schedule_app_session_announce)
+
+    def _schedule_app_session_announce(self) -> None:
+        # Nobody has looked at the snapshot and nobody listens: skip the
+        # projection (the engine flags are set regardless).
+        if self._last_snapshot_id is None and not self._event_queues:
+            return
+        self._loop.create_task(self._announce_app_session_end())
+
+    async def _announce_app_session_end(self) -> None:
+        snap = await self.snapshot(_announce=False)
+        self._announce_snapshot(snap)
+
+    def _announce_snapshot(
+        self,
+        snap: HubSnapshot,
+        device_ids: tuple[int, ...] = (),
+        activity_ids: tuple[int, ...] = (),
+    ) -> None:
+        self._last_snapshot_id = snap.snapshot_id
+        self._ensure_event_listeners()
+        self._dispatch_event(
+            "snapshot_changed",
+            SnapshotChanged(
+                snapshot_id=snap.snapshot_id,
+                engine_generation=snap.engine_generation,
+                device_ids=tuple(device_ids),
+                activity_ids=tuple(activity_ids),
+                stale_risk=snap.stale_risk,
+            ),
+        )
+
+    async def refresh(
+        self,
+        *,
+        activity_id: Optional[int] = None,
+        device_id: Optional[int] = None,
+        progress: Optional[Callable] = None,
+        timeout: float = DEFAULT_FETCH_TIMEOUT,
+    ) -> HubSnapshot:
+        """Read structural detail from the hub and return the new snapshot.
+
+        The only structural hub read in the library, always at a
+        consumer's request. With ``device_id`` or ``activity_id`` one
+        entity is re-read (a few bursts). With neither, the whole hub is
+        re-read: both catalogs once, then every device and every activity
+        in turn, which takes minutes on a real hub; ``progress`` receives a
+        :class:`WriteProgress` per entity on the event loop, and
+        cancelling the awaiting task stops the read between entities (the
+        entity in flight completes). A second whole-hub call while one is
+        running joins it and returns the same snapshot. ``timeout`` bounds
+        each burst, not the whole operation.
+
+        Raises :class:`HubBusyError` in observe mode and
+        :class:`HubNotConnectedError` without a hub session. Ends with a
+        ``snapshot_changed`` event naming the entities read.
+        """
+
+        if activity_id is not None and device_id is not None:
+            raise ValueError("refresh() takes activity_id or device_id, not both")
+        if activity_id is None and device_id is None:
+            task = self._whole_refresh_task
+            if task is not None and not task.done():
+                return await asyncio.shield(task)
+            task = self._loop.create_task(self._refresh_whole(progress, timeout))
+            self._whole_refresh_task = task
+            try:
+                return await task
+            finally:
+                if self._whole_refresh_task is task:
+                    self._whole_refresh_task = None
+        return await self._refresh_one(
+            "device" if device_id is not None else "activity",
+            int(device_id if device_id is not None else activity_id) & 0xFF,
+            progress,
+            timeout,
+        )
+
+    async def _refresh_one(
+        self, kind: str, ent_lo: int, progress: Optional[Callable], timeout: float
+    ) -> HubSnapshot:
+        report = _ProgressReporter(self._loop, progress)
+        async with self._refresh_lock:
+            self._raise_if_cannot_fetch(f"{kind}:{ent_lo}")
+            report(phase=kind, message=f"Refreshing {kind} {ent_lo}…",
+                   completed_steps=0, total_steps=1, **{f"current_{kind}_id": ent_lo})
+            payload = await self._read_entity_detail(kind, ent_lo, timeout)
+            report(phase="finalizing", message=f"Refreshed {kind} {ent_lo}.",
+                   completed_steps=1, total_steps=1, **{f"current_{kind}_id": ent_lo})
+        if payload is None:
+            self._log_unknown_entity(kind, ent_lo)
+        snap = await self.snapshot(_announce=False)
+        self._announce_snapshot(
+            snap,
+            device_ids=(ent_lo,) if kind == "device" else (),
+            activity_ids=(ent_lo,) if kind == "activity" else (),
+        )
+        return snap
+
+    async def _refresh_whole(self, progress: Optional[Callable], timeout: float) -> HubSnapshot:
+        report = _ProgressReporter(self._loop, progress)
+        async with self._refresh_lock:
+            self._raise_if_cannot_fetch("refresh")
+            report(phase="preparing", message="Refreshing devices and activities from the hub…",
+                   completed_steps=0, total_steps=0)
+            catalog_timeout = max(timeout, 5.0)
+            await self.devices(refresh=True, timeout=catalog_timeout)
+            await self.activities(refresh=True, timeout=catalog_timeout)
+            device_ids = sorted(
+                int(i) & 0xFF for i in await self.run(self._proxy.get_known_device_ids)
+            )
+            activity_ids = sorted(
+                int(i) & 0xFF for i in await self.run(self._proxy.get_known_activity_ids)
+            )
+            total = len(device_ids) + len(activity_ids)
+            done = 0
+            for kind, ids in (("device", device_ids), ("activity", activity_ids)):
+                for ent_lo in ids:
+                    report(phase=kind, message=f"Refreshing {kind} {ent_lo}…",
+                           completed_steps=done, total_steps=total,
+                           **{f"current_{kind}_id": ent_lo})
+                    payload = await self._read_entity_detail(
+                        kind, ent_lo, timeout, refresh_catalog=False
+                    )
+                    if payload is None:
+                        self._log_unknown_entity(kind, ent_lo)
+                    done += 1
+            report(phase="finalizing", message="Finalizing snapshot…",
+                   completed_steps=done, total_steps=total)
+        snap = await self.snapshot(_announce=False)
+        self._announce_snapshot(snap, tuple(device_ids), tuple(activity_ids))
+        return snap
+
+    async def _read_entity_detail(
+        self, kind: str, ent_lo: int, timeout: float, *, refresh_catalog: bool = True
+    ) -> Any:
+        if kind == "device":
+            return await self.run(
+                self._proxy.backup_device,
+                ent_lo,
+                wait_timeout=timeout,
+                include_blobs=False,
+                refresh_catalog=refresh_catalog,
+            )
+        return await self.run(
+            self._proxy.backup_activity,
+            ent_lo,
+            wait_timeout=timeout,
+            refresh_catalog=refresh_catalog,
+        )
+
+    def _log_unknown_entity(self, kind: str, ent_lo: int) -> None:
+        log = getattr(self._proxy, "_log", None)
+        if log is not None:
+            log.info("[SNAPSHOT] %s %d disappeared from the catalog during refresh", kind, ent_lo)
+
+    async def export_state(self) -> dict[str, Any]:
+        """The engine's cache as an opaque, versioned JSON document.
+
+        Persist it (the library never touches disk) and hand it back to
+        :meth:`import_state` before :meth:`start` on the next run, so the
+        snapshot is complete without a hub read. The content is the
+        library's own and may change between versions; ``schema`` says
+        whether a given library can read it.
+        """
+
+        state = await self.run(self._proxy.export_cache_state)
+        return {
+            "kind": STATE_DOCUMENT_KIND,
+            "schema": STATE_DOCUMENT_SCHEMA,
+            "library": __version__,
+            "exported_at": _now_iso(),
+            "state": state,
+        }
+
+    async def import_state(self, document: dict[str, Any]) -> HubSnapshot:
+        """Load a document from :meth:`export_state` and return the snapshot.
+
+        Meant to run before :meth:`start`; the connect-time initial sync
+        then re-reads the catalogs on top of it. Raises
+        :class:`StateDocumentError` for a document this library cannot
+        read (the consumer keeps running with a cold cache).
+        """
+
+        if not isinstance(document, dict) or document.get("kind") != STATE_DOCUMENT_KIND:
+            raise StateDocumentError("not a sofabaton state document")
+        schema = document.get("schema")
+        if schema != STATE_DOCUMENT_SCHEMA:
+            raise StateDocumentError(
+                f"state document schema {schema!r} is not supported "
+                f"(this library reads schema {STATE_DOCUMENT_SCHEMA})"
+            )
+        state = document.get("state")
+        if not isinstance(state, dict):
+            raise StateDocumentError("state document carries no state")
+        await self.run(self._proxy.import_cache_state, state)
+        snap = await self.snapshot(_announce=False)
+        self._announce_snapshot(snap)
+        return snap
 
     def _marshal_optional(self, callback: Optional[Callable]) -> Optional[Callable]:
         if callback is None:
@@ -1443,13 +2129,14 @@ _R_SYNC = (
     "single-shot write primitive composed by sync_activity/sync_device "
     "(phase 1 plan, decision 2)"
 )
-_R_PHASE3 = "write operation parked for phase 3 (phase 1 plan, section 11)"
+_R_PHASE3 = "parked past phase 3 W3 (idle behaviour reads, favorites order, MQTT state)"
 _R_INTEGRATION = (
     "Home Assistant orchestration hosted in the library, not promoted "
     "(phase 1 plan, decision 3)"
 )
 _R_F2 = "superseded by phase 1 F2 status()/hub_info()"
-_R_F6 = "cache snapshot serializer; phase 1 F6 state document"
+_R_F6 = "erase epilogue behind erase_configuration; erase() intent is phase 3 W3"
+_R_P3_INTERNAL = "phase 3 engine bookkeeping behind snapshot()/refresh() (W0/W1)"
 _R_INTERNAL_READ = (
     "per-entity request/assembly internal behind the facade reads and backup_*"
 )
@@ -1534,11 +2221,6 @@ ENGINE_ONLY: dict[str, str] = {
     **_reasons(
         _R_PHASE3,
         (
-            "create_device",
-            "reorder_devices",
-            "set_ir_learn_mode",
-            "ir_learn_command",
-            "cancel_ir_learn",
             "get_idle_behavior",
             "fetch_idle_behavior",
             "request_idle_behavior",
@@ -1547,17 +2229,21 @@ ENGINE_ONLY: dict[str, str] = {
         ),
     ),
     **_reasons(
+        "learn-mode toggle composed by ir_learn_command (behind learn_ir)",
+        ("set_ir_learn_mode",),
+    ),
+    **_reasons(
         _R_INTEGRATION,
         ("create_wifi_device", "create_wifi_mqtt_device", "run_wifi_inplace_plan"),
     ),
     **_reasons(_R_F2, ("request_banner_info",)),
-    **_reasons(_R_F6, ("export_cache_state", "import_cache_state", "wipe_all_cached_state")),
+    **_reasons(_R_F6, ("wipe_all_cached_state",)),
+    **_reasons(_R_P3_INTERNAL, ("mark_detail_stale_risk",)),
     **_reasons(
         _R_INTERNAL_READ,
         (
             "assemble_activity_backup_from_state",
             "assemble_device_backup_from_state",
-            "assemble_hub_bundle_from_state",
             "clear_cached_entity_detail",
             "activities_referencing_device",
             "get_single_command_for_entity",

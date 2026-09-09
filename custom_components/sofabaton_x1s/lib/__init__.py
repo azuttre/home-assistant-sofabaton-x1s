@@ -106,7 +106,14 @@ from .models import (  # noqa: F401
     ConnectionState,
     EventKind,
     HubEvent,
+    HubSnapshot,
+    RestoreResult,
+    SnapshotChanged,
+    SnapshotEntity,
     StatusChanged,
+    SyncResult,
+    DeviceRemoved,
+    WriteProgress,
     Button,
     Command,
     Device,
@@ -117,7 +124,18 @@ from .models import (  # noqa: F401
     Macro,
     RunningActivity,
 )
-from .errors import FetchTimeoutError, HubBusyError, HubNotConnectedError  # noqa: F401
+from .errors import (  # noqa: F401
+    FetchTimeoutError,
+    HubBusyError,
+    HubNotConnectedError,
+    SnapshotIncompleteError,
+    SnapshotOutdatedError,
+    StateDocumentError,
+    HubRejectedError,
+    IrLearnError,
+)
+from .payloads import IrPayload  # noqa: F401
+from . import edits  # noqa: F401
 
 # Asyncio facade over the threaded core.
 from .aio import AsyncHubBrowser, AsyncXProxy, async_discover_hubs  # noqa: F401
@@ -198,6 +216,20 @@ _CURATED = [
     "FetchTimeoutError",
     "HubBusyError",
     "HubNotConnectedError",
+    "SnapshotIncompleteError",
+    "SnapshotOutdatedError",
+    "StateDocumentError",
+    "HubRejectedError",
+    "IrLearnError",
+    # snapshot and writes (phase 3)
+    "HubSnapshot",
+    "SnapshotEntity",
+    "WriteProgress",
+    "SyncResult",
+    "DeviceRemoved",
+    "RestoreResult",
+    "IrPayload",
+    "edits",
     # hub configuration record
     "ConfigSource",
     "HubConfig",
@@ -207,6 +239,7 @@ _CURATED = [
     "ConnectionState",
     "StatusChanged",
     "CatalogReady",
+    "SnapshotChanged",
     "HubEvent",
     # asyncio facade
     "AsyncHubBrowser",

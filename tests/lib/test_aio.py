@@ -42,6 +42,7 @@ _pkg = _load_lib()
 aio = importlib.import_module(f"{_pkg.__name__}.aio")
 x1_proxy_mod = importlib.import_module(f"{_pkg.__name__}.x1_proxy")
 protocol_const = importlib.import_module(f"{_pkg.__name__}.protocol_const")
+errors = importlib.import_module(f"{_pkg.__name__}.errors")
 
 
 class FakeProxy:
@@ -62,6 +63,10 @@ class FakeProxy:
             self.button_details: dict[int, dict] = {}
             self.current_activity: int | None = None
             self.activity_names: dict[int, str] = {}
+            # Snapshot provenance mirrors (phase 3 W0).
+            self.detail_fetched_at: dict[str, dict[int, str]] = {"device": {}, "activity": {}}
+            self.detail_stale_risk: dict[str, set[int]] = {"device": set(), "activity": set()}
+            self.generation = 0
 
         def get_activity_favorite_labels(self, act_lo):
             return list(self._p.favorite_labels.get(act_lo, []))
@@ -101,6 +106,217 @@ class FakeProxy:
         self.mdns_txt: dict[str, str] = {}
         self.hub_version = "X1"
         self.real_hub_ip = "1.2.3.4"
+        # Structural detail per entity (what a backup-grade fetch leaves
+        # behind): kind -> id -> list of binding rows. ``pending_detail`` is
+        # what the next backup_* call "reads from the hub".
+        self.detail: dict[str, dict[int, list]] = {"device": {}, "activity": {}}
+        self.pending_detail: dict[str, dict[int, list]] = {"device": {}, "activity": {}}
+        self.backup_calls: list[tuple[str, int, bool]] = []
+        self.write_calls: list = []
+        self.reject = False
+        self.payloads: dict[tuple[int, int], bytes] = {}
+        descriptor = b"P:NEC1 D:4 F:21"
+        descriptive = len(descriptor).to_bytes(2, "big") + bytes([0, 0, 0x11, 0, 0x94, 0x70]) + descriptor + bytes(4)
+        self.learn_result: dict = {"state": "learned", "payload_hex": descriptive.hex(" ")}
+
+    # -- snapshot / state document surface (phase 3 W0) -------------------
+    def bump_cache_generation(self) -> int:
+        self.state.generation += 1
+        return self.state.generation
+
+    def get_known_device_ids(self) -> set[int]:
+        return set((self._ready["devices"] or {}).keys())
+
+    def get_known_activity_ids(self) -> set[int]:
+        return set((self._ready["activities"] or {}).keys())
+
+    def _catalog(self, kind: str) -> dict:
+        return dict(self._ready["devices" if kind == "device" else "activities"] or {})
+
+    def _entity_payload(self, kind: str, ent: int) -> dict:
+        meta = self._catalog(kind).get(ent) or {}
+        fetched = self.detail[kind].get(ent)
+        block = {"device_id": ent, "name": meta.get("name")}
+        if kind == "activity":
+            block["entity_type"] = "activity"
+        payload = {
+            "kind": f"{kind}_backup",
+            "captured_at": "2026-01-01T00:00:00Z",
+            "complete": fetched is not None,
+            "payload_profile": "structural",
+            "device": block,
+            "button_bindings": list(fetched or []),
+        }
+        stamp = self.state.detail_fetched_at[kind].get(ent)
+        if stamp:
+            payload["fetched_at"] = stamp
+        payload["stale_risk"] = ent in self.state.detail_stale_risk[kind]
+        payload["editable"] = payload["complete"]
+        return payload
+
+    def assemble_hub_bundle_from_state(self, *, hub_info=None, include_unfetched=False):
+        if not include_unfetched and not any(self.state.detail_fetched_at.values()):
+            return None
+        devices = [self._entity_payload("device", i) for i in sorted(self._catalog("device"))]
+        activities = [self._entity_payload("activity", i) for i in sorted(self._catalog("activity"))]
+        return {
+            "kind": "hub_bundle",
+            "captured_at": "2026-01-01T00:00:00Z",
+            "complete": all(p["complete"] for p in devices + activities),
+            "payload_profile": "structural",
+            "hub": {"name": "Fake"},
+            "devices": devices,
+            "activities": activities,
+        }
+
+    def _backup(self, kind: str, ent: int, refresh_catalog: bool):
+        self.backup_calls.append((kind, ent, refresh_catalog))
+        if ent not in self._catalog(kind):
+            return None
+        self.detail[kind][ent] = list(self.pending_detail[kind].get(ent, []))
+        self.state.detail_fetched_at[kind][ent] = f"stamp-{len(self.backup_calls)}"
+        self.state.detail_stale_risk[kind].discard(ent)
+        self.bump_cache_generation()
+        return self._entity_payload(kind, ent)
+
+    def backup_device(self, device_id, *, wait_timeout=10.0, include_blobs=True,
+                      reuse_commands=False, refresh_catalog=True):
+        assert include_blobs is False, "refresh() must be structural"
+        return self._backup("device", device_id & 0xFF, refresh_catalog)
+
+    def backup_activity(self, activity_id, *, wait_timeout=10.0, refresh_catalog=True):
+        return self._backup("activity", activity_id & 0xFF, refresh_catalog)
+
+    def mark_detail_stale_risk(self, kind=None, ent_id=None) -> None:
+        kinds = ("device", "activity") if kind is None else (kind,)
+        for k in kinds:
+            if ent_id is None:
+                self.state.detail_stale_risk[k].update(self.state.detail_fetched_at[k])
+            else:
+                self.state.detail_stale_risk[k].add(ent_id & 0xFF)
+        self.bump_cache_generation()
+
+    def export_cache_state(self) -> dict:
+        import copy
+        return {
+            "catalog": copy.deepcopy(self._ready),
+            "detail": copy.deepcopy(self.detail),
+            "detail_fetched_at": copy.deepcopy(self.state.detail_fetched_at),
+            "detail_stale_risk": {k: sorted(v) for k, v in self.state.detail_stale_risk.items()},
+            "generation": self.state.generation,
+        }
+
+    # -- intents / payloads (phase 3 W3) ----------------------------------
+    # The fake's catalogs count as read unless a test says otherwise.
+    _devices_catalog_ready = True
+    _activities_catalog_ready = True
+
+    def create_device(self, name, *, device_class):
+        self.write_calls.append(("create_device", name, device_class))
+        if self.reject:
+            return None
+        new_id = max(self._catalog("device"), default=0) + 1
+        self._ready["devices"] = {**self._catalog("device"), new_id: {"name": name}}
+        return {"status": "success", "device_id": new_id}
+
+    def create_activity(self, name):
+        self.write_calls.append(("create_activity", name))
+        if self.reject:
+            return None
+        new_id = max(self._catalog("activity"), default=100) + 1
+        self._ready["activities"] = {**self._catalog("activity"), new_id: {"name": name}}
+        return {"status": "success", "activity_id": new_id}
+
+    def delete_device(self, device_id):
+        self.write_calls.append(("delete_device", device_id))
+        if self.reject:
+            return None
+        if device_id >= 101:
+            catalog = self._catalog("activity"); catalog.pop(device_id, None)
+            self._ready["activities"] = catalog
+            self.detail["activity"].pop(device_id, None)
+            return {"status": "success", "device_id": device_id, "confirmed_activities": [], "impacted_activities": []}
+        catalog = self._catalog("device"); catalog.pop(device_id, None)
+        self._ready["devices"] = catalog
+        self.detail["device"].pop(device_id, None)
+        self.detail["activity"].pop(101, None)   # the hub rewrote it; detail dropped
+        return {"status": "success", "device_id": device_id,
+                "confirmed_activities": [101], "impacted_activities": [101]}
+
+    def reorder_devices(self, ordered_ids):
+        self.write_calls.append(("reorder_devices", list(ordered_ids)))
+        return None if self.reject else {"status": "success", "ordered_ids": list(ordered_ids)}
+
+    def reorder_activities(self, ordered_ids):
+        self.write_calls.append(("reorder_activities", list(ordered_ids)))
+        return None if self.reject else {"status": "success", "ordered_ids": list(ordered_ids)}
+
+    def set_hub_name(self, name, *, timeout=5.0):
+        self.write_calls.append(("set_hub_name", name))
+        return not self.reject
+
+    def erase_configuration(self, *, timeout=120.0, settle_seconds=2.0):
+        self.write_calls.append(("erase",))
+        if self.reject:
+            return False
+        self._ready["devices"] = {}; self._ready["activities"] = {}
+        self.detail = {"device": {}, "activity": {}}
+        return True
+
+    def backup_hub_bundle(self, *, include_blobs=True, wait_timeout=10.0, progress=None, device_ids=None, hub_info=None):
+        self.write_calls.append(("backup", include_blobs))
+        if progress is not None:
+            progress(status="running", phase="device", message="Backing up device 5…",
+                     completed_steps=0, total_steps=1, current_device_id=5)
+        for dev in self._catalog("device"):
+            self._backup("device", dev, False)
+        return {"kind": "hub_bundle", "payload_profile": "full_backup" if include_blobs else "structural",
+                "devices": [], "activities": []}
+
+    def restore_hub_bundle(self, payload, *, progress_callback=None, **kwargs):
+        self.write_calls.append(("restore", payload.get("tag")))
+        if progress_callback is not None:
+            progress_callback(status="running", phase="device", message="Restoring…",
+                              completed_steps=0, total_steps=2)
+        if self.reject:
+            return {"status": "failed", "failed_at": ["device", 3], "device_id_map": {"3": 9},
+                    "restored_devices": 0, "restored_activities": 0}
+        self._ready["devices"] = {**self._catalog("device"), 9: {"name": "Restored"}}
+        return {"status": "success", "device_id_map": {"3": 9},
+                "restored_devices": 1, "restored_activities": 1}
+
+    def request_ir_command_dump(self, device_id, command_id=None, *, timeout=10.0):
+        self.write_calls.append(("dump", device_id, command_id))
+        blob = self.payloads.get((device_id, command_id))
+        if blob is None:
+            return {"complete": True, "commands": []}
+        # The engine's dump row: blob hex INCLUDING the replay-tail byte.
+        return {"complete": True, "commands": [
+            {"command_id": command_id, "device_id": device_id, "ir_blob_hex": (blob + b"\x5a").hex()}
+        ]}
+
+    def _resolve_device_class(self, device_id):
+        return "ir"
+
+    def play_ir_blob(self, blob, **kwargs):
+        self.write_calls.append(("play", bytes(blob)))
+        return not self.reject
+
+    def ir_learn_command(self, *, timeout=60.0, ack_timeout=2.0):
+        self.write_calls.append(("learn", timeout))
+        return self.learn_result
+
+    def cancel_ir_learn(self):
+        return True
+
+    def import_cache_state(self, payload: dict) -> None:
+        import copy
+        self._ready = copy.deepcopy(payload["catalog"])
+        self.detail = copy.deepcopy(payload["detail"])
+        self.state.detail_fetched_at = copy.deepcopy(payload["detail_fetched_at"])
+        self.state.detail_stale_risk = {k: set(v) for k, v in payload["detail_stale_risk"].items()}
+        self.state.generation = max(self.state.generation, int(payload["generation"]))
+        self.bump_cache_generation()
 
     # -- listener registration ------------------------------------------
     def on_hub_state_change(self, cb) -> None:
@@ -131,6 +347,8 @@ class FakeProxy:
             cb()
 
     def set_connected(self, *, hub: bool, client: bool = False) -> None:
+        if self.transport.is_client_connected and not client:
+            self.mark_detail_stale_risk()  # the engine's W1 transition flag
         self.transport.is_hub_connected = hub
         self.transport.is_client_connected = client
         self.can_issue = hub and not client
@@ -629,24 +847,26 @@ def test_delegated_method_runs_in_executor() -> None:
     async def main():
         call_thread = {}
 
-        # delete_device is a delegated PROXY_METHODS name.
+        # restore_device is a delegated PROXY_METHODS name.
         class WithProvision(FakeProxy):
-            def delete_device(self, *args, **kwargs):
+            def restore_device(self, *args, **kwargs):
                 call_thread["t"] = threading.get_ident()
                 return {"ok": True}
 
         proxy = _wrap(WithProvision())
-        assert await proxy.delete_device(5) == {"ok": True}
+        assert await proxy.restore_device({}) == {"ok": True}
         assert call_thread["t"] != threading.get_ident()
 
     asyncio.run(main())
 
 
 def test_cache_snapshot_serializers_are_not_on_facade() -> None:
-    # Cache-snapshot (de)serialization is intentionally off the public
-    # async surface; only reachable through .sync.
+    # The engine's raw (de)serializers stay off the public async surface;
+    # the typed state document (export_state / import_state) is the
+    # facade's face for them (phase 3 W0).
     async def main():
         proxy = _wrap(FakeProxy())
+        assert callable(proxy.export_state) and callable(proxy.import_state)
         for name in ("export_cache_state", "import_cache_state", "clear_cached_entity_detail"):
             assert name not in aio.AsyncXProxy.PROXY_METHODS
             try:
@@ -681,22 +901,26 @@ def test_live_edit_sync_runs_in_executor_with_loop_progress() -> None:
 
         proxy = _wrap(WithSync())
         loop_thread = threading.get_ident()
+        seen: list = []
 
-        def on_progress(**payload) -> None:
+        def on_progress(report) -> None:
             progress_threads.append(threading.get_ident())
+            seen.append(report)
             done.set()
 
         result = await proxy.sync_activity(
-            baseline={}, edited={}, activity_id=0x65, progress_callback=on_progress
+            baseline={}, edited={}, activity_id=0x65, progress=on_progress
         )
-        assert result["status"] == "success"
+        assert isinstance(result, models.SyncResult) and result.ok
+        assert result.completed_steps == 1 and result.snapshot_id
         assert call_threads["activity"] != loop_thread
 
         await asyncio.wait_for(done.wait(), 5)
         assert progress_threads == [loop_thread]
+        assert isinstance(seen[0], models.WriteProgress) and seen[0].phase == "writing"
 
         result = await proxy.sync_device(baseline={}, edited={}, device_id=3)
-        assert result == {"status": "success", "completed_steps": 0, "total_steps": 0}
+        assert result.to_dict()["status"] == "success" and result.total_steps == 0
         assert call_threads["device"] != loop_thread
 
     asyncio.run(main())
@@ -1001,6 +1225,19 @@ def test_activities_carry_flags_and_sort_by_id() -> None:
 # ---------------------------------------------------------------------------
 # event stream (phase 1 F5)
 # ---------------------------------------------------------------------------
+
+
+async def _collect_until(proxy, kind, *, timeout=2.0):
+    """Events up to and including the first one of ``kind``."""
+
+    out = []
+    agen = proxy.events()
+    try:
+        while not out or out[-1].kind != kind:
+            out.append(await asyncio.wait_for(agen.__anext__(), timeout))
+    finally:
+        await agen.aclose()
+    return out
 
 
 async def _collect(proxy, n, *, maxsize=256, timeout=2.0):
@@ -1330,5 +1567,621 @@ def test_refused_refresh_raises_and_keeps_the_cached_catalog() -> None:
             pass
         else:
             raise AssertionError("expected HubNotConnectedError")
+
+    asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
+# snapshot / refresh / state document (phase 3 plan, W0)
+# ---------------------------------------------------------------------------
+
+
+def _catalog_fake(*, fetched_devices=(), fetched_activities=()) -> FakeProxy:
+    """Two devices, one activity in the catalog; optionally some fetched."""
+
+    fake = FakeProxy()
+    fake._ready["devices"] = {5: {"name": "TV"}, 7: {"name": "Amp"}}
+    fake._ready["activities"] = {101: {"name": "Watch TV"}}
+    fake.pending_detail["device"] = {5: [{"button_id": 1}], 7: []}
+    fake.pending_detail["activity"] = {101: [{"button_id": 2}]}
+    for dev in fetched_devices:
+        fake._backup("device", dev, True)
+    for act in fetched_activities:
+        fake._backup("activity", act, True)
+    fake.backup_calls.clear()
+    return fake
+
+
+def test_snapshot_projects_without_fetch_and_reports_incomplete() -> None:
+    async def main():
+        fake = _catalog_fake(fetched_devices=(5,))
+        proxy = _wrap(fake)
+        snap = await proxy.snapshot()
+        assert fake.fetch_calls == [] and fake.backup_calls == []
+        assert isinstance(snap, models.HubSnapshot)
+        assert [e.entity_id for e in snap.devices] == [5, 7]
+        assert [e.entity_id for e in snap.activities] == [101]
+        tv, amp = snap.devices
+        assert tv.complete and tv.editable and tv.fetched_at and not tv.stale_risk
+        assert not amp.complete and not amp.editable and amp.fetched_at is None
+        assert snap.complete is False and snap.stale_risk is False
+        assert snap.entity("device", 7) is amp and snap.entity("activity", 1) is None
+        doc = snap.to_dict()
+        assert doc["snapshot_id"] == snap.snapshot_id and len(snap.snapshot_id) == 64
+        assert doc["devices"][0]["editable"] is True and doc["complete"] is False
+        assert snap.bundle["payload_profile"] == "structural"
+        # Observe mode projects the same: no HubBusyError for a cache read.
+        fake.set_connected(hub=True, client=True)
+        assert (await proxy.snapshot()).snapshot_id == snap.snapshot_id
+
+    asyncio.run(main())
+
+
+def test_snapshot_id_is_content_only() -> None:
+    async def main():
+        fake = _catalog_fake(fetched_devices=(5, 7), fetched_activities=(101,))
+        proxy = _wrap(fake)
+        base = (await proxy.snapshot()).snapshot_id
+        # Provenance never moves the id: a new fetch stamp, a stale flag.
+        fake.state.detail_fetched_at["device"][5] = "later"
+        fake.mark_detail_stale_risk()
+        again = await proxy.snapshot()
+        assert again.snapshot_id == base and again.stale_risk is True
+        assert again.entity("device", 5).stale_risk is True
+        # Content does: a binding appears on a device.
+        fake.detail["device"][7] = [{"button_id": 9}]
+        assert (await proxy.snapshot()).snapshot_id != base
+
+    asyncio.run(main())
+
+
+def test_refresh_whole_reads_catalogs_once_then_every_entity() -> None:
+    async def main():
+        fake = _catalog_fake()
+        proxy = _wrap(fake)
+        progress: list = []
+
+        async def run():
+            return await proxy.refresh(progress=progress.append)
+
+        task = asyncio.ensure_future(run())
+        await asyncio.sleep(0.02)
+        assert fake.fetch_calls == [("devices", None)]
+        _land(fake, "devices", {5: {"name": "TV"}, 7: {"name": "Amp"}})
+        await asyncio.sleep(0.02)
+        _land(fake, "activities", {101: {"name": "Watch TV"}})
+        snap = await asyncio.wait_for(task, 2)
+
+        # One catalog read each, then every entity WITHOUT its own catalog read.
+        assert fake.fetch_calls == [("devices", None), ("activities", None)]
+        assert fake.backup_calls == [
+            ("device", 5, False), ("device", 7, False), ("activity", 101, False),
+        ]
+        assert snap.complete and all(e.editable for e in snap.devices + snap.activities)
+        assert [p.phase for p in progress] == ["preparing", "device", "device", "activity", "finalizing"]
+        assert all(isinstance(p, models.WriteProgress) for p in progress)
+        assert (progress[1].entity_kind, progress[1].entity_id, progress[1].total_steps) == ("device", 5, 3)
+        assert progress[-1].completed_steps == 3
+
+    asyncio.run(main())
+
+
+def test_refresh_emits_snapshot_changed_with_touched_ids() -> None:
+    async def main():
+        fake = _catalog_fake(fetched_devices=(5, 7), fetched_activities=(101,))
+        proxy = _wrap(fake)
+        before = await proxy.snapshot()
+        fake.pending_detail["activity"][101] = [{"button_id": 3}]  # hub changed
+
+        async def fire():
+            await asyncio.sleep(0.01)
+            await proxy.refresh(activity_id=101)
+
+        asyncio.ensure_future(fire())
+        (event,) = await _collect(proxy, 1)
+        assert event.kind == "snapshot_changed"
+        assert event.payload.activity_ids == (101,) and event.payload.device_ids == ()
+        assert event.payload.snapshot_id != before.snapshot_id
+        assert event.to_dict()["payload"]["engine_generation"] == fake.state.generation
+        # Only the asked entity was read, with its own catalog read.
+        assert fake.backup_calls == [("activity", 101, True)]
+
+    asyncio.run(main())
+
+
+def test_refresh_refused_in_observe_mode_without_hub_traffic() -> None:
+    async def main():
+        fake = _catalog_fake()
+        fake.set_connected(hub=True, client=True)
+        proxy = _wrap(fake)
+        for kwargs in ({}, {"device_id": 5}):
+            try:
+                await proxy.refresh(**kwargs)
+            except errors.HubBusyError:
+                pass
+            else:
+                raise AssertionError("refresh must be refused in observe mode")
+        assert fake.backup_calls == [] and fake.fetch_calls == []
+        try:
+            await proxy.refresh(device_id=5, activity_id=101)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("one entity at a time")
+
+    asyncio.run(main())
+
+
+def test_refresh_concurrent_whole_calls_join_one_read() -> None:
+    async def main():
+        fake = _catalog_fake()
+        proxy = _wrap(fake)
+
+        async def drive():
+            await asyncio.sleep(0.02)
+            _land(fake, "devices", {5: {"name": "TV"}, 7: {"name": "Amp"}})
+            await asyncio.sleep(0.02)
+            _land(fake, "activities", {101: {"name": "Watch TV"}})
+
+        asyncio.ensure_future(drive())
+        first, second = await asyncio.wait_for(
+            asyncio.gather(proxy.refresh(), proxy.refresh()), 2
+        )
+        assert first.snapshot_id == second.snapshot_id
+        assert fake.fetch_calls == [("devices", None), ("activities", None)]
+        assert len(fake.backup_calls) == 3
+
+    asyncio.run(main())
+
+
+def test_refresh_cancel_stops_between_entities() -> None:
+    async def main():
+        gate = threading.Event()
+        started = threading.Event()
+
+        class Slow(FakeProxy):
+            def backup_device(self, device_id, **kwargs):
+                started.set()
+                gate.wait(5)
+                return super().backup_device(device_id, **kwargs)
+
+        fake = Slow()
+        fake._ready["devices"] = {5: {"name": "TV"}, 7: {"name": "Amp"}}
+        fake._ready["activities"] = {}
+        proxy = _wrap(fake)
+
+        task = asyncio.ensure_future(proxy.refresh())
+        await asyncio.sleep(0.02)
+        _land(fake, "devices", {5: {"name": "TV"}, 7: {"name": "Amp"}})
+        await asyncio.sleep(0.02)
+        _land(fake, "activities", {})
+        await asyncio.get_running_loop().run_in_executor(None, started.wait, 2)
+        task.cancel()
+        gate.set()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        await asyncio.sleep(0.05)
+        # The entity in flight completed; the next one never started.
+        assert [c[1] for c in fake.backup_calls] == [5]
+        assert proxy._whole_refresh_task is None
+        # The facade is usable again afterwards.
+        snap = await proxy.snapshot()
+        assert snap.entity("device", 5).complete and not snap.entity("device", 7).complete
+
+    asyncio.run(main())
+
+
+def test_export_import_state_round_trip_keeps_id_and_flags() -> None:
+    async def main():
+        source = _catalog_fake(fetched_devices=(5, 7), fetched_activities=(101,))
+        source.mark_detail_stale_risk("device", 7)
+        src = _wrap(source)
+        origin = await src.snapshot()
+        doc = await src.export_state()
+        assert doc["kind"] == "sofabaton_state" and doc["schema"] == 1
+        assert doc["library"] == _pkg.__version__ and isinstance(doc["state"], dict)
+
+        target = FakeProxy()
+        dst = _wrap(target)
+        assert (await dst.snapshot()).devices == []
+
+        async def fire():
+            await asyncio.sleep(0.01)
+            await dst.import_state(doc)
+
+        asyncio.ensure_future(fire())
+        (event,) = await _collect(dst, 1)
+        assert event.kind == "snapshot_changed" and event.payload.device_ids == ()
+        restored = await dst.snapshot()
+        assert restored.snapshot_id == origin.snapshot_id
+        assert restored.complete and restored.entity("device", 7).stale_risk
+        assert restored.engine_generation > origin.engine_generation
+        assert target.fetch_calls == [] and target.backup_calls == []
+
+        for bad in ({}, {"kind": "sofabaton_state", "schema": 99, "state": {}},
+                    {"kind": "sofabaton_state", "schema": 1}):
+            try:
+                await dst.import_state(bad)
+            except errors.StateDocumentError:
+                pass
+            else:
+                raise AssertionError(f"{bad!r} must be rejected")
+
+    asyncio.run(main())
+
+
+def test_sync_guards_snapshot_id_and_editable_baseline_then_rebases() -> None:
+    async def main():
+        calls: list = []
+
+        class WithSync(FakeProxy):
+            def sync_activity(self, *, baseline, edited, activity_id, progress_callback=None):
+                calls.append(activity_id)
+                self.detail["activity"][activity_id] = [{"button_id": 42}]  # hub moved
+                return {"status": "success", "completed_steps": 1, "total_steps": 1}
+
+            def sync_device(self, *, baseline, edited, device_id, progress_callback=None):
+                calls.append(device_id)
+                return {"status": "failed", "failed_at": "stale_check", "message": "changed"}
+
+        fake = WithSync()
+        fake._ready["devices"] = {5: {"name": "TV"}, 7: {"name": "Amp"}}
+        fake._ready["activities"] = {101: {"name": "Watch TV"}}
+        fake._backup("device", 5, True)
+        fake._backup("activity", 101, True)
+        proxy = _wrap(fake)
+        snap = await proxy.snapshot()
+
+        # Wrong snapshot id: refused before the engine, no hub traffic.
+        try:
+            await proxy.sync_activity(baseline=snap.bundle, edited=snap.bundle,
+                                      activity_id=101, snapshot_id="stale")
+        except errors.SnapshotOutdatedError:
+            pass
+        else:
+            raise AssertionError("outdated snapshot must be refused")
+        # Device 7 was never fetched: not editable.
+        try:
+            await proxy.sync_device(baseline=snap.bundle, edited=snap.bundle,
+                                    device_id=7, snapshot_id=snap.snapshot_id)
+        except errors.SnapshotIncompleteError:
+            pass
+        else:
+            raise AssertionError("incomplete baseline must be refused")
+        assert calls == []
+
+        # A pre-write failure (stale preflight) rebases nothing and emits nothing.
+        result = await proxy.sync_device(baseline=snap.bundle, edited=snap.bundle,
+                                         device_id=5, snapshot_id=snap.snapshot_id)
+        assert result.failed_at == "stale_check" and result.wrote_nothing and calls == [5]
+        assert result.snapshot_id == snap.snapshot_id
+        assert (await proxy.snapshot()).snapshot_id == snap.snapshot_id
+
+        # A real write rebases: the projection moves and an event says so.
+        async def fire():
+            await asyncio.sleep(0.01)
+            await proxy.sync_activity(baseline=snap.bundle, edited=snap.bundle,
+                                      activity_id=101, snapshot_id=snap.snapshot_id)
+
+        asyncio.ensure_future(fire())
+        (event,) = await _collect(proxy, 1)
+        assert event.kind == "snapshot_changed" and event.payload.activity_ids == (101,)
+        assert event.payload.snapshot_id != snap.snapshot_id
+        assert (await proxy.snapshot()).snapshot_id == event.payload.snapshot_id
+
+    asyncio.run(main())
+
+
+def test_app_session_end_flags_cache_and_announces_without_fetch() -> None:
+    async def main():
+        fake = _catalog_fake(fetched_devices=(5, 7), fetched_activities=(101,))
+        proxy = _wrap(fake)
+        before = await proxy.snapshot()
+        assert before.stale_risk is False
+
+        async def session():
+            await asyncio.sleep(0.01)
+            fake.set_connected(hub=True, client=True)   # app attaches
+            await asyncio.sleep(0.01)
+            fake.set_connected(hub=True, client=False)  # app leaves
+
+        asyncio.ensure_future(session())
+        events = await _collect_until(proxy, "snapshot_changed")
+        kinds = [e.kind for e in events]
+        assert kinds.count("snapshot_changed") == 1 and "app_state" in kinds
+        changed = events[-1]
+        assert changed.payload.stale_risk is True
+        assert changed.payload.device_ids == () and changed.payload.activity_ids == ()
+        # Content did not move: same id, only provenance changed.
+        assert changed.payload.snapshot_id == before.snapshot_id
+        after = await proxy.snapshot()
+        assert after.stale_risk and all(e.stale_risk for e in after.devices + after.activities)
+        assert after.complete and after.entity("device", 5).editable  # detail kept
+        assert fake.fetch_calls == [] and fake.backup_calls == []
+
+        # A refresh of one entity clears its flag and announces again.
+        async def fire():
+            await asyncio.sleep(0.01)
+            await proxy.refresh(device_id=5)
+
+        asyncio.ensure_future(fire())
+        (event,) = await _collect(proxy, 1)
+        assert event.kind == "snapshot_changed" and event.payload.device_ids == (5,)
+        latest = await proxy.snapshot()
+        assert not latest.entity("device", 5).stale_risk and latest.entity("device", 7).stale_risk
+
+    asyncio.run(main())
+
+
+def test_app_session_end_skips_projection_when_nobody_listens() -> None:
+    async def main():
+        calls = []
+
+        class Counting(FakeProxy):
+            def assemble_hub_bundle_from_state(self, **kwargs):
+                calls.append(1)
+                return super().assemble_hub_bundle_from_state(**kwargs)
+
+        fake = Counting()
+        proxy = _wrap(fake)
+        fake.set_connected(hub=True, client=True)
+        fake.set_connected(hub=True, client=False)
+        await asyncio.sleep(0.05)
+        assert calls == []  # no snapshot taken, no consumer: nothing projected
+        assert proxy._last_snapshot_id is None
+
+    asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
+# intents and payloads (phase 3 plan, W3)
+# ---------------------------------------------------------------------------
+
+
+def _write_fake() -> FakeProxy:
+    fake = _catalog_fake(fetched_devices=(5, 7), fetched_activities=(101,))
+    fake._devices_catalog_ready = True
+    fake._activities_catalog_ready = True
+    return fake
+
+
+def test_intents_are_refused_in_observe_mode_without_engine_calls() -> None:
+    async def main():
+        fake = _write_fake()
+        fake.set_connected(hub=True, client=True)
+        proxy = _wrap(fake)
+        attempts = [
+            proxy.sync_activity(baseline={}, edited={}, activity_id=101),
+            proxy.sync_device(baseline={}, edited={}, device_id=5),
+            proxy.add_device("Lamp", "ir"), proxy.add_activity("Read"),
+            proxy.remove_device(5), proxy.remove_activity(101), proxy.reorder_devices([7, 5]),
+            proxy.reorder_activities([101]), proxy.set_hub_name("Den"), proxy.erase(),
+            proxy.backup(), proxy.restore({"kind": "hub_bundle"}),
+            proxy.read_payload(5, 1), proxy.play(bytes(16)), proxy.learn_ir(),
+        ]
+        for coro in attempts:
+            try:
+                await coro
+            except errors.HubBusyError:
+                pass
+            else:
+                raise AssertionError("must be refused in observe mode")
+        assert fake.write_calls == []
+
+    asyncio.run(main())
+
+
+def test_intents_raise_typed_rejection_and_validate_inputs() -> None:
+    async def main():
+        fake = _write_fake()
+        fake.reject = True
+        proxy = _wrap(fake)
+        for coro in (proxy.add_device("Lamp", "ir"), proxy.remove_device(5),
+                     proxy.set_hub_name("Den"), proxy.erase(), proxy.play(bytes(16))):
+            try:
+                await coro
+            except errors.HubRejectedError:
+                pass
+            else:
+                raise AssertionError("engine refusal must raise HubRejectedError")
+        # Input validation happens before the engine is touched.
+        fake.write_calls.clear()
+        for coro in (proxy.add_device("   ", "ir"), proxy.add_device("Lamp", "tv"), proxy.add_activity(""), proxy.set_hub_name(""),
+                     proxy.reorder_devices([5, 5, 7]), proxy.reorder_devices([5]),
+                     proxy.reorder_activities([101, 7]), proxy.restore({"kind": "nope"})):
+            try:
+                await coro
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("bad input must raise ValueError")
+        assert fake.write_calls == []
+
+    asyncio.run(main())
+
+
+def test_add_and_remove_device_rebase_and_announce() -> None:
+    async def main():
+        fake = _write_fake()
+        proxy = _wrap(fake)
+        before = await proxy.snapshot()
+
+        async def fire():
+            await asyncio.sleep(0.01)
+            new_id = await proxy.add_device("Lamp", "ir")
+            assert new_id == 8
+            removed = await proxy.remove_device(5)
+            assert removed == models.DeviceRemoved(device_id=5, confirmed_activity_ids=(101,), impacted_activity_ids=(101,))
+            await proxy.remove_activity(101)
+
+        asyncio.ensure_future(fire())
+        added, removed_ev, act_removed = await _collect(proxy, 3)
+        assert added.kind == "snapshot_changed" and added.payload.device_ids == (8,)
+        assert removed_ev.payload.device_ids == (5,) and removed_ev.payload.activity_ids == (101,)
+        assert act_removed.payload.activity_ids == (101,) and act_removed.payload.device_ids == ()
+        assert fake.write_calls == [("create_device", "Lamp", "ir"), ("delete_device", 5), ("delete_device", 101)]
+        try:
+            await proxy.remove_activity(5)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a device id is not an activity")
+        after = await proxy.snapshot()
+        assert after.snapshot_id != before.snapshot_id
+        assert [e.entity_id for e in after.devices] == [7, 8]
+        assert not after.entity("device", 8).editable          # new: never fetched
+        assert after.entity("activity", 101) is None           # removed
+
+    asyncio.run(main())
+
+
+def test_reorder_rename_erase_go_through_the_engine_and_announce() -> None:
+    async def main():
+        fake = _write_fake()
+        proxy = _wrap(fake)
+        events = []
+
+        async def consume():
+            async for event in proxy.events():
+                if event.kind == "snapshot_changed":
+                    events.append(event)
+                    if len(events) == 4:
+                        return
+
+        task = asyncio.ensure_future(consume())
+        await asyncio.sleep(0.01)
+        await proxy.reorder_devices([7, 5])
+        await proxy.reorder_activities([101])
+        await proxy.set_hub_name("Den")
+        await proxy.erase()
+        await asyncio.wait_for(task, 2)
+        assert fake.write_calls == [("reorder_devices", [7, 5]), ("reorder_activities", [101]),
+                                    ("set_hub_name", "Den"), ("erase",)]
+        assert events[0].payload.device_ids == (7, 5) and events[1].payload.activity_ids == (101,)
+        assert (await proxy.snapshot()).devices == []
+
+    asyncio.run(main())
+
+
+def test_backup_and_restore_typed_results_and_replace() -> None:
+    async def main():
+        fake = _write_fake()
+        proxy = _wrap(fake)
+        progress: list = []
+        bundle = await proxy.backup(progress=progress.append)
+        assert bundle["payload_profile"] == "full_backup"
+        assert progress and isinstance(progress[0], models.WriteProgress)
+        assert (progress[0].entity_kind, progress[0].entity_id) == ("device", 5)
+
+        result = await proxy.restore({"kind": "hub_bundle", "tag": "a"}, replace=True, progress=progress.append)
+        assert isinstance(result, models.RestoreResult) and result.ok
+        assert result.device_id_map == {3: 9} and result.restored_devices == 1
+        assert result.snapshot_id == (await proxy.snapshot()).snapshot_id
+        # replace=True erased first, then restored.
+        kinds = [c[0] for c in fake.write_calls]
+        assert kinds == ["backup", "erase", "restore"]
+
+        fake.reject = True
+        failed = await proxy.restore({"kind": "hub_bundle", "tag": "b"})
+        assert not failed.ok and failed.failed_at == ("device", 3)
+        assert failed.to_dict()["failed_at"] == ["device", 3]
+
+    asyncio.run(main())
+
+
+def test_payload_read_play_and_learn() -> None:
+    async def main():
+        fake = _write_fake()
+        raw = _pkg.IrPayload.from_raw_timings([9000, 4500, 560, 560], 38000)
+        fake.payloads[(5, 2)] = raw.blob
+        proxy = _wrap(fake)
+
+        got = await proxy.read_payload(5, 2)
+        assert got == raw and got.kind == "raw" and got.carrier_hz == 38000
+        assert await proxy.read_payload(5, 3) is None
+        assert fake.write_calls[:2] == [("dump", 5, 2), ("dump", 5, 3)]
+
+        await proxy.play(got)
+        await proxy.play(got.blob)
+        assert fake.write_calls[-2:] == [("play", raw.blob), ("play", raw.blob)]
+
+        learned = await proxy.learn_ir(timeout=12)
+        assert isinstance(learned, _pkg.IrPayload) and learned.kind == "descriptive"
+        assert fake.write_calls[-1] == ("learn", 12)
+
+        fake.learn_result = {"state": "timed_out", "timeout_s": 12}
+        try:
+            await proxy.learn_ir()
+        except errors.IrLearnError as err:
+            assert err.state == "timed_out"
+        else:
+            raise AssertionError("a timed-out learn must raise")
+        fake.learn_result = {"state": "learned", "payload_hex": None}
+        try:
+            await proxy.learn_ir()
+        except errors.IrLearnError as err:
+            assert err.state == "undecodable"
+        assert await proxy.cancel_learn() is True
+
+    asyncio.run(main())
+
+
+def test_ir_payload_constructors_and_command_row() -> None:
+    pronto = _pkg.IrPayload.from_pronto("0000 006D 0002 0000 0158 00AB 0016 0016")
+    assert pronto.kind == "raw" and pronto.descriptor is None
+    assert 38000 <= pronto.carrier_hz <= 38100   # 0x006D pronto frequency word
+    raw = _pkg.IrPayload.from_raw_timings([9000, 4500, 560, 560], 38000)
+    assert raw.kind == "raw" and raw.carrier_hz == 38000
+    assert _pkg.IrPayload.from_hex(raw.hex) == raw == _pkg.IrPayload.from_bytes(raw.blob)
+    assert _pkg.IrPayload.from_hex("0x" + raw.blob.hex()) == raw
+
+    desc = _pkg.IrPayload.from_descriptor("P:NEC1 D:4 S:5 F:21")
+    assert desc.kind == "descriptive" and desc.descriptor == "P:NEC1 D:4 S:5 F:21"
+    assert desc.carrier_hz is None
+    row = desc.to_command_row(9, " Power ")
+    assert row["command_id"] == 9 and row["name"] == "Power"
+    assert row["restore_data"]["new"] is True and row["restore_data"]["library_type"] == 0x0D
+    assert row["restore_data"]["decoded"] == {"class": "ir", "fields": {"descriptor": "P:NEC1 D:4 S:5 F:21"}}
+    assert bytes.fromhex(row["restore_data"]["data_hex"]) == desc.blob
+    assert "decoded" not in raw.to_command_row(3, "")["restore_data"]
+    assert raw.to_command_row(3, "")["name"] == "Command 3"
+    assert desc.to_dict()["kind"] == "descriptive"
+
+    for bad in (b"", bytes(9)):
+        try:
+            _pkg.IrPayload.from_bytes(bad)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("short payloads are refused")
+    try:
+        _pkg.IrPayload.from_hex("zz")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("bad hex is refused")
+
+
+def test_sync_progress_is_typed_write_progress_with_entity() -> None:
+    async def main():
+        class WithSync(FakeProxy):
+            def sync_device(self, *, baseline, edited, device_id, progress_callback=None):
+                progress_callback(phase="stale_check", message="Checking…", completed_steps=0,
+                                  total_steps=2, current_device_id=device_id)
+                progress_callback(phase="writing", message="Renaming", step_kind="device_rename",
+                                  completed_steps=1, total_steps=2, current_device_id=device_id)
+                return {"status": "failed", "failed_at": "device_rename (device 5)",
+                        "message": "The hub rejected", "completed_steps": 1, "total_steps": 2}
+
+        fake = WithSync()
+        proxy = _wrap(fake)
+        seen: list = []
+        result = await proxy.sync_device(baseline={}, edited={}, device_id=5, progress=seen.append)
+        await asyncio.sleep(0.02)
+        assert [p.phase for p in seen] == ["stale_check", "writing"]
+        assert seen[1].step_kind == "device_rename" and seen[1].entity_id == 5
+        assert not result.ok and not result.wrote_nothing and result.completed_steps == 1
 
     asyncio.run(main())

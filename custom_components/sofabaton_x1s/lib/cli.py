@@ -13,7 +13,7 @@ import argparse
 import asyncio
 import logging
 import sys
-from typing import Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 from .aio import AsyncXProxy, async_discover_hubs
 from .hub_versions import HVER_BY_HUB_VERSION
@@ -67,6 +67,19 @@ def _kv_list_to_dict(items) -> Dict[str, str]:
         else:
             out[it.strip()] = ""
     return out
+
+
+def resolve_button_code(token: str) -> int:
+    """A button code from a number or a ``ButtonName`` alias (``POWER_ON``)."""
+
+    try:
+        return parse_int(token) & 0xFF
+    except ValueError:
+        pass
+    code = getattr(ButtonName, token.strip().upper(), None)
+    if isinstance(code, int):
+        return code & 0xFF
+    raise ValueError(f"unknown button {token!r} (a code or a ButtonName alias)")
 
 
 def _parse_shell_args(rest: str) -> tuple[Optional[str], Dict[str, str], set[str]]:
@@ -209,6 +222,12 @@ class AsyncShell:
             "proxy": self.cmd_proxy,
             "backup": self.cmd_backup,
             "restore": self.cmd_restore,
+            "snapshot": self.cmd_snapshot,
+            "refresh": self.cmd_refresh,
+            "rename": self.cmd_rename,
+            "bind": self.cmd_bind,
+            "unbind": self.cmd_unbind,
+            "hubname": self.cmd_hubname,
             "quit": self.cmd_quit,
             "exit": self.cmd_quit,
         }
@@ -368,11 +387,12 @@ class AsyncShell:
         if len(payload) < 10:
             print(f"payload too short ({len(payload)}B) to be a stored IR payload")
             return
-        ok = await self.p.play_ir_blob(payload)
-        if ok:
-            print(f"played {len(payload)}B payload -- check the target device reacted")
-        else:
-            print("refused or rejected (need control mode, or the hub NACKed the payload)")
+        try:
+            await self.p.play(payload)
+        except (RuntimeError, ValueError) as err:
+            print(f"not played: {err}")
+            return
+        print(f"played {len(payload)}B payload -- check the target device reacted")
 
     async def cmd_proxy(self, args: str) -> None:
         arg = args.strip().lower()
@@ -398,7 +418,11 @@ class AsyncShell:
         else:
             print("backing up the whole hub (this fetches every device + activity)...")
         bundle = await self._safe(
-            "backup", self.p.backup_hub_bundle(device_ids=device_ids or None)
+            "backup",
+            self.p.backup(
+                device_ids=device_ids or None,
+                progress=lambda p: print(f"  {p.message}"),
+            ),
         )
         if bundle is None:
             return
@@ -453,15 +477,151 @@ class AsyncShell:
         # lay the (possibly subset) bundle down on a clean slate.
         if "erase" in flags:
             print("erasing the hub's configuration first (wipes all devices + activities)...")
-            erased = await self._safe("erase", self.p.erase_configuration())
-            if not erased:
-                print("erase failed or refused (need control mode) — restore aborted")
-                return
-
         print(f"restoring {path} onto the hub...")
-        result = await self._safe("restore", self.p.restore_hub_bundle(bundle))
+        result = await self._safe(
+            "restore",
+            self.p.restore(
+                bundle, replace="erase" in flags, progress=lambda p: print(f"  {p.message}")
+            ),
+        )
         if result is not None:
-            print("restore result:", result)
+            print("restore result:", result.to_dict())
+
+    # ----- snapshot / edits (phase 3) ----------------------------------------
+    #
+    # Edits are snapshot-based: take the snapshot, apply a pure helper from
+    # ``sofabaton.edits`` to its bundle, sync the pair. The snapshot id rides
+    # along so an edit made on a stale snapshot is refused before any write.
+
+    async def cmd_snapshot(self, _args: str) -> None:
+        snap = await self._safe("snapshot", self.p.snapshot())
+        if snap is None:
+            return
+        print(
+            f"snapshot {snap.snapshot_id[:12]}  complete={snap.complete}  "
+            f"stale_risk={snap.stale_risk}  generation={snap.engine_generation}"
+        )
+        for entity in snap.devices + snap.activities:
+            flags = []
+            if not entity.complete:
+                flags.append("incomplete")
+            if entity.stale_risk:
+                flags.append("stale?")
+            print(
+                f"  {entity.kind:8} {entity.entity_id:4}  {entity.name or '?':30} "
+                f"{' '.join(flags) or 'editable'}"
+            )
+
+    async def cmd_refresh(self, args: str) -> None:
+        _path, opts, _flags = _parse_shell_args(args)
+        kwargs: Dict[str, Any] = {}
+        if opts.get("dev"):
+            kwargs["device_id"] = parse_int(opts["dev"])
+        elif opts.get("act"):
+            kwargs["activity_id"] = parse_int(opts["act"])
+        else:
+            print("refreshing the whole hub (every device and activity; this takes a while)...")
+        snap = await self._safe(
+            "refresh", self.p.refresh(progress=lambda p: print(f"  {p.message}"), **kwargs)
+        )
+        if snap is not None:
+            print(f"snapshot {snap.snapshot_id[:12]}  complete={snap.complete}")
+
+    async def _apply_edit(self, kind: str, entity_id: int, edit) -> None:
+        """Snapshot, edit, sync; ``edit(bundle) -> bundle``."""
+
+        from . import edits as _edits  # noqa: F401  (helpers are passed in)
+
+        snap = await self._safe("snapshot", self.p.snapshot())
+        if snap is None:
+            return
+        entity = snap.entity(kind, entity_id)
+        if entity is None:
+            print(f"{kind} {entity_id} is not on the hub")
+            return
+        if not entity.editable:
+            print(f"{kind} {entity_id} was never fully read; run: refresh {'dev' if kind == 'device' else 'act'}={entity_id}")
+            return
+        try:
+            edited = edit(snap.bundle)
+        except (KeyError, ValueError) as err:
+            print(f"cannot edit: {err}")
+            return
+        sync = self.p.sync_device if kind == "device" else self.p.sync_activity
+        key = "device_id" if kind == "device" else "activity_id"
+        result = await self._safe(
+            "sync",
+            sync(
+                baseline=snap.bundle, edited=edited, snapshot_id=snap.snapshot_id,
+                progress=lambda p: print(f"  {p.message}"), **{key: entity_id},
+            ),
+        )
+        if result is None:
+            return
+        if result.ok:
+            print(f"done ({result.completed_steps} step(s)); snapshot {str(result.snapshot_id)[:12]}")
+        else:
+            print(f"failed at {result.failed_at}: {result.message}")
+
+    async def cmd_rename(self, args: str) -> None:
+        from . import edits as _edits
+
+        parts = args.split(None, 2)
+        if len(parts) < 3 or parts[0] not in ("dev", "act"):
+            print("usage: rename dev|act <id> <new name>")
+            return
+        entity_id = parse_int(parts[1])
+        name = parts[2].strip()
+        if parts[0] == "dev":
+            await self._apply_edit("device", entity_id, lambda b: _edits.rename_device(b, entity_id, name))
+        else:
+            await self._apply_edit("activity", entity_id, lambda b: _edits.rename_activity(b, entity_id, name))
+
+    async def cmd_bind(self, args: str) -> None:
+        from . import edits as _edits
+
+        parts = args.split()
+        if len(parts) not in (4, 6):
+            print("usage: bind <act> <button> <dev> <cmd> [<lp_dev> <lp_cmd>]")
+            print("       button = code or name (POWER_ON, VOLUME_UP ...); lp = long press")
+            return
+        act = parse_int(parts[0])
+        try:
+            button = resolve_button_code(parts[1])
+        except ValueError as err:
+            print(err)
+            return
+        dev, cmd = parse_int(parts[2]), parse_int(parts[3])
+        long_press = (parse_int(parts[4]), parse_int(parts[5])) if len(parts) == 6 else None
+        await self._apply_edit(
+            "activity", act,
+            lambda b: _edits.bind_button(b, act, button, dev, cmd, long_press=long_press),
+        )
+
+    async def cmd_unbind(self, args: str) -> None:
+        from . import edits as _edits
+
+        parts = args.split()
+        if len(parts) != 2:
+            print("usage: unbind <act> <button>")
+            return
+        act = parse_int(parts[0])
+        try:
+            button = resolve_button_code(parts[1])
+        except ValueError as err:
+            print(err)
+            return
+        await self._apply_edit("activity", act, lambda b: _edits.clear_button(b, act, button))
+
+    async def cmd_hubname(self, args: str) -> None:
+        name = args.strip()
+        if not name:
+            print("usage: hubname <new name>")
+            return
+        if await self._safe("hubname", self.p.set_hub_name(name)) is not None or True:
+            info = await self._safe("hub_info", self.p.hub_info())
+            if info is not None:
+                print(f"hub is now named {info.name!r}")
 
     # ----- meta -------------------------------------------------------------
 
@@ -480,6 +640,12 @@ class AsyncShell:
         print("  backup [file] [devices=ID,..]  back up the hub (subset = devices only)")
         print("  restore <file> [devices=ID,..] [activities=ID,..] [erase]")
         print("                                 restore a bundle; optionally a subset / erase-first")
+        print("  snapshot                       the cached configuration: every entity + its provenance")
+        print("  refresh [dev=ID|act=ID]        re-read one entity, or the whole hub (slow)")
+        print("  rename dev|act <id> <name>     rename a device / activity")
+        print("  bind <act> <button> <dev> <cmd> [<lp_dev> <lp_cmd>]   bind a button (+ long press)")
+        print("  unbind <act> <button>          clear a button")
+        print("  hubname <name>                 rename the hub")
         print("  quit                           exit")
         print("\nBrowse to get (entity_id, command_id); send with: press <entity_id> <command_id>.")
         print("Reads/sends need control mode (no app attached through the proxy).")

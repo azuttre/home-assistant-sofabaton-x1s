@@ -134,3 +134,59 @@ message types are in `openapi.json` components (`WsHello`, `WsHubEvent`,
 4. Read the catalogs, subscribe to events, done. Offer the enable /
    disable switch in the hub's settings so the user can hand the hub to
    the official app when they need it.
+
+
+## Snapshot and jobs (0.2.0)
+
+`GET /hubs/{id}/snapshot` is the hub's configuration as one document,
+served from the server's cache with no hub traffic. Keep its `ETag`: it
+is the content hash the write endpoints will take back as `If-Match`,
+and `If-None-Match` saves the transfer when nothing changed. Entities
+that were never read in full carry `editable: false`; ask for a read
+with `POST /hubs/{id}/snapshot/refresh` (`{"device_id": 5}` or
+`{"activity_id": 101}`; an empty body reads the whole hub, which takes
+minutes and should be a user action).
+
+A refresh answers `202` with a job. Follow it on `/events` (`job_event`
+messages carry the full job record: `status`, the last `progress`, the
+`result` or a `Problem` in `error`) or poll `GET /hubs/{id}/jobs/{job_id}`.
+One job runs per hub at a time; `DELETE /hubs/{id}/jobs/{job_id}` cancels
+a whole-hub refresh between entities.
+
+
+## Editing (0.2.0)
+
+Most platforms need the intents: `POST /hubs/{id}/activities/{aid}/rename`,
+`PUT /hubs/{id}/activities/{aid}/buttons/VOL_UP` with `{"device_id": 7,
+"command_id": 3}` (add `"long_press": {...}` for the held press),
+`DELETE` on the same path to clear, `POST .../favorites`, `PUT
+.../favorites/order`, `POST /hubs/{id}/devices/{did}/rename`, and the
+whole-entity ones (`POST /devices`, `DELETE /devices/{did}`, `POST
+/activities`, `DELETE /activities/{aid}`, `PUT /devices/order`, `PUT
+/activities/order`, `PUT /name`). Every write answers `202` with a job; follow it as described
+above. Send the snapshot `ETag` as `If-Match` when your UI showed the
+user a snapshot; the server refuses with `412` if it moved.
+
+An editor that shows the whole configuration works on the document
+instead: read `GET /snapshot`, change one activity or device element,
+preview with `POST /hubs/{id}/activities/{aid}/plan`, then `PUT` the
+element back with `If-Match` (required here). Only the entity you name
+may differ from the snapshot; anything else is `422 out_of_scope`.
+
+
+## IR codes, backup and restore (0.2.0)
+
+A code in any format your platform has (`{"pronto": "..."}`,
+`{"descriptor": "P:NEC1 D:4 S:5 F:21"}`, `{"timings_us": [...],
+"carrier_hz": 38000}`, or the hub's own `{"hex": "..."}`) can be fired
+once with `POST /hubs/{id}/play`, saved as a new command with `POST
+/hubs/{id}/devices/{did}/commands` (`{"name": ..., "payload": {...}}`),
+or written over an existing command with `PUT .../commands/{cid}/payload`.
+`GET .../commands/{cid}/payload` reads what the hub holds. `POST
+/hubs/{id}/learn` arms the hub's receiver and returns the captured code
+as the job result; cancel the job to stop waiting.
+
+`POST /hubs/{id}/backup` returns a full bundle as the job result; keep
+it as a file. `POST /hubs/{id}/restore` with `{"bundle": ..., "replace":
+true}` puts a hub back to that state (it erases first), and `POST
+/hubs/{id}/erase` wipes it. Both are final; confirm with the user.

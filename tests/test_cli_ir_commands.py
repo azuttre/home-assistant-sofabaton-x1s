@@ -50,9 +50,11 @@ class _StubProxy:
     def on_client_state_change(self, cb) -> None: ...
     def on_activity_change(self, cb) -> None: ...
 
-    async def play_ir_blob(self, blob):
-        self.calls.append(("play_ir_blob", {"blob": blob}))
-        return self._play_ok
+    async def play(self, payload):
+        # The facade's play(): raises HubRejectedError when the hub refuses.
+        self.calls.append(("play", {"blob": bytes(payload)}))
+        if not self._play_ok:
+            raise RuntimeError("the hub did not accept play")
 
     async def devices(self):
         self.calls.append(("devices", {}))
@@ -119,7 +121,7 @@ def test_testir_plays_parsed_payload() -> None:
 
     _run(shell.cmd_testir(PAYLOAD_HEX))
 
-    assert _called(proxy, "play_ir_blob") == [{"blob": PAYLOAD}]
+    assert _called(proxy, "play") == [{"blob": PAYLOAD}]
 
 
 def test_testir_refuses_short_or_invalid_payload() -> None:

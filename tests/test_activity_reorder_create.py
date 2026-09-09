@@ -40,6 +40,7 @@ def _seed_x1s_activity(proxy: X1Proxy, act_lo: int, name: str) -> None:
         "needs_confirm": False,
     }
     proxy._activity_row_payloads[act_lo] = bytes(row_payload)
+    proxy._activities_catalog_ready = True  # a seeded catalog counts as read (W2)
 
 
 # ── reorder_activities ──────────────────────────────────────────────────
@@ -150,6 +151,7 @@ def _seed_device(proxy: X1Proxy, dev_lo: int, name: str, *, kind: int = 0x00) ->
     raw_body[3] = kind & 0xFF
     raw_body[4] = dev_lo & 0xFF
     proxy.state.devices[dev_lo] = {"name": name, "raw_body": bytes(raw_body)}
+    proxy._devices_catalog_ready = True  # a seeded catalog counts as read (W2)
 
 
 def test_reorder_devices_sends_family_11_order_then_remote_sync(monkeypatch) -> None:

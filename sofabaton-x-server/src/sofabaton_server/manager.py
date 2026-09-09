@@ -17,11 +17,11 @@ import asyncio
 import logging
 from typing import Any, Awaitable, Callable, Optional
 
-from sofabaton import AsyncXProxy, HubConfig, HubEvent, HubStatus
+from sofabaton import AsyncXProxy, HubConfig, HubEvent, HubStatus, StateDocumentError
 
 from .config import Settings
 from .models import HubRecord, HubView, mac_key, now_iso
-from .store import HubStore
+from .store import HubStore, StateStore
 
 log = logging.getLogger(__name__)
 
@@ -69,10 +69,14 @@ class HubManager:
         *,
         proxy_factory: ProxyFactory = AsyncXProxy.from_config,
         store: Optional[HubStore] = None,
+        state_store: Optional[StateStore] = None,
     ) -> None:
         self._settings = settings
         self._factory = proxy_factory
         self._store = store or HubStore(settings.data_dir)
+        # Phase 3 S7: the library's cache document per hub, imported before
+        # start() and written after every snapshot change and at stop.
+        self._state = state_store or StateStore(settings.data_dir)
         self._records: dict[str, HubRecord] = {}
         self._proxies: dict[str, AsyncXProxy] = {}
         self._watchers: dict[str, asyncio.Task] = {}
@@ -217,6 +221,7 @@ class HubManager:
             async with self._lock:
                 self._records.pop(record.hub_id, None)
                 self._persist()
+            self._state.delete(record.hub_id)
         self._emit_server("hub_removed", hub_id)
 
     async def enable(self, hub_id: str) -> HubRecord:
@@ -263,6 +268,7 @@ class HubManager:
         proxy = self._factory(record.config)
         if self.zeroconf is not None:
             proxy.set_zeroconf(self.zeroconf)
+        await self._import_state(record.hub_id, proxy)
         try:
             await proxy.start()
         except asyncio.CancelledError:
@@ -297,8 +303,33 @@ class HubManager:
                 pass
         proxy = self._proxies.pop(hub_id, None)
         if proxy is not None:
+            await self._export_state(hub_id, proxy)
             await proxy.stop(release_hub=release)
             log.info("hub %s stopped (release=%s)", hub_id, release)
+
+    # -- state document (phase 3 S7) -------------------------------------------
+
+    async def _import_state(self, hub_id: str, proxy: AsyncXProxy) -> None:
+        document = self._state.load(hub_id)
+        if document is None:
+            return
+        try:
+            snap = await proxy.import_state(document)
+        except StateDocumentError as err:
+            log.warning("hub %s: state file ignored (%s); starting cold", hub_id, err)
+            return
+        except Exception:  # noqa: BLE001
+            log.exception("hub %s: state file could not be imported; starting cold", hub_id)
+            return
+        log.info("hub %s: state restored (snapshot %s, %d devices, %d activities)",
+                 hub_id, snap.snapshot_id[:12], len(snap.devices), len(snap.activities))
+
+    async def _export_state(self, hub_id: str, proxy: AsyncXProxy) -> None:
+        try:
+            document = await proxy.export_state()
+            self._state.save(hub_id, document)
+        except Exception:  # noqa: BLE001
+            log.exception("hub %s: state could not be saved", hub_id)
 
     async def _watch(self, hub_id: str, proxy: AsyncXProxy) -> None:
         """Relay one hub's events; learn its MAC on the first ready sync."""
@@ -309,6 +340,10 @@ class HubManager:
                 async with self._transition:
                     current_id = await self._note_ready(current_id, proxy)
             self._emit_hub(current_id, event)
+            if event.kind == "snapshot_changed":
+                # Every refresh, write rebase, import and app-session flag
+                # lands here; the file is always the latest cache.
+                await self._export_state(current_id, proxy)
 
     async def _note_ready(self, hub_id: str, proxy: AsyncXProxy) -> str:
         record = self._records.get(hub_id)
@@ -329,6 +364,7 @@ class HubManager:
                 self._proxies[new_id] = self._proxies.pop(hub_id)
                 if hub_id in self._watchers:
                     self._watchers[new_id] = self._watchers.pop(hub_id)
+                self._state.rename(hub_id, new_id)
                 for listener in list(self._rekey_listeners):
                     try:
                         listener(hub_id, new_id)

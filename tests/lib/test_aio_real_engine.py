@@ -16,6 +16,7 @@ import asyncio
 import importlib
 import importlib.util
 import sys
+import threading
 import time
 import types
 from pathlib import Path
@@ -392,3 +393,315 @@ def test_refused_refresh_keeps_the_committed_catalog_on_the_real_engine() -> Non
         assert not engine._burst.active
 
     asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
+# snapshot / state document on the real engine (phase 3 plan, W0)
+# ---------------------------------------------------------------------------
+
+
+def _seed_catalog(proxy) -> None:
+    """A device and an activity in the catalog, as the initial sync leaves them."""
+
+    proxy.state.devices[5] = {"name": "TV", "brand": "Acme", "device_class": "tv"}
+    proxy.state.activities[101] = {"name": "Watch TV"}
+    proxy._devices_catalog_ready = True
+    proxy._activities_catalog_ready = True
+
+
+def test_snapshot_on_cold_engine_sends_nothing_and_is_incomplete() -> None:
+    async def main():
+        engine = _engine()
+        _hub_link(engine, True)
+        proxy = aio.AsyncXProxy.wrap(engine)
+        snap = await proxy.snapshot()
+        assert _pending_local_bytes(engine) == 0
+        assert snap.devices == [] and snap.activities == []
+        # No catalog has been read: the empty projection is not "complete".
+        assert snap.complete is False and snap.stale_risk is False
+        assert snap.bundle["payload_profile"] == "structural"
+
+        _seed_catalog(engine)
+        snap = await proxy.snapshot()
+        assert _pending_local_bytes(engine) == 0
+        assert [e.entity_id for e in snap.devices] == [5]
+        assert [e.entity_id for e in snap.activities] == [101]
+        tv = snap.entity("device", 5)
+        assert tv.name == "TV" and not tv.complete and not tv.editable
+        assert snap.bundle["devices"][0]["editable"] is False
+        assert snap.bundle["devices"][0]["stale_risk"] is False
+
+    asyncio.run(main())
+
+
+def test_state_document_round_trip_keeps_id_generation_and_stale_flags() -> None:
+    async def main():
+        engine = _engine()
+        _seed_catalog(engine)
+        # Pretend the activity was fetched, then an app session ran.
+        engine._note_detail_fetched("activity", 101)
+        engine.mark_detail_stale_risk()
+        proxy = aio.AsyncXProxy.wrap(engine)
+        origin = await proxy.snapshot()
+        assert origin.entity("activity", 101).stale_risk is True
+        assert origin.entity("device", 5).stale_risk is False  # never fetched: nothing to flag
+        doc = await proxy.export_state()
+        assert doc["state"]["detail_stale_risk"] == {"device": [], "activity": [101]}
+
+        fresh = _engine()
+        other = aio.AsyncXProxy.wrap(fresh)
+        restored = await other.import_state(doc)
+        assert restored.snapshot_id == origin.snapshot_id
+        assert restored.entity("activity", 101).stale_risk is True
+        assert restored.engine_generation > origin.engine_generation
+        assert _pending_local_bytes(fresh) == 0
+
+        # A re-fetch stamp clears the flag; a cache clear bumps the generation.
+        fresh._note_detail_fetched("activity", 101)
+        assert (await other.snapshot()).stale_risk is False
+        before = fresh.state.generation
+        fresh.clear_cached_entity_detail(101, kind="activity")
+        assert fresh.state.generation > before
+
+    asyncio.run(main())
+
+
+def test_burst_end_bumps_generation() -> None:
+    engine = _engine()
+    before = engine.state.generation
+    engine._burst.start("devices")
+    _end_burst_idle(engine)
+    assert engine.state.generation > before
+
+
+def test_sync_refuses_unfetched_baseline_before_the_engine() -> None:
+    async def main():
+        engine = _engine()
+        _hub_link(engine, True)
+        _seed_catalog(engine)
+        proxy = aio.AsyncXProxy.wrap(engine)
+        snap = await proxy.snapshot()
+        try:
+            await proxy.sync_activity(baseline=snap.bundle, edited=snap.bundle, activity_id=101)
+        except errors.SnapshotIncompleteError:
+            pass
+        else:
+            raise AssertionError("an unfetched activity is not an editable baseline")
+        assert _pending_local_bytes(engine) == 0
+
+    asyncio.run(main())
+
+
+def test_app_session_end_flags_only_fetched_entities_once() -> None:
+    engine = _engine()
+    _seed_catalog(engine)
+    engine._note_detail_fetched("activity", 101)
+    before = engine.state.generation
+    engine._notify_client_state(True)
+    assert engine.state.detail_stale_risk == {"device": set(), "activity": set()}
+    engine._notify_client_state(False)
+    assert engine.state.detail_stale_risk == {"device": set(), "activity": {101}}
+    assert engine.state.generation > before
+    # A repeated disconnect notification (no session in between) is a no-op.
+    marked = engine.state.generation
+    engine._notify_client_state(False)
+    assert engine.state.generation == marked
+
+
+def test_app_session_end_reaches_facade_consumers_from_the_engine_thread() -> None:
+    async def main():
+        engine = _engine()
+        _seed_catalog(engine)
+        engine._note_detail_fetched("activity", 101)
+        proxy = aio.AsyncXProxy.wrap(engine)
+        await proxy.snapshot()
+
+        async def session():
+            await asyncio.sleep(0.01)
+            def _engine_thread():
+                engine._notify_client_state(True)
+                engine._notify_client_state(False)
+            t = threading.Thread(target=_engine_thread)
+            t.start(); t.join()
+
+        asyncio.ensure_future(session())
+        agen = proxy.events()
+        seen = []
+        try:
+            while not any(e.kind == "snapshot_changed" for e in seen):
+                seen.append(await asyncio.wait_for(agen.__anext__(), 2))
+        finally:
+            await agen.aclose()
+        changed = next(e for e in seen if e.kind == "snapshot_changed")
+        assert changed.payload.stale_risk is True
+        assert (await proxy.snapshot()).entity("activity", 101).stale_risk is True
+        assert _pending_local_bytes(engine) == 0
+
+    asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
+# W2: intents fetch their own preconditions (phase 3 plan, P3.2)
+# ---------------------------------------------------------------------------
+
+
+def _ok_step(*args, **kwargs):
+    ack = importlib.import_module(f"{_pkg.__name__}.ack")
+    return ack.SendStepResult(outcome=ack.AckOutcome.acked, ack_opcode=0x0103, ack_payload=b"\x00")
+
+
+def test_reorder_devices_reads_the_catalog_when_cold_and_refuses_without_it(monkeypatch) -> None:
+    engine = _engine()
+    _hub_link(engine, True)
+    reads = []
+    monkeypatch.setattr(engine, "_request_devices_and_wait", lambda **kw: reads.append(1) or False)
+    sent = []
+    monkeypatch.setattr(engine, "_send_step", lambda **kw: sent.append(kw) or _ok_step())
+    assert engine.reorder_devices([5, 7]) is None
+    assert reads == [1] and sent == []
+
+
+def test_reorder_devices_never_writes_a_guessed_kind_byte(monkeypatch) -> None:
+    engine = _engine()
+    _hub_link(engine, True)
+    engine._devices_catalog_ready = True
+    engine.state.devices[5] = {"name": "TV", "raw_body": bytes([0, 0, 0, 0x21, 0])}
+    engine.state.devices[7] = {"name": "Fresh"}          # created in place, no record yet
+    sent = []
+    monkeypatch.setattr(engine, "_send_step", lambda **kw: sent.append(kw) or _ok_step())
+
+    def _catalog_read(**kw):
+        engine.state.devices[7]["raw_body"] = bytes([0, 0, 0, 0x33, 0])
+        return True
+
+    monkeypatch.setattr(engine, "_request_devices_and_wait", _catalog_read)
+    result = engine.reorder_devices([7, 5])
+    assert result is not None
+    sort = sent[0]["payload"]
+    # Rows are (marker, id, position): the fetched record's kind byte, never 0x00.
+    assert bytes([0x33, 7, 1, 0x21, 5, 2]) in sort
+
+
+def test_reorder_activities_reads_the_catalog_when_cold(monkeypatch) -> None:
+    engine = _engine()
+    _hub_link(engine, True)
+    reads = []
+
+    def _catalog_read(**kw):
+        reads.append(1)
+        engine.state.activities[101] = {"name": "Watch TV"}
+        engine._activities_catalog_ready = True
+        return True
+
+    monkeypatch.setattr(engine, "_request_activities_and_wait", _catalog_read)
+    sent = []
+    monkeypatch.setattr(engine, "_send_step", lambda **kw: sent.append(kw) or _ok_step())
+    assert engine.reorder_activities([101]) is not None
+    # One read before the write (the trailing refresh is the second), then sort + remote sync.
+    assert reads and len(sent) == 2
+
+
+def test_persist_ir_blob_reads_the_command_table_before_allocating(monkeypatch) -> None:
+    engine = _engine()
+    _hub_link(engine, True)
+    fetched = []
+
+    def _fetch(key, kick, ready, *, timeout):
+        fetched.append(key)
+        engine.state.commands[5] = {1: "Power", 2: "Mute"}   # the hub's table
+        engine._commands_complete.add(5)
+        return True
+
+    monkeypatch.setattr(engine, "_fetch_and_wait", _fetch)
+    written = {}
+
+    def _write(**kw):
+        written.update(kw)
+        return {"status": "success", "page_count": 1, "command_id": kw["command_id"]}
+
+    monkeypatch.setattr(engine, "_run_persist_write", _write)
+    monkeypatch.setattr(engine, "_register_command_in_device_sort", lambda **kw: None)
+    result = engine.persist_ir_blob(device_id=5, command_name="Input", blob=bytes(16))
+    assert result is not None
+    assert fetched == ["commands:5"]
+    assert written["command_id"] == 3          # next free slot, not 1
+
+
+def test_persist_refuses_when_the_command_table_cannot_be_read(monkeypatch) -> None:
+    engine = _engine()
+    _hub_link(engine, True)
+    monkeypatch.setattr(engine, "_fetch_and_wait", lambda *a, **kw: False)
+    written = []
+    monkeypatch.setattr(engine, "_run_persist_write", lambda **kw: written.append(kw))
+    assert engine.persist_ir_blob(device_id=5, command_name="Input", blob=bytes(16)) is None
+    assert engine.persist_command_record(
+        device_id=5, command_name="Pair", library_type=0x03, command_data=b"\x01"
+    ) is None
+    assert written == []
+
+
+def test_persist_skips_the_read_when_the_table_is_complete(monkeypatch) -> None:
+    engine = _engine()
+    _hub_link(engine, True)
+    engine.state.commands[5] = {1: "Power"}
+    engine._commands_complete.add(5)
+    monkeypatch.setattr(engine, "_fetch_and_wait", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("no read expected")))
+    written = {}
+    monkeypatch.setattr(engine, "_run_persist_write", lambda **kw: written.update(kw) or {"status": "success", "page_count": 1})
+    monkeypatch.setattr(engine, "_register_command_in_device_sort", lambda **kw: None)
+    assert engine.persist_ir_blob(device_id=5, command_name="Input", blob=bytes(16)) is not None
+    assert written["command_id"] == 2
+
+
+def test_delete_device_scope_needs_no_prefetch() -> None:
+    # Audit result recorded as a test: the scan only names activities whose
+    # detail IS cached (unfetched detail cannot be stale), and the confirm
+    # scope comes from the hub's own activities burst inside delete_device.
+    engine = _engine()
+    engine.state.activities[101] = {"name": "Watch TV"}
+    engine.state.activities[102] = {"name": "Music"}
+    engine.state.activity_members[101] = {5}
+    assert engine.activities_referencing_device(5) == [101]
+
+
+def test_state_document_keeps_the_favorites_order() -> None:
+    # Found live (bench_210, X1): the quick-access slot order was not in
+    # the state document, so the projected activity lost its
+    # ``favorites_order`` after a restart and the snapshot id moved.
+    async def main():
+        engine = _engine()
+        _seed_catalog(engine)
+        engine.state.activity_favorite_slots[101] = [
+            {"button_id": 1, "device_id": 5, "command_id": 2},
+            {"button_id": 2, "device_id": 5, "command_id": 3},
+        ]
+        engine.state.activity_favorites_order[101] = [(2, 0), (1, 1)]
+        engine._note_detail_fetched("activity", 101)
+        proxy = aio.AsyncXProxy.wrap(engine)
+        origin = await proxy.snapshot()
+        assert _bundle_activity(origin, 101)["favorites_order"] == [2, 1]
+
+        fresh = _engine()
+        other = aio.AsyncXProxy.wrap(fresh)
+        restored = await other.import_state(await proxy.export_state())
+        assert _bundle_activity(restored, 101)["favorites_order"] == [2, 1]
+        assert restored.snapshot_id == origin.snapshot_id
+
+    asyncio.run(main())
+
+
+def _bundle_activity(snap, activity_id):
+    return next(a for a in snap.bundle["activities"] if a["device"]["device_id"] == activity_id)
+
+
+def test_key_sort_timeout_on_a_network_device_records_an_empty_row() -> None:
+    # Found live (bench_210, X1): the hub never answers the key-sort read
+    # for a wifi_sonos device, which left the capture incomplete forever.
+    export = importlib.import_module(f"{_pkg.__name__}.proxy_backup_export")
+    empty = {"device_id": 4, "msg_hex": ""}
+    assert export._key_sort_row_or_fallback(4, "wifi_sonos", None) == empty
+    assert export._key_sort_row_or_fallback(4, "wifi_hue", None) == empty
+    assert export._key_sort_row_or_fallback(1, "ir", None) is None          # a real gap
+    assert export._key_sort_row_or_fallback(1, None, None) is None          # class unknown: no guess
+    row = {"device_id": 1, "msg_hex": "01 ff"}
+    assert export._key_sort_row_or_fallback(1, "wifi_sonos", row) is row    # a reply always wins

@@ -76,6 +76,9 @@ class FakeProxy:
     def on_hub_state_change(self, cb): pass
     def on_client_state_change(self, cb): pass
     def on_activity_change(self, cb): pass
+    def on_activity_list_update(self, cb): pass
+    def on_ota_update(self, cb): pass
+    def on_app_activation(self, cb): pass
 
     def can_issue_commands(self): return self._controllable
     def get_proxy_status(self): return self.proxy_enabled
@@ -246,3 +249,104 @@ def test_run_makes_proxy_discoverable_after_connect(monkeypatch):
     asyncio.run(cli._main_run(["--hub-ip", "1.2.3.4", "--connect-timeout", "0.1"]))
 
     assert calls == ["wait_connected", "wait_until_discoverable", "status"]
+
+
+# ---------------------------------------------------------------------------
+# snapshot / edit verbs (phase 3, W5)
+# ---------------------------------------------------------------------------
+
+
+class EditFakeProxy(FakeProxy):
+    """The minimal snapshot + sync surface the edit verbs drive."""
+
+    _devices_catalog_ready = True
+    _activities_catalog_ready = True
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.state.generation = 0
+        self.state.detail_fetched_at = {"device": {5: "t"}, "activity": {101: "t"}}
+        self.state.detail_stale_risk = {"device": set(), "activity": set()}
+        self.synced: list = []
+        self.hub_name = "Living Room"
+
+    def bump_cache_generation(self):
+        self.state.generation += 1
+        return self.state.generation
+
+    def assemble_hub_bundle_from_state(self, *, hub_info=None, include_unfetched=False):
+        return {
+            "kind": "hub_bundle", "captured_at": "t", "complete": True,
+            "payload_profile": "structural", "hub": {"name": self.hub_name},
+            "devices": [{"kind": "device_backup", "complete": True, "editable": True, "stale_risk": False,
+                         "device": {"device_id": 5, "name": "TV", "brand": "Sony"},
+                         "commands": [{"command_id": 1, "name": "Power"}], "button_bindings": [], "macros": []}],
+            "activities": [{"kind": "activity_backup", "complete": True, "editable": True, "stale_risk": False,
+                            "device": {"device_id": 101, "name": "Watch TV", "entity_type": "activity"},
+                            "button_bindings": [], "favorite_slots": [], "macros": []}],
+        }
+
+    def sync_activity(self, *, baseline, edited, activity_id, progress_callback=None):
+        self.synced.append(("activity", activity_id, edited))
+        return {"status": "success", "completed_steps": 1, "total_steps": 1}
+
+    def sync_device(self, *, baseline, edited, device_id, progress_callback=None):
+        self.synced.append(("device", device_id, edited))
+        return {"status": "success", "completed_steps": 1, "total_steps": 1}
+
+    def set_hub_name(self, name, *, timeout=5.0):
+        self.hub_name = name
+        return True
+
+    def get_banner_info(self):
+        return {**super().get_banner_info(), "name": self.hub_name}
+
+
+def test_snapshot_verb_lists_entities(capsys):
+    async def main():
+        shell = _shell(EditFakeProxy())
+        await shell.cmd_snapshot("")
+    asyncio.run(main())
+    out = capsys.readouterr().out
+    assert "complete=True" in out and "device      5  TV" in out and "activity  101  Watch TV" in out
+
+
+def test_rename_and_bind_verbs_edit_through_the_facade(capsys):
+    fake = EditFakeProxy()
+
+    async def main():
+        shell = _shell(fake)
+        await shell.cmd_rename("act 101 Movie night")
+        await shell.cmd_bind("101 POWER_ON 5 1")
+        await shell.cmd_rename("dev 5 Big TV")
+        await shell.cmd_unbind("101 VOL_UP")
+        await shell.cmd_bind("101 nope 5 1")
+    asyncio.run(main())
+    kinds = [(k, i) for k, i, _ in fake.synced]
+    assert kinds == [("activity", 101), ("activity", 101), ("device", 5), ("activity", 101)]
+    assert fake.synced[0][2]["activities"][0]["device"]["name"] == "Movie night"
+    binding = fake.synced[1][2]["activities"][0]["button_bindings"][0]
+    assert (binding["device_id"], binding["command_id"]) == (5, 1)
+    assert fake.synced[2][2]["devices"][0]["device"]["name"] == "Big TV"
+    out = capsys.readouterr().out
+    assert out.count("done (1 step(s))") == 4 and "unknown button 'nope'" in out
+
+
+def test_hubname_verb(capsys):
+    fake = EditFakeProxy()
+
+    async def main():
+        await _shell(fake).cmd_hubname("Den")
+    asyncio.run(main())
+    assert fake.hub_name == "Den"
+    assert "hub is now named 'Den'" in capsys.readouterr().out
+
+
+def test_edit_verbs_refuse_in_observe_mode(capsys):
+    fake = EditFakeProxy(controllable=False)
+    fake.transport.is_client_connected = True
+
+    async def main():
+        await _shell(fake).cmd_rename("act 101 Movie")
+    asyncio.run(main())
+    assert fake.synced == [] and "[sync]" in capsys.readouterr().out

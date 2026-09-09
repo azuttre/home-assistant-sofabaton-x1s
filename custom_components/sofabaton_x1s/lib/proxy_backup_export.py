@@ -23,6 +23,35 @@ from .devices import DeviceConfig, parse_device_record
 from .protocol_const import DEVICE_CLASS_IR, normalize_device_class
 
 
+def _key_sort_row_or_fallback(
+    dev_lo: int,
+    normalized_device_class: str | None,
+    row: dict[str, Any] | None,
+    *,
+    log: Any = None,
+) -> dict[str, Any] | None:
+    """The key-sort row to record for a device after its fetch.
+
+    The X1 never answers a family-0x62 request for a ``wifi_sonos`` device:
+    three consecutive 5 s timeouts, not even the STATUS_ACK the hub sends
+    for "no key sort configured" (bench_210, 2026-09-10; an IR device on
+    the same hub answers in under three seconds). A network device has no
+    remote key page to sort, so a timed-out read on a non-IR class is
+    recorded as the empty row the STATUS_ACK path produces; otherwise the
+    capture would stay incomplete on every read and the device could
+    never be edited. An IR device keeps the timeout as a real gap.
+    """
+
+    if row is not None or normalized_device_class in (None, DEVICE_CLASS_IR):
+        return row
+    if log is not None:
+        log.info(
+            "[KEY_SORT] no reply for %s dev=0x%02X; recording an empty key sort",
+            normalized_device_class, dev_lo,
+        )
+    return {"device_id": dev_lo, "msg_hex": ""}
+
+
 class _SyncBurstWaiter:
     """Hands out one-shot Events keyed by burst key (e.g. ``commands:7``).
 
@@ -153,8 +182,14 @@ class BackupExportMixin:
         wait_timeout: float = 10.0,
         include_blobs: bool = True,
         reuse_commands: bool = False,
+        refresh_catalog: bool = True,
     ) -> dict[str, Any] | None:
         """Build a restore-oriented ``device_backup`` payload from the hub.
+
+        ``refresh_catalog=False`` skips the device-list read that normally
+        precedes the detail fetch, for a caller that just read the catalog
+        itself (the facade's whole-hub ``refresh()``: one catalog read per
+        hub instead of one per entity).
 
         Returns ``None`` when the device is unknown. Captures only what a
         restore needs (schema, command table, keymap, macros, IR blobs);
@@ -173,7 +208,10 @@ class BackupExportMixin:
         """
 
         dev_lo = device_id & 0xFF
-        device_snapshot = self._refresh_devices_snapshot(timeout=max(wait_timeout, 5.0))
+        if refresh_catalog:
+            device_snapshot = self._refresh_devices_snapshot(timeout=max(wait_timeout, 5.0))
+        else:
+            device_snapshot = dict(self.state.entities("device"))
         device_meta = dict(device_snapshot.get(dev_lo) or {})
         if not device_meta:
             return None
@@ -243,7 +281,12 @@ class BackupExportMixin:
         # ``state.device_key_sorts``; the explicit write also captures the
         # STATUS_ACK "no key-sort configured" empty row so a later
         # from-state assembly sees the same value this capture did.
-        key_sort_row = self.fetch_device_key_sort(dev_lo, timeout=wait_timeout)
+        key_sort_row = _key_sort_row_or_fallback(
+            dev_lo,
+            normalized_device_class,
+            self.fetch_device_key_sort(dev_lo, timeout=wait_timeout),
+            log=self._log,
+        )
         if key_sort_row is not None:
             self.state.device_key_sorts[dev_lo] = dict(key_sort_row)
 
@@ -253,7 +296,7 @@ class BackupExportMixin:
         # catalog entry, which is where the assembler reads it back.
         self.fetch_idle_behavior(dev_lo, timeout=wait_timeout)
 
-        self.state.detail_fetched_at["device"][dev_lo] = _bx.now_iso()
+        self._note_detail_fetched("device", dev_lo)
 
         return self.assemble_device_backup_from_state(
             dev_lo, blob_source=blob_source, include_blobs=include_blobs
@@ -362,7 +405,7 @@ class BackupExportMixin:
             ]
         )
 
-        return _bx.assemble_device_backup(
+        payload = _bx.assemble_device_backup(
             device_block=device_block,
             command_rows=command_rows,
             button_rows=button_rows,
@@ -375,6 +418,20 @@ class BackupExportMixin:
             ),
             fetched_at=self.state.detail_fetched_at["device"].get(dev_lo),
         )
+        self._annotate_projection(payload, "device", dev_lo)
+        return payload
+
+    def _annotate_projection(self, payload: dict[str, Any], kind: str, ent_lo: int) -> None:
+        """Add the snapshot provenance fields to a projected entity payload.
+
+        ``stale_risk``: flagged since its last fetch (an app session ran).
+        ``editable``: a sync may take this payload as its baseline; only a
+        complete capture qualifies, because the engine's stale preflight
+        skips an incomplete one (phase 3 plan, decision 8).
+        """
+
+        payload["stale_risk"] = ent_lo in self.state.detail_stale_risk[kind]
+        payload["editable"] = bool(payload.get("complete"))
 
     # ------------------------------------------------------------------
     # activity backup
@@ -385,11 +442,17 @@ class BackupExportMixin:
         activity_id: int,
         *,
         wait_timeout: float = 10.0,
+        refresh_catalog: bool = True,
     ) -> dict[str, Any] | None:
-        """Build a restore-oriented ``activity_backup`` payload from the hub."""
+        """Build a restore-oriented ``activity_backup`` payload from the hub.
+
+        ``refresh_catalog=False`` skips the activity-list read that normally
+        precedes the detail fetch (see :meth:`backup_device`).
+        """
 
         act_lo = activity_id & 0xFF
-        self._refresh_catalog("activities", timeout=max(wait_timeout, 5.0))
+        if refresh_catalog:
+            self._refresh_catalog("activities", timeout=max(wait_timeout, 5.0))
 
         activity_meta = dict(self.state.entities("activity").get(act_lo) or {})
         if not activity_meta:
@@ -453,7 +516,7 @@ class BackupExportMixin:
                     act_lo,
                 )
 
-        self.state.detail_fetched_at["activity"][act_lo] = _bx.now_iso()
+        self._note_detail_fetched("activity", act_lo)
 
         return self.assemble_activity_backup_from_state(act_lo)
 
@@ -511,7 +574,7 @@ class BackupExportMixin:
             ]
         )
 
-        return _bx.assemble_activity_backup(
+        payload = _bx.assemble_activity_backup(
             activity_block=activity_block,
             button_rows=button_rows,
             favorite_rows=favorite_rows,
@@ -521,6 +584,8 @@ class BackupExportMixin:
             fetched_at=self.state.detail_fetched_at["activity"].get(act_lo),
             favorites_order=favorites_order,
         )
+        self._annotate_projection(payload, "activity", act_lo)
+        return payload
 
     # ------------------------------------------------------------------
     # hub bundle
@@ -662,6 +727,7 @@ class BackupExportMixin:
         self,
         *,
         hub_info: dict[str, Any] | None = None,
+        include_unfetched: bool = False,
     ) -> dict[str, Any] | None:
         """Assemble a structural ``hub_bundle`` purely from cached proxy state.
 
@@ -674,10 +740,19 @@ class BackupExportMixin:
         assembling a bundle of bare catalog names would present empty
         keymaps as hub truth, and a sync diffed against that baseline could
         issue destructive writes.
+
+        ``include_unfetched=True`` projects anyway (the facade's
+        ``snapshot()``): every entity still carries ``complete`` and
+        ``editable``, and the facade refuses a sync whose baseline entity
+        is not editable, so the guard above moves to the caller.
         """
 
         fetched = self.state.detail_fetched_at
-        if not fetched.get("device") and not fetched.get("activity"):
+        if (
+            not include_unfetched
+            and not fetched.get("device")
+            and not fetched.get("activity")
+        ):
             return None
 
         device_payloads: list[dict[str, Any]] = []

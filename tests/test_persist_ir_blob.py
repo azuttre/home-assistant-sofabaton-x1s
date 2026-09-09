@@ -40,6 +40,7 @@ def test_persist_ir_blob_matches_observed_x1_save_pages(monkeypatch) -> None:
 
     device_id = 0x02
     proxy.state.commands[device_id] = {command_id: f"Command {command_id}" for command_id in range(1, 112)}
+    proxy._commands_complete.add(device_id)  # the table is known (W2 precondition)
 
     monkeypatch.setattr(proxy, "can_issue_commands", lambda: True)
     monkeypatch.setattr(proxy, "clear_ack_queue", lambda: None)
@@ -106,6 +107,7 @@ def test_persist_ir_blob_returns_none_when_hub_rejects_final_page(monkeypatch) -
 
     device_id = 0x02
     proxy.state.commands[device_id] = {command_id: f"Command {command_id}" for command_id in range(1, 112)}
+    proxy._commands_complete.add(device_id)  # the table is known (W2 precondition)
 
     monkeypatch.setattr(proxy, "can_issue_commands", lambda: True)
     monkeypatch.setattr(proxy, "clear_ack_queue", lambda: None)
@@ -146,6 +148,7 @@ def test_persist_ir_blob_matches_observed_x1s_save_pages(monkeypatch) -> None:
 
     device_id = 0x0C
     proxy.state.commands[device_id] = {command_id: f"Command {command_id}" for command_id in range(1, 83)}
+    proxy._commands_complete.add(device_id)  # the table is known (W2 precondition)
 
     monkeypatch.setattr(proxy, "can_issue_commands", lambda: True)
     monkeypatch.setattr(proxy, "clear_ack_queue", lambda: None)

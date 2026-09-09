@@ -593,7 +593,7 @@ class X1Proxy(FrameDecodeMixin, IrBlobMixin, CatalogMixin, ExchangeMixin, AckWai
         self._burst.on_burst_end("activities", self._on_activities_burst_end)
         self._burst.on_burst_end("devices", self._on_devices_burst_end)
         self.on_burst_end("activities", self.handle_active_state)
-
+        self._burst.on_any_burst_end(lambda _key: self.bump_cache_generation())  # W0 generation
         self._hub_connected: bool = False
         self._client_connected: bool = False
 
@@ -1782,6 +1782,7 @@ class X1Proxy(FrameDecodeMixin, IrBlobMixin, CatalogMixin, ExchangeMixin, AckWai
                 self._log.exception("hub state listener failed")
 
     def _notify_client_state(self, connected: bool) -> None:
+        self._note_app_link(connected)  # W1: an ended app session flags the cache
         self._client_connected = connected
         for cb in self._client_state_listeners:
             try:
@@ -1791,7 +1792,6 @@ class X1Proxy(FrameDecodeMixin, IrBlobMixin, CatalogMixin, ExchangeMixin, AckWai
         if not connected:
             self._clear_app_device_retry()
 
-    
     def _notify_activity_change(self, new_id: int | None, old_id: int | None) -> None:
         name = None
         if new_id is not None:

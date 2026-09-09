@@ -20,11 +20,15 @@ from fastapi import FastAPI
 from . import API_PREFIX, API_VERSION, __version__
 from .config import Settings
 from .discovery import DiscoveryService
+from .jobs import JobRunner
 from .manager import HubManager
-from .problems import install as install_problem_handler
+from .problems import install as install_problem_handler, problem_body
 from .routes_discovery import router as discovery_router
+from .routes_edit import router as edit_router
 from .routes_hub_data import router as hub_data_router
 from .routes_hubs import router as hubs_router
+from .routes_payload import router as payload_router
+from .routes_snapshot import router as snapshot_router
 from .ws import WS_MESSAGE_TYPES, EventRelay, router as events_router
 
 # ``sofabaton`` is the library's import name (PyPI: sofabaton-x). Only
@@ -58,6 +62,7 @@ def create_app(settings: Settings | None = None, *, manager: Optional[HubManager
     started = time.monotonic()
     hub_manager = manager or HubManager(settings)
     discovery_service = discovery or DiscoveryService(settings, hub_manager)
+    job_runner = JobRunner(problem_for=problem_body)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -67,6 +72,7 @@ def create_app(settings: Settings | None = None, *, manager: Optional[HubManager
         try:
             yield
         finally:
+            await job_runner.shutdown()
             await hub_manager.stop()
             await discovery_service.stop()
 
@@ -91,10 +97,14 @@ def create_app(settings: Settings | None = None, *, manager: Optional[HubManager
     app.state.settings = settings
     app.state.hub_manager = hub_manager
     app.state.discovery = discovery_service
-    app.state.event_relay = EventRelay(hub_manager, **({"maxsize": ws_queue_size} if ws_queue_size else {}))
+    app.state.job_runner = job_runner
+    app.state.event_relay = EventRelay(hub_manager, jobs=job_runner, **({"maxsize": ws_queue_size} if ws_queue_size else {}))
     install_problem_handler(app)
     app.include_router(hubs_router)
     app.include_router(hub_data_router)
+    app.include_router(snapshot_router)
+    app.include_router(edit_router)
+    app.include_router(payload_router)
     app.include_router(events_router)
     app.include_router(discovery_router)
     _publish_ws_components(app)
@@ -175,7 +185,7 @@ def _publish_ws_components(app: FastAPI) -> None:
             spec["info"].get("description", "")
             + blank
             + f"WebSocket: `{API_PREFIX}/events` (optional `?hub_id=` filter, repeatable) streams "
-            "WsHello once, then WsHubEvent / WsServerEvent / WsDropped messages (see components)."
+            "WsHello once, then WsHubEvent / WsServerEvent / WsJobEvent / WsDropped messages (see components)."
         )
         app.openapi_schema = spec
         return spec

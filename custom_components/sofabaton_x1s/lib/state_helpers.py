@@ -118,6 +118,17 @@ class ActivityCache:
             "device": {},
             "activity": {},
         }
+        # Entities whose cached detail may be stale: flagged by the engine
+        # when a vendor-app session ends (the app may have edited anything
+        # through the proxy) and cleared when the entity is re-fetched.
+        # Detail is kept; the flag is provenance for the consumer.
+        self.detail_stale_risk: dict[str, set[int]] = {
+            "device": set(),
+            "activity": set(),
+        }
+        # Bumped on every burst end, every cache clear and every import so
+        # a consumer can tell the cache moved without hashing it.
+        self.generation: int = 0
         self.activity_favorite_labels: dict[int, dict[tuple[int, int], str]] = defaultdict(dict)
         self.activity_keybinding_labels: dict[int, dict[tuple[int, int], str]] = defaultdict(dict)
         self.activity_macros: dict[int, list[dict[str, int | str]]] = defaultdict(list)
@@ -636,9 +647,15 @@ class BurstScheduler:
         self.last_ts = 0.0
         self.queue: list[tuple[int, bytes, bool, Optional[str]]] = []
         self.listeners: dict[str, list[Callable[[str], None]]] = {}
+        # Called for every burst end regardless of key (after the keyed
+        # listeners); the engine's cache-generation bump lives here.
+        self.any_listeners: list[Callable[[str], None]] = []
 
     def on_burst_end(self, key: str, cb: Callable[[str], None]) -> None:
         self.listeners.setdefault(key, []).append(cb)
+
+    def on_any_burst_end(self, cb: Callable[[str], None]) -> None:
+        self.any_listeners.append(cb)
 
     def start(self, kind: str, *, now: Optional[float] = None) -> None:
         self.active = True
@@ -739,4 +756,6 @@ class BurstScheduler:
             prefix = key.split(":", 1)[0]
             for cb in self.listeners.get(prefix, []):
                 cb(key)
+        for cb in self.any_listeners:
+            cb(key)
 

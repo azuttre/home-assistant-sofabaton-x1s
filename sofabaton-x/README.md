@@ -35,8 +35,9 @@ the integration is its reference consumer.
   user typed an address, or it arrived as a REST body.
 - **Backup / restore**: export and restore hub configuration, including
   provisioning devices of any class from a hand-built bundle.
-- **Live editing**: diff an edited backup bundle against the captured
-  baseline and sync the difference to the hub as targeted in-place writes
+- **Snapshots and live editing**: project the hub configuration from the
+  cache at no hub cost, diff an edited copy against it and sync the
+  difference to the hub as targeted in-place writes
   (activity- or device-scoped), with a pure plan builder for dry-run
   previews.
 - **IR payloads**: play a raw payload once, learn a code from a physical
@@ -224,6 +225,7 @@ async for event in proxy.events():          # HubEvent(seq, kind, payload)
 | `hub_state` / `app_state` | `ConnectionState`: `connected`                   |
 | `status_changed`        | `StatusChanged`: `mode`, `previous_mode` (derived; fires once per mode flip) |
 | `catalog_ready`         | `CatalogReady`: `ready` (the connect-time initial sync finished, or the session dropped) |
+| `snapshot_changed`      | `SnapshotChanged`: `snapshot_id`, `engine_generation`, `device_ids`, `activity_ids`, `stale_risk` (a refresh landed, a write was rebased, or the cache was imported) |
 | `ota`                   | none (the hub goes silent for a few minutes)       |
 
 Each consumer gets its own bounded queue (`maxsize=256` by default). A
@@ -283,22 +285,54 @@ returns on its own. Both waiters are plain state predicates, so a
 long-running application can simply re-await
 `wait_until_controllable()` whenever a send comes back `False`.
 
-## ◇ Live editing
+## ◇ Snapshots and live editing
 
-Editing is bundle-based: capture a backup as the baseline, modify a copy,
-and sync. The engine diffs the two bundles into an ordered plan of
-targeted in-place writes (nothing is deleted-and-restored), re-reads the
-entity first to detect concurrent changes, and applies the steps serially,
-each gated on the hub's acknowledgement:
+The **snapshot** is the hub's structural configuration (devices,
+activities, commands, bindings, macros, favorites; everything but the IR
+payload blobs) as the library's cache holds it. `snapshot()` projects it
+with **no hub traffic**, in every mode, as a `HubSnapshot`:
 
-Both sync scopes take a `hub_bundle` pair — capture the baseline with
-`backup_hub_bundle`; `include_blobs=False` skips the slow IR-payload dump
-(the editor never needs blobs):
+```python
+snap = await proxy.snapshot()
+snap.snapshot_id          # content hash: equal when nothing changed, an ETag
+snap.complete             # every entity fetched in full
+snap.stale_risk           # an app session ended since the fetch: it may have edited anything
+for e in snap.devices + snap.activities:
+    print(e.kind, e.entity_id, e.name, e.complete, e.editable, e.stale_risk, e.fetched_at)
+snap.bundle               # the structural hub_bundle dict the sync takes as baseline
+snap.to_dict()            # the bundle with the header merged in (one JSON document)
+```
+
+The cache fills only when you ask. `refresh()` is the one structural hub
+read: `refresh(device_id=5)` or `refresh(activity_id=101)` re-reads one
+entity (a few bursts); `refresh()` alone re-reads both catalogs once and
+then every device and activity, which takes **minutes** on a real hub, so
+treat it as a user action, report its `progress` (a `WriteProgress` per
+entity) and expect to cancel it between entities. Nothing in the library
+starts a whole-hub refresh on its own. Each refresh and each write ends
+with a `snapshot_changed` event carrying the new id.
+
+To keep the cache warm across restarts, persist the state document (the
+library never touches disk):
+
+```python
+doc = await proxy.export_state()        # opaque, versioned JSON document
+...                                     # next run, before start():
+snap = await proxy.import_state(doc)    # StateDocumentError if unreadable
+```
+
+Editing is bundle-based: take a snapshot as the baseline, modify a copy
+of its bundle, and sync. The engine diffs the two bundles into an ordered
+plan of targeted in-place writes (nothing is deleted-and-restored),
+re-reads the entity first to detect concurrent changes, applies the steps
+serially, each gated on the hub's acknowledgement, and re-reads the entity
+afterwards so the next snapshot reflects the hub:
 
 ```python
 import copy
 
-baseline = await proxy.backup_hub_bundle(include_blobs=False)
+snap = await proxy.snapshot()
+baseline = snap.bundle
 edited = copy.deepcopy(baseline)
 # ... modify `edited`: rename the activity, rebind buttons, edit macros,
 #     favorites, membership ...
@@ -310,20 +344,90 @@ for step in build_activity_sync_plan(baseline, edited, activity_id=101):
 
 result = await proxy.sync_activity(
     baseline=baseline, edited=edited, activity_id=101,
-    progress_callback=lambda **p: print(p.get("message")),
+    snapshot_id=snap.snapshot_id,          # refused up front if the snapshot moved
+    progress=lambda p: print(p.phase, p.message),   # WriteProgress, on the loop
 )
-assert result["status"] == "success", result["message"]
+assert result.ok, result.message           # SyncResult: failed_at, completed_steps, snapshot_id
 ```
 
 `sync_device` / `build_device_sync_plan` are the device-scoped
 counterparts (command adds and renames, payload edits, idle behaviour,
-input records) with the same bundle-pair contract. A failed sync reports
-where it stopped (`failed_at`, `completed_steps`) rather than raising;
+input records) with the same bundle-pair contract. Two guards run before
+anything is written: a `snapshot_id` that is no longer current raises
+`SnapshotOutdatedError`, and a baseline entity that is not `editable`
+(never fetched, or fetched incomplete) raises `SnapshotIncompleteError`;
+refresh the entity and edit again. A failed sync reports where it stopped
+(`failed_at`, `completed_steps`) in the `SyncResult` rather than raising;
 `failed_at: "stale_check"` means the entity changed on the hub after the
-baseline was captured — re-capture and re-apply your edit. The planner
-refuses (with `ValueError`, surfaced as `failed_at: "plan"`) any bundle
-difference outside the entity being edited, so an editor bug cannot
-silently rewrite unrelated configuration.
+baseline was captured, and `wrote_nothing` tells you no step reached the
+hub. The planner refuses (with `ValueError`, surfaced as `failed_at:
+"plan"`) any bundle difference outside the entity being edited, so an
+editor bug cannot silently rewrite unrelated configuration.
+
+### Edit helpers
+
+The common row edits are pure functions in `sofabaton.edits`: each takes
+a snapshot bundle and returns an edited copy for the sync, so a script
+does not have to know the row shapes. `rename_activity`, `rename_device`,
+`bind_button` (with an optional long press), `clear_button`,
+`add_favorite`, `remove_favorite`, `reorder_favorites`, `rename_command`,
+`set_idle_behavior`:
+
+```python
+from sofabaton import ButtonName, edits
+
+snap = await proxy.snapshot()
+edited = edits.bind_button(snap.bundle, 101, ButtonName.VOL_UP, device_id=7, command_id=3,
+                           long_press=(7, 4))
+result = await proxy.sync_activity(baseline=snap.bundle, edited=edited, activity_id=101,
+                                   snapshot_id=snap.snapshot_id)
+```
+
+### Intents
+
+Whole-entity writes a bundle diff cannot express are explicit coroutines.
+They raise `HubBusyError` / `HubNotConnectedError` when the hub cannot be
+written, `ValueError` for bad input, and `HubRejectedError` when the hub
+refused or did not acknowledge; each ends with a rebase and a
+`snapshot_changed` event:
+
+```python
+device_id = await proxy.add_device("Ceiling fan", "ir")   # empty IR device, hub-assigned id
+activity_id = await proxy.add_activity("Read")
+removed = await proxy.remove_device(device_id)            # DeviceRemoved: impacted activities
+await proxy.remove_activity(activity_id)
+await proxy.reorder_devices([7, 5, 8])                     # every device, once
+await proxy.reorder_activities([102, 101])
+await proxy.set_hub_name("Living room")
+bundle = await proxy.backup(progress=print)                # full, restorable (minutes)
+result = await proxy.restore(bundle, replace=False)        # RestoreResult; replace=True erases first
+await proxy.erase()                                        # everything, final
+```
+
+### IR payloads
+
+`IrPayload` is one command's stored payload. Build it from the formats
+codes circulate in, read it back from the hub, fire it once, or capture it
+from the original remote; saving one as a new command is a row edit:
+
+```python
+from sofabaton import IrPayload
+
+p = IrPayload.from_pronto("0000 006D 0022 0002 ...")
+p = IrPayload.from_raw_timings([9000, 4500, 560, 560, ...], carrier_hz=38000)
+p = IrPayload.from_descriptor("P:NEC1 D:4 S:5 F:21")     # the hub renders the protocol itself
+p = IrPayload.from_hex("00 20 00 00 00 00 94 70 ...")     # a hub body as pasted hex
+p = await proxy.read_payload(device_id=5, command_id=2)   # None when the command has none
+await proxy.play(p)                                       # once, nothing saved
+p = await proxy.learn_ir(timeout=30)                      # point the remote at the hub; IrLearnError otherwise
+
+snap = await proxy.snapshot()
+edited = copy.deepcopy(snap.bundle)
+device = next(d for d in edited["devices"] if d["device"]["device_id"] == 5)
+device["commands"].append(p.to_command_row(command_id=40, name="Fan high"))
+await proxy.sync_device(baseline=snap.bundle, edited=edited, device_id=5,
+                        snapshot_id=snap.snapshot_id)
+```
 
 A CLI ships as a console script:
 
@@ -336,6 +440,13 @@ x> commands 1                        # list (command_id, label) for device 1
 x> send 1 5                          # numeric ids, exactly like the Python API
 x> send 101 POWER_ON                 # the CLI also resolves button names to codes
 x> testir 01 20 00 10 01 00 94 ac .. # fire a raw IR payload once (nothing saved)
+x> snapshot                          # every device/activity + complete / stale flags
+x> refresh act=101                   # re-read one entity (refresh alone = whole hub, slow)
+x> rename act 101 Movie night        # snapshot, edit, sync
+x> bind 101 VOL_UP 7 3 7 4           # button -> device 7 command 3, long press command 4
+x> unbind 101 VOL_UP
+x> hubname Den
+x> backup hub.json | restore hub.json erase
 ```
 
 The last form is a CLI convenience: `send` (alias `press`) accepts either
@@ -346,9 +457,7 @@ you want named button codes.
 
 `testir` works with raw IR payload hex (the bytes a command replays, as
 shown in a backup's `data_hex` fields) and plays it once without saving;
-in the Python API this is `play_ir_blob(blob)`. Saving a payload as a
-new command goes through the bundle edit path (`sync_device`) until the
-facade's payload surface lands.
+in the Python API this is `play(IrPayload.from_hex(...))`.
 
 Runnable examples — discovery, accepting a hub record from a platform's
 own discovery, watching the event stream, watching a live session, taking

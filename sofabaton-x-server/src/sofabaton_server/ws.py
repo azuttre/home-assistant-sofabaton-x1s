@@ -6,6 +6,8 @@ Message shapes (JSON objects, ``type`` discriminates):
 * ``hub_event``    a relayed library ``HubEvent`` with its ``hub_id``
 * ``server_event`` the server's own lifecycle: hub added / removed /
                    enabled / disabled / rekeyed (``kind``) for ``hub_id``
+* ``job_event``    a job on ``hub_id`` started, reported progress, or
+                   finished (the full ``JobView``)
 * ``dropped``      this client fell behind and ``count`` older messages
                    were discarded (sent before the next message that
                    does get through)
@@ -30,6 +32,7 @@ from fastapi import APIRouter, Query, Request, WebSocket, WebSocketDisconnect
 from sofabaton import HubEvent
 
 from . import API_PREFIX, API_VERSION, __version__
+from .jobs import JobRunner, JobView
 from .manager import HubManager
 
 log = logging.getLogger(__name__)
@@ -74,12 +77,21 @@ class WsDropped:
     type: Literal["dropped"] = "dropped"
 
 
-WS_MESSAGE_TYPES = (WsHello, WsHubEvent, WsServerEvent, WsDropped)
+@dataclass(frozen=True)
+class WsJobEvent:
+    hub_id: str
+    job: JobView
+    type: Literal["job_event"] = "job_event"
+
+
+WS_MESSAGE_TYPES = (WsHello, WsHubEvent, WsServerEvent, WsJobEvent, WsDropped)
 
 
 def _to_json(message: Any) -> dict[str, Any]:
     if isinstance(message, WsHubEvent):
         return {"type": message.type, "hub_id": message.hub_id, "event": message.event.to_dict()}
+    if isinstance(message, WsJobEvent):
+        return {"type": message.type, "hub_id": message.hub_id, "job": message.job.to_dict()}
     return asdict(message)
 
 
@@ -108,13 +120,16 @@ class Subscription:
 class EventRelay:
     """Fans the manager's hub and server events out to WebSocket clients."""
 
-    def __init__(self, manager: HubManager, *, maxsize: int = DEFAULT_QUEUE_SIZE) -> None:
+    def __init__(self, manager: HubManager, *, jobs: Optional[JobRunner] = None,
+                 maxsize: int = DEFAULT_QUEUE_SIZE) -> None:
         self._manager = manager
         self.maxsize = maxsize
         self._subs: set[Subscription] = set()
         manager.on_hub_event(self._on_hub_event)
         manager.on_server_event(self._on_server_event)
         manager.on_rekey(self._on_rekey)
+        if jobs is not None:
+            jobs.on_job_event(self._on_job_event)
 
     @property
     def subscribers(self) -> int:
@@ -133,6 +148,11 @@ class EventRelay:
 
     def _on_server_event(self, hub_id: str, kind: str) -> None:
         self._broadcast(hub_id, WsServerEvent(hub_id=hub_id, kind=kind))
+
+    def _on_job_event(self, hub_id: str, job: JobView) -> None:
+        # A copy: the runner keeps mutating its view as the job proceeds.
+        from dataclasses import replace
+        self._broadcast(hub_id, WsJobEvent(hub_id=hub_id, job=replace(job)))
 
     def _on_rekey(self, old_id: str, new_id: str) -> None:
         # A filter on the temporary host id follows the hub to its MAC,

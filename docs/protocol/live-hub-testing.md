@@ -2049,3 +2049,53 @@ first refused retry and the feedback loop never has to fire; the 4 s
 window alone covers the 3.0 s dial-back timer. The Windows result was
 the host, not the library. The server's release semantics count as
 validated.
+
+## ◇ Validated: sofabaton-x-server writes, phase 3 (X1 + X1S, 2026-09-10)
+
+`scripts/hub-bench/bench_210_server_writes.py` drives a real server
+process (docs/internal/sofabaton-x-phase3-writes-plan.md, S12) over
+HTTP and WebSocket against one hub per run, HA entries disabled for the
+runs and re-enabled after (the X2 was not in the program). Reference
+runs: `out/bench_210_x1s.json` (X1S, one run after three bench-side
+fixes) and `out/bench_210_x1c.json` (X1, third run). Both finished with
+`problems: none`. Neither the `--app-session` leg (needs the vendor app
+in hand) nor the `--destructive` leg (backup, erase, restore) was run.
+
+| step | X1S (`e26a44861b45`, 11 devices, 6 activities) | X1 (`cb383539684b`, 12 devices, 4 activities) |
+| --- | --- | --- |
+| cold snapshot after register + initial sync | complete false, 0 editable | same |
+| whole-hub refresh job (structural) | 24.6 s, 20 progress events, 1 `snapshot_changed`, complete true | 36.6 s, 19 progress events, complete true (after the key-sort fix below) |
+| `If-None-Match` with the current ETag | 304 | 304 |
+| server restart with the state file | complete true, same ETag, before and after the initial sync | same (after the favorites-order fix below) |
+| rename activity (intent) then `PUT` it back | 428 without `If-Match`, 412 with the old ETag, plan = rename + remote sync, then done | same |
+| bind button C with a long press, re-read from the hub, clear | binding present on the hub; cleared | same |
+| add favorite, remove it | back to the starting set | skipped: the command was already a favorite |
+| rename device and back, rename command and back | done (about 14 s each, remote sync included) | done |
+| read payload, play, overwrite with itself, add as a new command | raw, 38 368 Hz; played; byte-identical after the overwrite; added as id 5 and read back identical | raw, 38 179 Hz; same, added as id 21 |
+| add device (class `ir`), reorder devices and activities, rename hub and back, remove the device | ids 12 / 107; all done; removed | ids 13 / 105; all done; removed |
+| delete the added activity through the API | not exercised (the run predates the endpoint; the hub had swept it) | done, gone from the snapshot |
+
+**Two library bugs found and fixed.** The state document did not carry
+the activities' quick-access display order (`activity_favorites_order`),
+so after a restart the projected bundle lacked `favorites_order` and
+the snapshot id moved (only visible on the X1, whose first activity has
+favorites); export and import now carry it, with a round-trip test. And
+the X1 never answers a family-0x62 key-sort request for a `wifi_sonos`
+device (three consecutive 5 s timeouts, not even the STATUS_ACK it
+sends for "no key sort"; an IR device on the same hub answers in under
+three seconds), which left that device incomplete on every read and
+therefore never editable; a timed-out key-sort read on a network device
+class is now recorded as the empty row the STATUS_ACK path produces.
+
+**Hub facts.** The hub sweeps an activity with no members on its next
+delete cascade: the activity created by the API was gone by the time
+the device removal had finished, so the activity delete must come
+first (as the bench now does) or it reports 404. A command added
+through the API has no REST delete (the live editor removes commands
+only on the events device); the bench undoes it with the engine's
+bench-validated delete step on a separate session after the server
+released the hub. Every write lands within a few seconds; the device
+and command renames take about 14 s because each carries a remote
+sync. Whole-hub refresh times above are with the per-entity catalog
+read skipped (one catalog read per hub).
+
