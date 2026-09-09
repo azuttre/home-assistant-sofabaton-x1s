@@ -364,6 +364,9 @@ class AsyncXProxy:
         self._initial_sync_task: Optional[asyncio.Task] = None
         self._catalog_ready = False
         self._ready_event: Optional[asyncio.Event] = None
+        # Bumped on every hub disconnect so a sync started for an earlier
+        # session can never mark a later one ready.
+        self._session_gen = 0
 
     # -- escape hatches ----------------------------------------------------
 
@@ -565,13 +568,17 @@ class AsyncXProxy:
         as of the last devices fetch (see :class:`Device`).
         """
 
-        rows = await self._read(
+        await self._read(
             self._proxy.get_devices, "devices", timeout=timeout, fetch_kw="force_refresh"
         )
+        # The getter returns the JSON export view, which strips the stored
+        # record body on purpose; the power-state byte lives in that body,
+        # so project from the engine's own state rows instead.
+        rows = await self.run(lambda: dict(self._proxy.state.entities("device")))
         hub_version = self._proxy.hub_version
         return [
             _device_from_row(dev_id, row, hub_version)
-            for dev_id, row in sorted(dict(rows).items())
+            for dev_id, row in sorted(rows.items())
         ]
 
     async def commands(
@@ -734,8 +741,11 @@ class AsyncXProxy:
                 mode = "observe"
             else:
                 mode = "disconnected"
-            acts, _ = self._proxy.get_activities(force_refresh=False)
-            devs, _ = self._proxy.get_devices(force_refresh=False)
+            # Counts come from the engine's state, never from the catalog
+            # getters: those are fetch-if-missing and would enqueue a hub
+            # request on a cold engine, which a status poll must not do.
+            acts = self._proxy.state.entities("activity")
+            devs = self._proxy.state.entities("device")
             act = self._proxy.state.current_activity
             running = None
             if act is not None:
@@ -815,42 +825,61 @@ class AsyncXProxy:
             return
         self._initial_sync_armed = True
 
-        def _on_link(*_args: Any) -> None:
-            # Engine thread; decide on the loop.
+        # The transition itself is carried to the loop, not re-derived
+        # there: a drop and reconnect that both land before the loop runs
+        # would otherwise look like "still connected" and let the previous
+        # session's readiness survive into the new one.
+        def _on_hub_link(connected: bool) -> None:
+            self._loop.call_soon_threadsafe(self._on_hub_link_for_sync, bool(connected))
+
+        def _on_app_link(_connected: bool) -> None:
             self._loop.call_soon_threadsafe(self._maybe_start_initial_sync)
 
-        self._proxy.on_hub_state_change(_on_link)
-        self._proxy.on_client_state_change(_on_link)
+        self._proxy.on_hub_state_change(_on_hub_link)
+        self._proxy.on_client_state_change(_on_app_link)
 
-    def _maybe_start_initial_sync(self) -> None:
-        if not self._proxy.transport.is_hub_connected:
-            # Session gone: what was cached is no longer known-good, and a
-            # sync parked on a fetch that can no longer land is abandoned
-            # so the next connect starts a fresh one.
+    def _on_hub_link_for_sync(self, connected: bool) -> None:
+        if not connected:
+            # Session gone: what was cached is no longer known-good, a sync
+            # parked on a fetch that can no longer land is abandoned, and
+            # the generation moves on so its late completion is ignored.
+            self._session_gen += 1
             self._set_catalog_ready(False)
             task = self._initial_sync_task
             if task is not None and not task.done():
                 task.cancel()
             return
+        self._maybe_start_initial_sync()
+
+    def _maybe_start_initial_sync(self) -> None:
+        if not self._proxy.transport.is_hub_connected:
+            return
         if self._catalog_ready or not self._proxy.can_issue_commands():
             return
         if self._initial_sync_task is not None and not self._initial_sync_task.done():
             return
-        self._initial_sync_task = self._loop.create_task(self._run_initial_sync())
+        self._initial_sync_task = self._loop.create_task(
+            self._run_initial_sync(self._session_gen)
+        )
 
-    async def _run_initial_sync(self) -> None:
+    async def _run_initial_sync(self, session_gen: int) -> None:
         """Banner, devices, activities: the minimum every session caches.
 
-        Runs in order, sharing the burst bridge with concurrent reads.
-        Never raises: a failure (hub dropped mid-fetch, app attached,
-        reply never landed) leaves ``catalog_ready`` False and the next
-        link-state change tries again.
+        Runs in order, sharing the burst bridge with concurrent reads, and
+        only counts a step as done when the reply actually landed (banner
+        ready flag; catalog getter ready flag plus the burst commit flag,
+        via ``_await_fetch``). Never raises: a failure (hub dropped
+        mid-fetch, app attached, reply never landed) leaves
+        ``catalog_ready`` False and the next link-state change tries
+        again. A completion for an earlier session generation is ignored.
         """
 
         try:
-            await self.run(
+            _info, banner_ready = await self.run(
                 functools.partial(self._proxy.fetch_banner_info, force_refresh=True)
             )
+            if not banner_ready:
+                return
             await self._await_fetch(
                 self._proxy.get_devices, "devices",
                 timeout=DEFAULT_FETCH_TIMEOUT, fetch_kw="force_refresh",
@@ -861,7 +890,7 @@ class AsyncXProxy:
             )
         except (RuntimeError, TimeoutError):
             return
-        if self._proxy.transport.is_hub_connected:
+        if session_gen == self._session_gen and self._proxy.transport.is_hub_connected:
             self._set_catalog_ready(True)
 
     def _set_catalog_ready(self, ready: bool) -> None:
@@ -925,13 +954,17 @@ class AsyncXProxy:
                 ),
             )
 
+        # These run on the engine thread, possibly INSIDE the transport's
+        # own locks (its stop() notifies hub state while holding the socket
+        # lock). Nothing here may call back into the transport, so the
+        # mode is derived on the loop after the callback has returned.
         def on_hub_state(connected: bool) -> None:
             emit("hub_state", ConnectionState(connected=bool(connected)))
-            self._emit_mode_change_threadsafe()
+            self._loop.call_soon_threadsafe(self._emit_mode_change)
 
         def on_app_state(connected: bool) -> None:
             emit("app_state", ConnectionState(connected=bool(connected)))
-            self._emit_mode_change_threadsafe()
+            self._loop.call_soon_threadsafe(self._emit_mode_change)
 
         self._proxy.on_activity_change(on_activity)
         self._proxy.on_activity_list_update(lambda: emit("activity_list_updated", None))
@@ -939,13 +972,15 @@ class AsyncXProxy:
         self._proxy.on_client_state_change(on_app_state)
         self._proxy.on_ota_update(lambda: emit("ota", None))
 
-    def _emit_mode_change_threadsafe(self) -> None:
+    def _emit_mode_change(self) -> None:
+        # Loop thread only: reads the transport flags, which take the
+        # transport's locks.
         mode = self._current_mode()
         previous = self._last_mode
         if mode == previous:
             return
         self._last_mode = mode
-        self._emit_event_threadsafe(
+        self._dispatch_event(
             "status_changed", StatusChanged(mode=mode, previous_mode=previous or "disconnected")
         )
 
@@ -1147,24 +1182,60 @@ class AsyncXProxy:
         self._burst_waiters.setdefault(key, []).append(future)
         self._ensure_burst_dispatch(key.split(":", 1)[0])
 
+        # Ownership is released and the waiter dropped on EVERY exit path,
+        # including a cancellation that lands while the request is still
+        # being issued in the executor; otherwise the key would stay marked
+        # in flight and every later read for it would join a fetch nobody
+        # owns.
         owner = key not in self._inflight
         if owner:
             self._inflight.add(key)
-            await self.run(getter, *args, **{fetch_kw: True})
         try:
-            await asyncio.wait_for(future, timeout)
-        except TimeoutError:
-            self._drop_burst_waiter(key, future)
-            raise FetchTimeoutError(f"timed out after {timeout}s fetching {key!r}")
-        except asyncio.CancelledError:
+            if owner:
+                await self.run(getter, *args, **{fetch_kw: True})
+            try:
+                await asyncio.wait_for(future, timeout)
+            except TimeoutError:
+                raise FetchTimeoutError(f"timed out after {timeout}s fetching {key!r}")
+        except BaseException:
             self._drop_burst_waiter(key, future)
             raise
         finally:
             if owner:
                 self._inflight.discard(key)
 
-        data, _ = await self.run(getter, *args, **{fetch_kw: False})
-        return data
+        # A burst also ends on the engine's idle timeout without any reply
+        # having landed; the getter's ready flag (and, for the catalogs,
+        # the commit flag of the burst that just ended) is what proves the
+        # data is real.
+        # The engine may notify the burst end a few instructions before it
+        # records completeness (an empty-keymap ACK finishes the burst,
+        # then marks the entity), so give the flag a short grace window
+        # before calling the fetch a failure.
+        for attempt in range(5):
+            data, ready = await self.run(getter, *args, **{fetch_kw: False})
+            if ready and self._burst_committed(key):
+                return data
+            await asyncio.sleep(0.02 * (attempt + 1))
+        raise FetchTimeoutError(
+            f"fetch of {key!r} ended without a complete reply from the hub"
+        )
+
+    def _burst_committed(self, key: str) -> bool:
+        """Whether the catalog burst behind ``key`` committed a full row set.
+
+        Only the two catalogs carry this signal (``last_*_burst_committed``
+        on the engine); every other key is judged by its getter's ready
+        flag alone. Engines without the property are trusted.
+        """
+
+        attr = {
+            "devices": "last_devices_burst_committed",
+            "activities": "last_activities_burst_committed",
+        }.get(key)
+        if attr is None:
+            return True
+        return bool(getattr(self._proxy, attr, True))
 
     def _drop_burst_waiter(self, key: str, future: asyncio.Future) -> None:
         pending = self._burst_waiters.get(key)

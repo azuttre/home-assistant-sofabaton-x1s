@@ -54,6 +54,10 @@ class _State:
         return []
     def get_activity_name(self, act_id):
         return self.activity_names.get(act_id & 0xFF) if act_id is not None else None
+    def entities(self, kind):
+        if kind == "activity":
+            return {1: {"name": "Watch TV", "active": True}}
+        return {5: {"name": "TV", "brand": "Sony"}}
 
 
 class FakeProxy:

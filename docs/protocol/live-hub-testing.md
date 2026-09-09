@@ -1890,3 +1890,71 @@ Findings:
   live HA (covered by the Playwright harness test instead), and X2
   (MQTT class) — the X2 was not part of this program.
 
+
+## ◇ Validated: sofabaton-x facade, phase 1 acceptance (X1 + X1S, 2026-09-09)
+
+Bench-validated the library facade built under
+docs/internal/sofabaton-x-phase1-facade-plan.md on both hub lines with
+`scripts/hub-bench/bench_190_facade.py` (HA entries disabled per run,
+re-enabled after). The bench is the plan's "server sketch": it uses
+root exports only, never `.sync`, and walks config record → proxy →
+connect-time initial sync → `status()` / `hub_info()` → the six typed
+reads → the event stream while the first activity is started and
+stopped → device power state through a forced catalog refresh → a
+read of a non-existent device for the typed error shape. Both runs
+ended with `problems: none`; reports in `scripts/hub-bench/out/
+bench_190_x1s.json` and `bench_190_x1.json`, logs under
+`out/logs/bench_190_*`.
+
+| measure | X1S | X1 |
+| --- | --- | --- |
+| hub connected after start | 0.07 s | 0.18 s |
+| initial sync (banner + devices + activities) ready | 1.64 s | 1.75 s |
+| catalog | 6 activities, 11 devices | 4 activities, 12 devices |
+| first device detail (commands + buttons) | 0.29 s | 0.65 s |
+| first activity detail (macros + favorites + buttons) | 0.47 s | 1.30 s |
+| forced devices refresh through `clear_devices_catalog` + `devices()` | 0.89 s | 1.02 s |
+| events over the run, dropped | 7, 0 | 8, 0 |
+
+Findings:
+
+- **The review findings of 2026-09-09 were real and are fixed.** All
+  five reproduced against the real engine in unit tests before the
+  bench ran (`tests/lib/test_aio_real_engine.py`): a burst ending on
+  the engine's idle timeout no longer counts as a reply (the getter's
+  ready flag and the catalog commit flag are re-checked, with a short
+  grace window because an empty-keymap ACK finishes the burst a few
+  instructions before it marks the entity); a cancelled fetch releases
+  its in-flight key; `power_state` is projected from the engine's
+  unstripped state rows instead of the export view; a drop-and-
+  reconnect that lands before the loop runs bumps a session
+  generation and resyncs; `status()` reads counts from state and sends
+  nothing.
+- **The bench found a sixth, a shutdown deadlock.** The first X1S run
+  hung on exit: `TransportBridge.stop()` notifies hub state while
+  holding its socket lock, and the facade's event listener read
+  `can_issue_commands()` on that engine thread, which takes the same
+  lock. Rule now enforced in the facade: engine-thread callbacks never
+  touch the transport; the mode is derived on the loop after the
+  callback returns (regression test on the real engine). Every consumer
+  of `events()` would have hung the same way on `stop()`.
+- **Initial sync behaves as designed on both lines.** Banner, devices
+  and activities land in under two seconds from connect, the catalog is
+  served from cache afterwards (catalog read 1 ms), and `status()`
+  reported the X1's already-running activity (103, "play xbox", left
+  on by the HA session) before any read.
+- **Power state is live and per device.** After starting the X1S
+  "Xbox" activity the Xbox Series X read 1, after stopping it 0, with
+  every other device unchanged; on the X1 the bytes did not change
+  across the "Watch Apple TV" start/stop, which is the hub's own
+  bookkeeping (its power-off macro left the devices' bytes at 1), not
+  a projection error. The bench reads it through the public
+  `clear_devices_catalog` delegate plus `devices()`; a facade-level
+  refresh read is a phase 3 candidate.
+- **Typed errors on the wire.** A commands read for device 0xEE ends
+  with the hub never answering; the facade raises `FetchTimeoutError`
+  ("ended without a complete reply") after the burst's idle end rather
+  than returning an empty list.
+- **Events.** Exactly one `activity_changed` per start and per stop on
+  both lines, plus `hub_state`, `status_changed` and `catalog_ready`
+  at connect; nothing dropped.

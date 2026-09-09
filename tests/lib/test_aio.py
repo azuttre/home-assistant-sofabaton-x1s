@@ -71,6 +71,12 @@ class FakeProxy:
                 return None
             return self.activity_names.get(act_id & 0xFF)
 
+        def entities(self, kind):
+            # The engine's unstripped rows (raw_body kept); the facade
+            # projects devices and status counts from these.
+            key = "activities" if kind == "activity" else "devices"
+            return dict(self._p._ready.get(key) or {})
+
     def __init__(self) -> None:
         self._listeners: dict[str, list] = {}
         self.hub_state_listeners: list = []
@@ -1043,9 +1049,14 @@ def test_events_emit_status_changed_once_per_mode_flip() -> None:
         proxy = _wrap(fake)
 
         async def fire():
+            # The mode is derived on the loop after each callback (the
+            # callbacks may run under the transport's locks), so yield
+            # between flips the way real engine-thread callbacks would.
             await asyncio.sleep(0.01)
             fake.set_connected(hub=True, client=True)   # control -> observe
+            await asyncio.sleep(0.01)
             fake.set_connected(hub=True, client=True)   # no flip: no status event
+            await asyncio.sleep(0.01)
             fake.set_connected(hub=False)               # observe -> disconnected
 
         asyncio.ensure_future(fire())
