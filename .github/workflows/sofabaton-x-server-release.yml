@@ -27,6 +27,8 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install pytest zeroconf -r sofabaton-x-server/openapi-toolchain.txt
+      - name: Install the library from this checkout (the export script imports it)
+        run: pip install .
       - name: Server tests
         run: pytest sofabaton-x-server/tests -q
       - name: OpenAPI document is current

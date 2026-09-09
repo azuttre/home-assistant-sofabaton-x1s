@@ -36,6 +36,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
       - run: pip install pytest zeroconf -r sofabaton-x-server/openapi-toolchain.txt
+      - name: Install the library from this checkout (the export script imports it)
+        run: pip install .
       - name: Server tests (in-tree library, no network)
         run: pytest sofabaton-x-server/tests -q
       - name: OpenAPI document is current
