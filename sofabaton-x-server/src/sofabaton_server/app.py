@@ -1,0 +1,165 @@
+"""FastAPI application factory.
+
+S0 ships the skeleton: settings wired in, the OpenAPI document shaped
+the way generated clients need it (stable operation ids, named
+components, ``servers[0].url`` from the advertised URL, root path), and
+one route, ``GET /api/v1/server``. Hubs, discovery and the WebSocket
+arrive in S1 to S4; every route added later follows the conventions
+set here.
+"""
+
+from __future__ import annotations
+
+import time
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from typing import Any, AsyncIterator, Optional
+
+from fastapi import FastAPI
+
+from . import API_PREFIX, API_VERSION, __version__
+from .config import Settings
+from .discovery import DiscoveryService
+from .manager import HubManager
+from .problems import install as install_problem_handler
+from .routes_discovery import router as discovery_router
+from .routes_hub_data import router as hub_data_router
+from .routes_hubs import router as hubs_router
+from .ws import WS_MESSAGE_TYPES, EventRelay, router as events_router
+
+# ``sofabaton`` is the library's import name (PyPI: sofabaton-x). Only
+# its version is needed at the skeleton stage; the hub manager (S1) is
+# where AsyncXProxy comes in.
+from sofabaton import __version__ as library_version
+
+
+@dataclass(frozen=True)
+class ServerInfo:
+    """What ``GET /api/v1/server`` returns (and what the mDNS TXT says, in full)."""
+
+    name: str
+    version: str
+    library_version: str
+    api_version: str
+    api_path: str
+    hubs: int
+    uptime_seconds: float
+    base_url: str | None = None
+    features: list[str] = field(default_factory=list)
+
+
+def create_app(settings: Settings | None = None, *, manager: Optional[HubManager] = None,
+               discovery: Optional[DiscoveryService] = None,
+               ws_queue_size: Optional[int] = None) -> FastAPI:
+    """Build the application. ``manager`` is injectable for tests; by
+    default one is created from the settings and started with the app."""
+
+    settings = settings or Settings()
+    started = time.monotonic()
+    hub_manager = manager or HubManager(settings)
+    discovery_service = discovery or DiscoveryService(settings, hub_manager)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        # Discovery first: it owns the shared Zeroconf the proxies adopt.
+        await discovery_service.start()
+        await hub_manager.start()
+        try:
+            yield
+        finally:
+            await hub_manager.stop()
+            await discovery_service.stop()
+
+    app = FastAPI(
+        lifespan=lifespan,
+        title="sofabaton-x-server",
+        version=__version__,
+        description=(
+            "REST + WebSocket over the sofabaton-x library for Sofabaton "
+            "X1 / X1S / X2 hubs. LAN service; no authentication in v1."
+        ),
+        root_path=settings.root_path,
+        # An advertised URL already carries any public prefix, so it must
+        # be the one and only servers entry; without one, FastAPI's own
+        # root-path entry is the best hint a client gets.
+        servers=[{"url": settings.advertise_url}] if settings.advertise_url else None,
+        root_path_in_servers=not bool(settings.advertise_url),
+        openapi_url=f"{API_PREFIX}/openapi.json",
+        docs_url=f"{API_PREFIX}/docs",
+        redoc_url=None,
+    )
+    app.state.settings = settings
+    app.state.hub_manager = hub_manager
+    app.state.discovery = discovery_service
+    app.state.event_relay = EventRelay(hub_manager, **({"maxsize": ws_queue_size} if ws_queue_size else {}))
+    install_problem_handler(app)
+    app.include_router(hubs_router)
+    app.include_router(hub_data_router)
+    app.include_router(events_router)
+    app.include_router(discovery_router)
+    _publish_ws_components(app)
+
+    @app.get(
+        f"{API_PREFIX}/server",
+        operation_id="getServerInfo",
+        response_model=ServerInfo,
+        summary="Identify the server",
+        tags=["server"],
+    )
+    async def get_server_info() -> ServerInfo:
+        return ServerInfo(
+            name="sofabaton-x-server",
+            version=__version__,
+            library_version=library_version,
+            api_version=API_VERSION,
+            api_path=API_PREFIX,
+            hubs=_hub_count(app),
+            uptime_seconds=round(time.monotonic() - started, 1),
+            base_url=settings.advertise_url,
+            features=["discovery"] if discovery_service.enabled else [],
+        )
+
+    return app
+
+
+def _hub_count(app: FastAPI) -> int:
+    manager: Any = getattr(app.state, "hub_manager", None)
+    return int(manager.count()) if manager is not None else 0
+
+
+def _publish_ws_components(app: FastAPI) -> None:
+    """Add the WebSocket message types to the OpenAPI components.
+
+    OpenAPI cannot describe a WebSocket route, but generated clients
+    still want the message types. The document's ``info.description``
+    points at the endpoint; the schemas ride along as components under
+    their dataclass names.
+    """
+
+    from pydantic import TypeAdapter
+
+    default_openapi = app.openapi
+
+    def openapi() -> dict:
+        if app.openapi_schema:
+            return app.openapi_schema
+        spec = default_openapi()
+        components = spec.setdefault("components", {}).setdefault("schemas", {})
+        for message_type in WS_MESSAGE_TYPES:
+            schema = TypeAdapter(message_type).json_schema(
+                mode="serialization", ref_template="#/components/schemas/{model}"
+            )
+            for name, definition in schema.pop("$defs", {}).items():
+                components.setdefault(name, definition)
+            components[message_type.__name__] = schema
+        blank = chr(10) + chr(10)
+        spec["info"]["description"] = (
+            spec["info"].get("description", "")
+            + blank
+            + f"WebSocket: `{API_PREFIX}/events` (optional `?hub_id=` filter, repeatable) streams "
+            "WsHello once, then WsHubEvent / WsServerEvent / WsDropped messages (see components)."
+        )
+        app.openapi_schema = spec
+        return spec
+
+    app.openapi = openapi  # type: ignore[method-assign]

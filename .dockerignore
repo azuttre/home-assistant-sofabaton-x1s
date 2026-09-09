@@ -1,0 +1,25 @@
+# Docker build context for sofabaton-x-server/Dockerfile is the repo root;
+# keep everything the image does not need out of the context.
+.git
+.github
+.venv*
+.pytest_tmp
+.codex-tmp
+node_modules
+out
+dist
+artifacts
+test-results
+IrScrutinizer
+scripts
+tests
+docs
+custom_components/sofabaton_x1s/www
+custom_components/sofabaton_x1s/__pycache__
+custom_components/sofabaton_x1s/lib/__pycache__
+sofabaton-x-server/data
+sofabaton-x-server/codegen-smoke/schema.d.ts
+**/__pycache__
+*.log
+*.patch
+*.bak

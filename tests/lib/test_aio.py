@@ -100,6 +100,7 @@ class FakeProxy:
         self.advertised: list[tuple[dict, str]] = []
         self.mdns_txt: dict[str, str] = {}
         self.hub_version = "X1"
+        self.real_hub_ip = "1.2.3.4"
 
     # -- listener registration ------------------------------------------
     def on_hub_state_change(self, cb) -> None:
@@ -1245,5 +1246,30 @@ def test_ready_waiter_is_false_when_initial_sync_is_off() -> None:
         proxy = _wrap(FakeProxy())          # wrap() defaults initial_sync=False
         assert not await proxy.wait_until_ready(timeout=0.01)
         assert not (await proxy.status()).catalog_ready
+
+    asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
+# stop(release_hub=True) (phase 1 addendum F9)
+# ---------------------------------------------------------------------------
+
+
+def test_stop_release_hub_bounces_shared_listener_after_stop(monkeypatch) -> None:
+    calls: list[str] = []
+
+    class Engine(FakeProxy):
+        def stop(self) -> None:
+            calls.append("stop")
+
+    monkeypatch.setattr(aio, "release_hub_from_listener", lambda ip: calls.append(f"release {ip}"))
+
+    async def main():
+        proxy = _wrap(Engine())
+        await proxy.stop()
+        assert calls == ["stop"]                      # plain stop: no release
+        calls.clear()
+        await proxy.stop(release_hub=True)
+        assert calls == ["stop", "release 1.2.3.4"]   # release: AFTER the stop, for this hub's IP
 
     asyncio.run(main())

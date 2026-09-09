@@ -256,6 +256,20 @@ attached it runs as soon as the app lets go. Pass `initial_sync=False`
 to the constructor to opt out (an application that runs its own
 connect-time sync, as the Home Assistant integration does).
 
+To take a hub out of service while keeping its configuration (so the
+official app can talk to it directly again), stop the proxy with
+`await proxy.stop(release_hub=True)`. A dropped hub keeps dialling the
+shared connect-back port for as long as that port is open for other
+hubs, and while it dials it does not advertise itself; it only gives up
+on a refused connection. The release bounces the shared listener (the
+listening socket closes for a short window and reopens) and, for a
+grace period, bounces again whenever that hub dials back, so one of its
+own retries is guaranteed to meet a closed port. Accepted sessions are
+untouched, so every other hub stays connected straight through; only
+new dial-backs are refused during a window. With no other hub
+registered the port simply closes and the release is a no-op. A plain
+`stop()` is for shutdown.
+
 The mode is not fixed at startup — it follows the app. If the official
 app connects while you hold control, you are demoted to observe mode
 immediately: `send()` / `start_activity()` return `False` (refused, not

@@ -1,0 +1,2743 @@
+{
+  "components": {
+    "schemas": {
+      "Accepted": {
+        "description": "Result of a control call: the hub took it (True) or refused it.",
+        "properties": {
+          "accepted": {
+            "title": "Accepted",
+            "type": "boolean"
+          },
+          "mode": {
+            "title": "Mode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "accepted",
+          "mode"
+        ],
+        "title": "Accepted",
+        "type": "object"
+      },
+      "Activity": {
+        "description": "One activity from the hub's catalog.",
+        "properties": {
+          "active": {
+            "title": "Active",
+            "type": "boolean"
+          },
+          "activity_id": {
+            "title": "Activity Id",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "needs_confirm": {
+            "title": "Needs Confirm",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "activity_id",
+          "name",
+          "active",
+          "needs_confirm"
+        ],
+        "title": "Activity",
+        "type": "object"
+      },
+      "ActivityChanged": {
+        "description": "The running activity changed (None = powered off / idle).",
+        "properties": {
+          "activity_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Activity Id"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "previous_activity_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Activity Id"
+          }
+        },
+        "required": [
+          "activity_id",
+          "previous_activity_id",
+          "name"
+        ],
+        "title": "ActivityChanged",
+        "type": "object"
+      },
+      "Button": {
+        "description": "A remote button bound on an activity or device.\n\n``button_code`` is what you send to that entity; ``device_id`` /\n``command_id`` are the underlying target it maps to, None for an\nunbound slot. ``name`` is the ``ButtonName`` alias when the code has\none.",
+        "properties": {
+          "button_code": {
+            "title": "Button Code",
+            "type": "integer"
+          },
+          "command_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Command Id"
+          },
+          "device_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Device Id"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "required": [
+          "button_code",
+          "name",
+          "device_id",
+          "command_id"
+        ],
+        "title": "Button",
+        "type": "object"
+      },
+      "CatalogReady": {
+        "description": "The connect-time initial sync completed (True) or the session dropped (False).",
+        "properties": {
+          "ready": {
+            "title": "Ready",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "ready"
+        ],
+        "title": "CatalogReady",
+        "type": "object"
+      },
+      "Command": {
+        "description": "A device command; send with ``send(device_id, command_id)``.",
+        "properties": {
+          "command_id": {
+            "title": "Command Id",
+            "type": "integer"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "command_id",
+          "label"
+        ],
+        "title": "Command",
+        "type": "object"
+      },
+      "ConnectionState": {
+        "description": "A hub-side (``hub_state``) or app-side (``app_state``) link came up or went down.",
+        "properties": {
+          "connected": {
+            "title": "Connected",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "connected"
+        ],
+        "title": "ConnectionState",
+        "type": "object"
+      },
+      "Device": {
+        "description": "One device from the hub's catalog.\n\n``power_state`` is the hub's live power byte for the device (0 off,\n1 on) as of the last devices fetch; None when the row carried no\nparseable record. The hub commits it with a macro-runtime lag after a\npower fire, so it is not an instantaneous read. ``idle_behavior`` is\nthe device's power-behaviour mode when known.",
+        "properties": {
+          "brand": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand"
+          },
+          "device_class": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Device Class"
+          },
+          "device_class_code": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Device Class Code"
+          },
+          "device_id": {
+            "title": "Device Id",
+            "type": "integer"
+          },
+          "idle_behavior": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idle Behavior"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "power_state": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Power State"
+          }
+        },
+        "required": [
+          "device_id",
+          "name",
+          "brand",
+          "device_class",
+          "device_class_code",
+          "power_state",
+          "idle_behavior"
+        ],
+        "title": "Device",
+        "type": "object"
+      },
+      "Favorite": {
+        "description": "An activity favorite: a device command; send with ``send(device_id, command_id)``.",
+        "properties": {
+          "command_id": {
+            "title": "Command Id",
+            "type": "integer"
+          },
+          "device_id": {
+            "title": "Device Id",
+            "type": "integer"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          }
+        },
+        "required": [
+          "device_id",
+          "command_id",
+          "label"
+        ],
+        "title": "Favorite",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "HubConfig": {
+        "description": "Everything needed to proxy one hub, as data.\n\nFields beyond ``host`` refine the proxy's mDNS identity (``name``,\n``txt``, ``hub_version``) or its two network faces (``port`` on the\nhub, ``hub_listen_port`` and ``app_discovery_port`` on this host).\n``is_proxy`` is True when the record was built from one of *our own*\nproxy advertisements rather than a physical hub; a consumer\nregistering hubs from a foreign discovery feed uses it to map such a\nrecord back to the hub it already fronts instead of proxying a proxy.",
+        "properties": {
+          "app_discovery_port": {
+            "default": 8102,
+            "title": "App Discovery Port",
+            "type": "integer"
+          },
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "hub_listen_port": {
+            "default": 8200,
+            "title": "Hub Listen Port",
+            "type": "integer"
+          },
+          "hub_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hub Version"
+          },
+          "is_proxy": {
+            "default": false,
+            "title": "Is Proxy",
+            "type": "boolean"
+          },
+          "mac": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mac"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "port": {
+            "default": 8102,
+            "title": "Port",
+            "type": "integer"
+          },
+          "proxy_enabled": {
+            "default": true,
+            "title": "Proxy Enabled",
+            "type": "boolean"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "server",
+                  "client",
+                  "manual"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "txt": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Txt",
+            "type": "object"
+          }
+        },
+        "required": [
+          "host"
+        ],
+        "title": "HubConfig",
+        "type": "object"
+      },
+      "HubCreate": {
+        "description": "Body of ``POST /hubs``: the ``HubConfig`` fields, host required.",
+        "properties": {
+          "app_discovery_port": {
+            "default": 8102,
+            "title": "App Discovery Port",
+            "type": "integer"
+          },
+          "enabled": {
+            "default": true,
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "host": {
+            "minLength": 1,
+            "title": "Host",
+            "type": "string"
+          },
+          "hub_listen_port": {
+            "default": 8200,
+            "title": "Hub Listen Port",
+            "type": "integer"
+          },
+          "hub_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hub Version"
+          },
+          "is_proxy": {
+            "default": false,
+            "title": "Is Proxy",
+            "type": "boolean"
+          },
+          "mac": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mac"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "port": {
+            "default": 8102,
+            "title": "Port",
+            "type": "integer"
+          },
+          "proxy_enabled": {
+            "default": true,
+            "title": "Proxy Enabled",
+            "type": "boolean"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "txt": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Txt",
+            "type": "object"
+          }
+        },
+        "required": [
+          "host"
+        ],
+        "title": "HubCreate",
+        "type": "object"
+      },
+      "HubEvent": {
+        "description": "One event from :meth:`AsyncXProxy.events`.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "activity_changed",
+              "activity_list_updated",
+              "hub_state",
+              "app_state",
+              "status_changed",
+              "catalog_ready",
+              "ota"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "payload": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ActivityChanged"
+              },
+              {
+                "$ref": "#/components/schemas/ConnectionState"
+              },
+              {
+                "$ref": "#/components/schemas/StatusChanged"
+              },
+              {
+                "$ref": "#/components/schemas/CatalogReady"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Payload"
+          },
+          "seq": {
+            "title": "Seq",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq",
+          "kind"
+        ],
+        "title": "HubEvent",
+        "type": "object"
+      },
+      "HubInfo": {
+        "description": "Identity of the physical hub, as read from its connect banner.\n\n``known`` is False until the banner has been read at least once; the\nother fields are then None.",
+        "properties": {
+          "firmware_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Firmware Version"
+          },
+          "known": {
+            "title": "Known",
+            "type": "boolean"
+          },
+          "mac": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mac"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "production_batch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Production Batch"
+          }
+        },
+        "required": [
+          "known",
+          "model",
+          "name",
+          "mac",
+          "firmware_version",
+          "production_batch"
+        ],
+        "title": "HubInfo",
+        "type": "object"
+      },
+      "HubStatus": {
+        "description": "Live connection state of one proxied hub. Pure state read, no hub traffic.",
+        "properties": {
+          "activities_cached": {
+            "title": "Activities Cached",
+            "type": "integer"
+          },
+          "app_connected": {
+            "title": "App Connected",
+            "type": "boolean"
+          },
+          "catalog_ready": {
+            "default": false,
+            "title": "Catalog Ready",
+            "type": "boolean"
+          },
+          "controllable": {
+            "title": "Controllable",
+            "type": "boolean"
+          },
+          "devices_cached": {
+            "title": "Devices Cached",
+            "type": "integer"
+          },
+          "hub_connected": {
+            "title": "Hub Connected",
+            "type": "boolean"
+          },
+          "hub_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hub Version"
+          },
+          "mode": {
+            "enum": [
+              "disconnected",
+              "observe",
+              "control"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "proxy_enabled": {
+            "title": "Proxy Enabled",
+            "type": "boolean"
+          },
+          "running_activity": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunningActivity"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "hub_connected",
+          "app_connected",
+          "controllable",
+          "mode",
+          "hub_version",
+          "proxy_enabled",
+          "running_activity",
+          "activities_cached",
+          "devices_cached"
+        ],
+        "title": "HubStatus",
+        "type": "object"
+      },
+      "HubStatusView": {
+        "description": "``GET /hubs/{id}/status``: the server's enabled flag beside the library status.",
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "hub_id": {
+            "title": "Hub Id",
+            "type": "string"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HubStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "hub_id",
+          "enabled",
+          "status"
+        ],
+        "title": "HubStatusView",
+        "type": "object"
+      },
+      "HubView": {
+        "description": "What ``/hubs`` returns per hub: the record plus a status snapshot.",
+        "properties": {
+          "added_at": {
+            "title": "Added At",
+            "type": "string"
+          },
+          "config": {
+            "$ref": "#/components/schemas/HubConfig"
+          },
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "hub_id": {
+            "title": "Hub Id",
+            "type": "string"
+          },
+          "last_seen": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Seen"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HubStatus"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "hub_id",
+          "enabled",
+          "config",
+          "added_at",
+          "last_seen",
+          "status"
+        ],
+        "title": "HubView",
+        "type": "object"
+      },
+      "Macro": {
+        "description": "An activity macro; send with ``send(activity_id, command_id)``.",
+        "properties": {
+          "command_id": {
+            "title": "Command Id",
+            "type": "integer"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          }
+        },
+        "required": [
+          "command_id",
+          "label"
+        ],
+        "title": "Macro",
+        "type": "object"
+      },
+      "Problem": {
+        "description": "Error body (RFC 9457 shape, minus the URI scheme).",
+        "properties": {
+          "detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Detail"
+          },
+          "hub_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hub Id"
+          },
+          "mode": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mode"
+          },
+          "status": {
+            "title": "Status",
+            "type": "integer"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "title",
+          "status"
+        ],
+        "title": "Problem",
+        "type": "object"
+      },
+      "RunningActivity": {
+        "description": "The activity currently running on the hub.",
+        "properties": {
+          "activity_id": {
+            "title": "Activity Id",
+            "type": "integer"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "required": [
+          "activity_id",
+          "name"
+        ],
+        "title": "RunningActivity",
+        "type": "object"
+      },
+      "ScanRequest": {
+        "properties": {
+          "timeout": {
+            "default": 5.0,
+            "description": "seconds to listen for advertisements",
+            "exclusiveMinimum": 0.0,
+            "maximum": 60.0,
+            "title": "Timeout",
+            "type": "number"
+          }
+        },
+        "title": "ScanRequest",
+        "type": "object"
+      },
+      "SeenHub": {
+        "description": "A physical hub advertised on the LAN (not yet necessarily configured).",
+        "properties": {
+          "config": {
+            "$ref": "#/components/schemas/HubConfig"
+          },
+          "first_seen": {
+            "title": "First Seen",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "last_seen": {
+            "title": "Last Seen",
+            "type": "string"
+          },
+          "present": {
+            "title": "Present",
+            "type": "boolean"
+          },
+          "registered_hub_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Registered Hub Id"
+          }
+        },
+        "required": [
+          "key",
+          "config",
+          "first_seen",
+          "last_seen",
+          "present",
+          "registered_hub_id"
+        ],
+        "title": "SeenHub",
+        "type": "object"
+      },
+      "SendCommand": {
+        "properties": {
+          "command_id": {
+            "description": "command id, macro id, or button code",
+            "minimum": 0.0,
+            "title": "Command Id",
+            "type": "integer"
+          },
+          "entity_id": {
+            "description": "activity id (101+) or device id",
+            "minimum": 0.0,
+            "title": "Entity Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "entity_id",
+          "command_id"
+        ],
+        "title": "SendCommand",
+        "type": "object"
+      },
+      "ServerInfo": {
+        "description": "What ``GET /api/v1/server`` returns (and what the mDNS TXT says, in full).",
+        "properties": {
+          "api_path": {
+            "title": "Api Path",
+            "type": "string"
+          },
+          "api_version": {
+            "title": "Api Version",
+            "type": "string"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "features": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Features",
+            "type": "array"
+          },
+          "hubs": {
+            "title": "Hubs",
+            "type": "integer"
+          },
+          "library_version": {
+            "title": "Library Version",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "uptime_seconds": {
+            "title": "Uptime Seconds",
+            "type": "number"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "version",
+          "library_version",
+          "api_version",
+          "api_path",
+          "hubs",
+          "uptime_seconds"
+        ],
+        "title": "ServerInfo",
+        "type": "object"
+      },
+      "StatusChanged": {
+        "description": "The proxy's mode flipped (derived from hub and app connection state).",
+        "properties": {
+          "mode": {
+            "enum": [
+              "disconnected",
+              "observe",
+              "control"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "previous_mode": {
+            "enum": [
+              "disconnected",
+              "observe",
+              "control"
+            ],
+            "title": "Previous Mode",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "previous_mode"
+        ],
+        "title": "StatusChanged",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "WsDropped": {
+        "properties": {
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "type": {
+            "const": "dropped",
+            "default": "dropped",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "count"
+        ],
+        "title": "WsDropped",
+        "type": "object"
+      },
+      "WsHello": {
+        "properties": {
+          "api_version": {
+            "title": "Api Version",
+            "type": "string"
+          },
+          "hubs": {
+            "items": {
+              "$ref": "#/components/schemas/WsHubSummary"
+            },
+            "title": "Hubs",
+            "type": "array"
+          },
+          "server_version": {
+            "title": "Server Version",
+            "type": "string"
+          },
+          "type": {
+            "const": "hello",
+            "default": "hello",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "server_version",
+          "api_version",
+          "hubs"
+        ],
+        "title": "WsHello",
+        "type": "object"
+      },
+      "WsHubEvent": {
+        "properties": {
+          "event": {
+            "$ref": "#/components/schemas/HubEvent"
+          },
+          "hub_id": {
+            "title": "Hub Id",
+            "type": "string"
+          },
+          "type": {
+            "const": "hub_event",
+            "default": "hub_event",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "hub_id",
+          "event"
+        ],
+        "title": "WsHubEvent",
+        "type": "object"
+      },
+      "WsHubSummary": {
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "hub_id": {
+            "title": "Hub Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "hub_id",
+          "enabled"
+        ],
+        "title": "WsHubSummary",
+        "type": "object"
+      },
+      "WsServerEvent": {
+        "properties": {
+          "hub_id": {
+            "title": "Hub Id",
+            "type": "string"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "type": {
+            "const": "server_event",
+            "default": "server_event",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "hub_id",
+          "kind"
+        ],
+        "title": "WsServerEvent",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "REST + WebSocket over the sofabaton-x library for Sofabaton X1 / X1S / X2 hubs. LAN service; no authentication in v1.\n\nWebSocket: `/api/v1/events` (optional `?hub_id=` filter, repeatable) streams WsHello once, then WsHubEvent / WsServerEvent / WsDropped messages (see components).",
+    "title": "sofabaton-x-server",
+    "version": "0.1.0.dev0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/discovery/hubs": {
+      "get": {
+        "operationId": "listDiscoveredHubs",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SeenHub"
+                  },
+                  "title": "Response Listdiscoveredhubs",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Hubs advertised on the LAN (live table; our own proxies excluded)",
+        "tags": [
+          "discovery"
+        ]
+      }
+    },
+    "/api/v1/discovery/scan": {
+      "post": {
+        "operationId": "scanForHubs",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/ScanRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SeenHub"
+                  },
+                  "title": "Response Scanforhubs",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Listen for hub advertisements for a while, then return the table",
+        "tags": [
+          "discovery"
+        ]
+      }
+    },
+    "/api/v1/hubs": {
+      "get": {
+        "operationId": "listHubs",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/HubView"
+                  },
+                  "title": "Response Listhubs",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List configured hubs",
+        "tags": [
+          "hubs"
+        ]
+      },
+      "post": {
+        "operationId": "addHub",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HubCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HubView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Unprocessable Content"
+          }
+        },
+        "summary": "Register a hub",
+        "tags": [
+          "hubs"
+        ]
+      }
+    },
+    "/api/v1/hubs/{hub_id}": {
+      "delete": {
+        "operationId": "removeHub",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Forget a hub (stops and releases it first)",
+        "tags": [
+          "hubs"
+        ]
+      },
+      "get": {
+        "operationId": "getHub",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HubView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "One configured hub",
+        "tags": [
+          "hubs"
+        ]
+      }
+    },
+    "/api/v1/hubs/{hub_id}/activities": {
+      "get": {
+        "operationId": "listActivities",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Activity"
+                  },
+                  "title": "Response Listactivities",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Gateway Timeout"
+          }
+        },
+        "summary": "Activities",
+        "tags": [
+          "hub"
+        ]
+      }
+    },
+    "/api/v1/hubs/{hub_id}/activities/{activity_id}/favorites": {
+      "get": {
+        "operationId": "listActivityFavorites",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "activity_id",
+            "required": true,
+            "schema": {
+              "title": "Activity Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Favorite"
+                  },
+                  "title": "Response Listactivityfavorites",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Gateway Timeout"
+          }
+        },
+        "summary": "An activity's favorites",
+        "tags": [
+          "hub"
+        ]
+      }
+    },
+    "/api/v1/hubs/{hub_id}/activities/{activity_id}/macros": {
+      "get": {
+        "operationId": "listActivityMacros",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "activity_id",
+            "required": true,
+            "schema": {
+              "title": "Activity Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Macro"
+                  },
+                  "title": "Response Listactivitymacros",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Gateway Timeout"
+          }
+        },
+        "summary": "An activity's macros",
+        "tags": [
+          "hub"
+        ]
+      }
+    },
+    "/api/v1/hubs/{hub_id}/activities/{activity_id}/start": {
+      "post": {
+        "operationId": "startActivity",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "activity_id",
+            "required": true,
+            "schema": {
+              "title": "Activity Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Accepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Gateway Timeout"
+          }
+        },
+        "summary": "Switch to an activity",
+        "tags": [
+          "hub"
+        ]
+      }
+    },
+    "/api/v1/hubs/{hub_id}/activities/{activity_id}/stop": {
+      "post": {
+        "operationId": "stopActivity",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "activity_id",
+            "required": true,
+            "schema": {
+              "title": "Activity Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Accepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Gateway Timeout"
+          }
+        },
+        "summary": "Power off an activity",
+        "tags": [
+          "hub"
+        ]
+      }
+    },
+    "/api/v1/hubs/{hub_id}/activity": {
+      "get": {
+        "operationId": "getRunningActivity",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/RunningActivity"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Getrunningactivity"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "The running activity, or null when the hub is idle",
+        "tags": [
+          "hub"
+        ]
+      }
+    },
+    "/api/v1/hubs/{hub_id}/devices": {
+      "get": {
+        "operationId": "listDevices",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "re-fetch the device list from the hub (fresh power state)",
+            "in": "query",
+            "name": "refresh",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "re-fetch the device list from the hub (fresh power state)",
+              "title": "Refresh",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Device"
+                  },
+                  "title": "Response Listdevices",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Gateway Timeout"
+          }
+        },
+        "summary": "Devices (with power state as of the last fetch)",
+        "tags": [
+          "hub"
+        ]
+      }
+    },
+    "/api/v1/hubs/{hub_id}/devices/{device_id}/commands": {
+      "get": {
+        "operationId": "listDeviceCommands",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "device_id",
+            "required": true,
+            "schema": {
+              "title": "Device Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Command"
+                  },
+                  "title": "Response Listdevicecommands",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Gateway Timeout"
+          }
+        },
+        "summary": "A device's commands",
+        "tags": [
+          "hub"
+        ]
+      }
+    },
+    "/api/v1/hubs/{hub_id}/disable": {
+      "post": {
+        "operationId": "disableHub",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HubView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Disconnect a hub but keep its configuration",
+        "tags": [
+          "hubs"
+        ]
+      }
+    },
+    "/api/v1/hubs/{hub_id}/enable": {
+      "post": {
+        "operationId": "enableHub",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HubView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Reconnect a disabled hub",
+        "tags": [
+          "hubs"
+        ]
+      }
+    },
+    "/api/v1/hubs/{hub_id}/entities/{entity_id}/buttons": {
+      "get": {
+        "operationId": "listEntityButtons",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "entity_id",
+            "required": true,
+            "schema": {
+              "title": "Entity Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Button"
+                  },
+                  "title": "Response Listentitybuttons",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Gateway Timeout"
+          }
+        },
+        "summary": "Buttons bound on an activity or device",
+        "tags": [
+          "hub"
+        ]
+      }
+    },
+    "/api/v1/hubs/{hub_id}/find-remote": {
+      "post": {
+        "operationId": "findRemote",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Accepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Gateway Timeout"
+          }
+        },
+        "summary": "Make the remote beep",
+        "tags": [
+          "hub"
+        ]
+      }
+    },
+    "/api/v1/hubs/{hub_id}/info": {
+      "get": {
+        "operationId": "getHubInfo",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "re-read the banner (needs control mode)",
+            "in": "query",
+            "name": "refresh",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "re-read the banner (needs control mode)",
+              "title": "Refresh",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HubInfo"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Gateway Timeout"
+          }
+        },
+        "summary": "Hub identity from the connect banner",
+        "tags": [
+          "hub"
+        ]
+      }
+    },
+    "/api/v1/hubs/{hub_id}/send": {
+      "post": {
+        "operationId": "sendCommand",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendCommand"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Accepted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Gateway Timeout"
+          }
+        },
+        "summary": "Send a command or button to an activity or device",
+        "tags": [
+          "hub"
+        ]
+      }
+    },
+    "/api/v1/hubs/{hub_id}/status": {
+      "get": {
+        "operationId": "getHubStatus",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HubStatusView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Live connection state (pure state read)",
+        "tags": [
+          "hub"
+        ]
+      }
+    },
+    "/api/v1/server": {
+      "get": {
+        "operationId": "getServerInfo",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServerInfo"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Identify the server",
+        "tags": [
+          "server"
+        ]
+      }
+    }
+  }
+}

@@ -1,0 +1,111 @@
+"""``sofabaton-x-server``: parse flags, compose settings, run uvicorn.
+
+Flags mirror the environment variables (``SOFABATON_<FIELD>``) and win
+over them; both win over ``server.json`` in the data directory.
+"""
+
+from __future__ import annotations
+
+import argparse
+import logging
+import sys
+from pathlib import Path
+from typing import Any, Optional, Sequence
+
+from . import __version__
+from .config import DEFAULT_PORT, Settings, load_settings
+
+
+def build_parser() -> argparse.ArgumentParser:
+    ap = argparse.ArgumentParser(
+        prog="sofabaton-x-server",
+        description="REST + WebSocket server over the sofabaton-x library.",
+    )
+    ap.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
+    ap.add_argument("--bind", help="address to listen on (default 0.0.0.0)")
+    ap.add_argument("--port", type=int, help=f"API port (default {DEFAULT_PORT})")
+    ap.add_argument("--data-dir", type=Path, help="directory for server.json and hubs.json (default ./data)")
+    ap.add_argument(
+        "--hub",
+        action="append",
+        dest="initial_hubs",
+        metavar="HOST",
+        help="hub host to register on first start (repeatable; only when hubs.json is empty)",
+    )
+    ap.add_argument(
+        "--advertise-url",
+        help="public base URL clients should use (behind a reverse proxy); published in mDNS and OpenAPI",
+    )
+    ap.add_argument("--root-path", help="path prefix the reverse proxy mounts the API under")
+    ap.add_argument(
+        "--trusted-proxy",
+        action="append",
+        dest="trusted_proxies",
+        metavar="ADDR",
+        help="proxy address/CIDR whose X-Forwarded-* headers are trusted (repeatable)",
+    )
+    ap.add_argument("--tls-cert", type=Path, help="certificate file (bring your own TLS; a reverse proxy is the usual way)")
+    ap.add_argument("--tls-key", type=Path, help="private key file for --tls-cert")
+    ap.add_argument("--log-level", choices=("debug", "info", "warning", "error"), help="log level (default info)")
+    ap.add_argument("--print-settings", action="store_true", help="print the effective settings as JSON and exit")
+    return ap
+
+
+def settings_from_args(args: argparse.Namespace) -> Settings:
+    cli: dict[str, Any] = {
+        "bind": args.bind,
+        "port": args.port,
+        "data_dir": args.data_dir,
+        "initial_hubs": tuple(args.initial_hubs) if args.initial_hubs else None,
+        "advertise_url": args.advertise_url,
+        "root_path": args.root_path,
+        "trusted_proxies": tuple(args.trusted_proxies) if args.trusted_proxies else None,
+        "tls_cert": args.tls_cert,
+        "tls_key": args.tls_key,
+        "log_level": args.log_level,
+    }
+    return load_settings(cli=cli)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        settings = settings_from_args(args)
+    except ValueError as err:
+        print(f"error: {err}", file=sys.stderr)
+        return 2
+
+    if args.print_settings:
+        import json
+
+        print(json.dumps(settings.to_dict(), indent=2))
+        return 0
+
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level.upper(), logging.INFO),
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+
+    import uvicorn
+
+    from .app import create_app
+
+    app = create_app(settings)
+    uvicorn.run(
+        app,
+        host=settings.bind,
+        port=settings.port,
+        log_level=settings.log_level,
+        # Forwarded headers are honoured only from the operator's proxies
+        # (plan section 8); with none configured they are ignored.
+        proxy_headers=bool(settings.trusted_proxies),
+        forwarded_allow_ips=",".join(settings.trusted_proxies) or None,
+        ssl_certfile=str(settings.tls_cert) if settings.tls_cert else None,
+        ssl_keyfile=str(settings.tls_key) if settings.tls_key else None,
+    )
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())

@@ -1,0 +1,104 @@
+# CI for sofabaton-x-server (sofabaton-x-server/, the second distribution
+# of this repository). Runs on every change that can affect it: server
+# tests across supported Python versions (against the in-tree library),
+# a build + install smoke test of both wheels, a Docker image build, and
+# a codegen smoke: the committed openapi.json must be consumable by a
+# TypeScript generator and the generated types must type-check against
+# a small client.
+name: sofabaton-x-server CI
+
+on:
+  pull_request:
+    paths:
+      - "sofabaton-x-server/**"
+      - "custom_components/sofabaton_x1s/lib/**"
+      - "pyproject.toml"
+      - ".github/workflows/sofabaton-x-server-ci.yml"
+  push:
+    branches: [main, dev]
+    paths:
+      - "sofabaton-x-server/**"
+      - "custom_components/sofabaton_x1s/lib/**"
+      - "pyproject.toml"
+      - ".github/workflows/sofabaton-x-server-ci.yml"
+
+jobs:
+  server-tests:
+    name: server tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: pip install pytest httpx zeroconf fastapi "uvicorn[standard]"
+      - name: Server tests (in-tree library, no network)
+        run: pytest sofabaton-x-server/tests -q
+      - name: OpenAPI document is current
+        run: |
+          PYTHONPATH=sofabaton-x-server/src python -m sofabaton_server.openapi /tmp/openapi.json
+          diff -u sofabaton-x-server/openapi.json /tmp/openapi.json
+
+  build-smoke:
+    name: build + install smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - run: pip install build
+      - name: Build the library wheel
+        run: python -m build --wheel --outdir dist
+      - name: Build the server wheel
+        run: python -m build --wheel --outdir dist sofabaton-x-server
+      - name: Install both wheels and smoke-test the console script
+        run: |
+          pip install dist/sofabaton_x-*.whl dist/sofabaton_x_server-*.whl
+          sofabaton-x-server --version
+          sofabaton-x-server --print-settings --data-dir /tmp/sbx --port 8481
+      - name: Start the server and call it over HTTP
+        run: |
+          sofabaton-x-server --port 8481 --bind 127.0.0.1 --data-dir /tmp/sbx > /tmp/server.log 2>&1 &
+          for i in $(seq 1 20); do curl -sf http://127.0.0.1:8481/api/v1/server && break; sleep 1; done
+          curl -sf http://127.0.0.1:8481/api/v1/server | python -c "import sys, json; d = json.load(sys.stdin); assert d['api_version'] == '1' and d['hubs'] == 0, d; print(d)"
+          curl -sf http://127.0.0.1:8481/api/v1/hubs | grep -q '^\[\]$'
+          kill %1
+      - uses: actions/upload-artifact@v6
+        with:
+          name: sofabaton-x-server-dist
+          path: dist/
+
+  docker-image:
+    name: docker image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build
+        run: docker build -f sofabaton-x-server/Dockerfile -t sofabaton-x-server:ci .
+      - name: Image starts and answers
+        run: |
+          docker run -d --name sbx --network host -e SOFABATON_PORT=8482 sofabaton-x-server:ci
+          for i in $(seq 1 20); do curl -sf http://127.0.0.1:8482/api/v1/server && break; sleep 1; done
+          curl -sf http://127.0.0.1:8482/api/v1/server
+          docker logs sbx | tail -5
+          docker rm -f sbx
+
+  codegen-smoke:
+    name: openapi.json feeds a TypeScript generator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+      - name: Generate types from the committed document
+        run: npx -y openapi-typescript@7 sofabaton-x-server/openapi.json -o sofabaton-x-server/codegen-smoke/schema.d.ts
+      - name: The generated types type-check against a small client
+        run: |
+          npm install --no-save typescript@5
+          npx tsc --noEmit -p sofabaton-x-server/codegen-smoke/tsconfig.json

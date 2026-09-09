@@ -25,6 +25,7 @@ from .discovery import (
     discover_hubs,
 )
 from .errors import FetchTimeoutError, HubBusyError, HubNotConnectedError
+from .hub_listener import release_hub_from_listener
 from .hub_versions import HVER_BY_HUB_VERSION
 from .devices import parse_device_record
 from .models import (
@@ -394,8 +395,29 @@ class AsyncXProxy:
     async def start(self) -> None:
         await self.run(self._proxy.start)
 
-    async def stop(self) -> None:
+    async def stop(self, *, release_hub: bool = False) -> None:
+        """Stop the engine; with ``release_hub`` also let the hub go.
+
+        A hub that has just been dropped keeps dialling the shared
+        connect-back port for as long as that port is open for other
+        hubs, and while it dials it does not advertise itself, so the
+        official app cannot find it. It only gives up on a refused
+        connection. ``release_hub=True`` therefore releases this hub from
+        the shared listener after the stop: the *listening* socket closes
+        for a short window and reopens, and for a grace period every
+        further dial-back from this hub closes it again, so one of the
+        hub's attempts is guaranteed to meet a closed port. Accepted
+        sessions are untouched, so every other hub stays connected
+        straight through, and their own CALL_ME loops re-summon any that
+        happened to be reconnecting inside a window. It is a no-op when
+        no other hub is registered (the port is simply closed). Use it
+        when a hub is disabled but stays configured; a plain ``stop()``
+        is for shutdown.
+        """
+
         await self.run(self._proxy.stop)
+        if release_hub:
+            await self.run(release_hub_from_listener, self._proxy.real_hub_ip)
 
     async def __aenter__(self) -> "AsyncXProxy":
         await self.start()

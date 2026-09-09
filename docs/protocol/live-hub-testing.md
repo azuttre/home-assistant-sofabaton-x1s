@@ -1958,3 +1958,73 @@ Findings:
 - **Events.** Exactly one `activity_changed` per start and per stop on
   both lines, plus `hub_state`, `status_changed` and `catalog_ready`
   at connect; nothing dropped.
+
+## ◇ Validated: sofabaton-x-server live program, S6 (X1 + X1S, 2026-09-09)
+
+`scripts/hub-bench/bench_200_server.py` drives a real server process
+(docs/internal/sofabaton-x-server-plan.md) over HTTP and WebSocket with
+both hubs in one instance, HA entries disabled for the run and
+re-enabled after. Four runs (`out/bench_200_run1..4.json`, server logs
+under `out/logs/bench_200_run*-server.log`); run 4 is the reference.
+Everything passed except the one check that a Windows host cannot make
+(below).
+
+| step | X1S (`e26a44861b45`) | X1 (`cb383539684b`) |
+| --- | --- | --- |
+| seen by the server's discovery after release from HA | 3.4 s after start | 3.4 s |
+| registered | from the discovery table's `config` | by host only, re-keyed to MAC |
+| initial sync (`catalog_ready`) | 6.4 s after start, both | |
+| catalog | 6 activities, 11 devices | 4 activities, 12 devices |
+| detail reads (commands, buttons, macros, favorites) + a 404 for device 238 | 0.66 s | 1.76 s |
+| start / stop the first activity | accepted, `activity_changed` x2, running tracked, power refreshed | same |
+| disable X1S while X1 stays | X1: mode control, no link event on its stream | |
+| read on a disabled hub | 409 `hub_disabled` | |
+| enable X1S | ready again | |
+| remove X1 | 204 | |
+| WebSocket | 21 messages, 0 dropped | |
+
+Findings:
+
+- **The release did not make the hub give up, and the reason is the
+  host, not the library.** After `stop(release_hub=True)` the shared
+  listener closed its port for the window and reopened, and each time
+  the released hub dialled back within half a second of the reopen,
+  got accepted-and-dropped as unrecognised, and carried on. Three
+  library fixes came out of chasing it before the real cause showed:
+  (1) a listening socket closed while another thread sits in `accept()`
+  stays open at the kernel level until that call returns and keeps
+  completing handshakes into its backlog, so the stop now wakes the
+  accept thread with a loopback connection and the loop discards
+  connections after the stop flag; (2) the release is a feedback loop
+  (`HubListener.release_hub`): a released hub that dials back triggers
+  another bounce, bounded and time-limited, and a backlog leftover
+  arriving during a bounce does not spend one; (3) the release window
+  is 4 s (`DEFAULT_RELEASE_DOWNTIME_S`) because both hubs dial back on
+  a fixed 3.0 s timer (first attempt ~2.7 s after the drop) and a 2.5 s
+  window closed and reopened between two attempts every time. The
+  integration's plain `bounce_hub_listener` keeps 2.5 s. With all three
+  in place the log shows eight clean bounce cycles and the hub still
+  returning 0.5 s after every reopen: it never received a refusal.
+  **This Windows host answers no SYN to a closed port** (firewall
+  stealth mode, all profiles; verified with a loopback probe: every
+  closed port times out instead of refusing), and a refused connection
+  is the only signal the hub gives up on. The check is therefore
+  unverifiable here; `bench_200` records it as a caveat on `win32`. It
+  must be run on a Linux host (the server's target; Home Assistant OS
+  is where the integration's bounce has always been used) before the
+  server's release semantics count as validated.
+- **Stale wheel.** Runs 1 and 2 exercised the library wheel installed
+  in the dev venv during S0, not the working tree: the server process
+  imports `sofabaton` from site-packages. Rebuild and reinstall the
+  wheel after every library change before a server live run (recorded
+  in memory).
+- **Everything else on the server side held on both hubs**: discovery
+  keyed by MAC, registration from the table and by host, re-keying
+  with `hub_rekeyed` on the stream, all reads with real data, typed
+  404s, control with events, the sibling hub untouched by a release
+  (mode control, no link events), disabled reads refused as 409,
+  enable restoring readiness, removal, and a clean WebSocket with
+  nothing dropped.
+- **`hub_lost` at connect time** is expected: a hub stops advertising
+  itself the moment it is in session, so the table marks it absent
+  right after registration.
