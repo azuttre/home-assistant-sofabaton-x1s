@@ -8,9 +8,9 @@ brand-new IP device: one whose buttons fire arbitrary HTTP requests at any
 endpoint on your network (a smart plug's REST API, a Home Assistant
 webhook, a media player, ...).
 
-This is more open-ended than ``create_wifi_device``, which only writes the
-fixed "launch app N" callback pattern. Here every command carries its own
-method, path, content-type and body.
+This is the library's provisioning path for network devices: every
+command carries its own method, path, content-type and body, and the
+device is created like any other class (the hub assigns the id).
 
 How a command is described
 --------------------------

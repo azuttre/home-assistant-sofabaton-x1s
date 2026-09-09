@@ -12,13 +12,12 @@ events print as they happen, and every command maps to a facade call.
 import argparse
 import asyncio
 import logging
-import shlex
 import sys
 from typing import Awaitable, Callable, Dict, Optional
 
 from .aio import AsyncXProxy, async_discover_hubs
 from .hub_versions import HVER_BY_HUB_VERSION
-from .protocol_const import BUTTONNAME_BY_CODE, DEVICE_CLASS_IR, ButtonName
+from .protocol_const import BUTTONNAME_BY_CODE, ButtonName
 
 # ----------------- helpers -----------------
 
@@ -207,7 +206,6 @@ class AsyncShell:
             "stop": self.cmd_stop,
             "find": self.cmd_find,
             "testir": self.cmd_testir,
-            "addir": self.cmd_addir,
             "proxy": self.cmd_proxy,
             "backup": self.cmd_backup,
             "restore": self.cmd_restore,
@@ -235,19 +233,20 @@ class AsyncShell:
             return None
 
     async def cmd_status(self, _args: str) -> None:
-        p = self.p.sync
-        acts, _ = p.get_activities(force_refresh=False)
-        devs, _ = p.get_devices(force_refresh=False)
+        st = await self.p.status()
+        info = await self.p.hub_info()
         print("== status ==")
-        print(f"hub connected   : {p.transport.is_hub_connected}")
-        print(f"app connected   : {p.transport.is_client_connected}")
-        print(f"controllable    : {p.can_issue_commands()}")
-        print(f"hub version     : {p.hub_version}")
-        cur = await self.p.current_activity()
-        running = f"{cur['name'] or '?'} (id {cur['activity_id']})" if cur else "(none)"
+        print(f"hub connected   : {st.hub_connected}")
+        print(f"app connected   : {st.app_connected}")
+        print(f"controllable    : {st.controllable}  ({st.mode} mode)")
+        print(f"hub version     : {st.hub_version}")
+        if info.known:
+            print(f"hub name        : {info.name or '?'}  (fw {info.firmware_version}, mac {info.mac or '?'})")
+        cur = st.running_activity
+        running = f"{cur.name or '?'} (id {cur.activity_id})" if cur else "(none)"
         print(f"running activity: {running}")
-        print(f"activities      : {len(acts)} cached")
-        print(f"devices         : {len(devs)} cached")
+        print(f"activities      : {st.activities_cached} cached")
+        print(f"devices         : {st.devices_cached} cached")
 
     async def cmd_activities(self, _args: str) -> None:
         acts = await self._safe("activities", self.p.activities())
@@ -255,17 +254,18 @@ class AsyncShell:
             print("no activities (need control mode?)")
             return
         print("activity_id  active  name")
-        for act_id, info in sorted(acts.items()):
-            print(f"{act_id:<11}  {'*' if info.get('active') else ' ':^6}  {info.get('name', '')}")
+        for act in acts:
+            print(f"{act.activity_id:<11}  {'*' if act.active else ' ':^6}  {act.name}")
 
     async def cmd_devices(self, _args: str) -> None:
         devs = await self._safe("devices", self.p.devices())
         if not devs:
             print("no devices (need control mode?)")
             return
-        print("device_id  name  (brand)")
-        for dev_id, info in sorted(devs.items()):
-            print(f"{dev_id:<9}  {info.get('name', '?')}  ({info.get('brand', '')})")
+        print("device_id  name  (brand)  [class]  power")
+        for dev in devs:
+            power = "?" if dev.power_state is None else ("on" if dev.power_state else "off")
+            print(f"{dev.device_id:<9}  {dev.name or '?'}  ({dev.brand or ''})  [{dev.device_class or '?'}]  {power}")
 
     async def cmd_commands(self, args: str) -> None:
         if not args.strip():
@@ -278,7 +278,7 @@ class AsyncShell:
             return
         print(f"send with: press {dev} <command_id>")
         for c in cmds:
-            print(f"  command_id={c['command_id']:<5} {c['label']}")
+            print(f"  command_id={c.command_id:<5} {c.label}")
 
     async def cmd_buttons(self, args: str) -> None:
         if not args.strip():
@@ -292,9 +292,9 @@ class AsyncShell:
         print(f"send with: press {ent} <button_code>")
         for b in btns:
             target = ""
-            if b.get("device_id") and b.get("command_id") is not None:
-                target = f"   -> device_id={b['device_id']} command_id={b['command_id']}"
-            print(f"  button_code={b['button_code']:<5} {b.get('name') or '':<10}{target}")
+            if b.device_id and b.command_id is not None:
+                target = f"   -> device_id={b.device_id} command_id={b.command_id}"
+            print(f"  button_code={b.button_code:<5} {b.name or '':<10}{target}")
 
     async def cmd_macros(self, args: str) -> None:
         if not args.strip():
@@ -307,7 +307,7 @@ class AsyncShell:
             return
         print(f"send with: press {act} <command_id>")
         for m in macros:
-            print(f"  command_id={m['command_id']:<5} {m.get('label') or ''}")
+            print(f"  command_id={m.command_id:<5} {m.label or ''}")
 
     async def cmd_favorites(self, args: str) -> None:
         if not args.strip():
@@ -320,7 +320,7 @@ class AsyncShell:
             return
         print("send with: press <device_id> <command_id>")
         for f in favs:
-            print(f"  device_id={f['device_id']:<5} command_id={f['command_id']:<5} {f.get('label') or ''}")
+            print(f"  device_id={f.device_id:<5} command_id={f.command_id:<5} {f.label or ''}")
 
     # ----- control commands -------------------------------------------------
 
@@ -373,64 +373,6 @@ class AsyncShell:
             print(f"played {len(payload)}B payload -- check the target device reacted")
         else:
             print("refused or rejected (need control mode, or the hub NACKed the payload)")
-
-    async def cmd_addir(self, args: str) -> None:
-        usage = (
-            'usage: addir <device_id> <name> <hex payload>\n'
-            '       e.g. addir 3 "Power Toggle" 01 20 00 10 01 00 94 ac ...\n'
-            "saves the payload as a new IR command on the device (test first with: testir)"
-        )
-        try:
-            tokens = shlex.split(args)
-        except ValueError as err:
-            print(f"bad quoting: {err}")
-            return
-        if len(tokens) < 3:
-            print(usage)
-            return
-        try:
-            dev = parse_int(tokens[0])
-        except ValueError:
-            print(usage)
-            return
-        name = tokens[1]
-        try:
-            payload = parse_payload_hex(" ".join(tokens[2:]))
-        except ValueError as err:
-            print(f"not a valid hex payload: {err}")
-            return
-        if len(payload) < 10:
-            print(f"payload too short ({len(payload)}B) to be a stored IR payload")
-            return
-
-        # The save path writes the IR codec; refuse a known non-IR target.
-        devs = await self._safe("addir", self.p.devices())
-        if devs is None:
-            return
-        info = devs.get(dev)
-        if info is None:
-            print(f"device {dev} not found on the hub")
-            return
-        device_class = info.get("device_class")
-        if device_class not in (None, DEVICE_CLASS_IR):
-            print(f"device {dev} ({info.get('name')}) is {device_class!r}, not IR")
-            return
-
-        # Refresh occupancy so the auto-picked command id comes from the
-        # hub's authoritative command list, never a stale cache.
-        if await self._safe("addir", self.p.commands(dev)) is None:
-            return
-        result = await self._safe(
-            "addir",
-            self.p.persist_ir_blob(device_id=dev, command_name=name, blob=payload),
-        )
-        if not result:
-            print("save failed (need control mode, hub rejected the write, or an ack timed out)")
-            return
-        print(
-            f"saved {result['command_name']!r} as command_id={result['command_id']} "
-            f"on device {dev}   send with: press {dev} {result['command_id']}"
-        )
 
     async def cmd_proxy(self, args: str) -> None:
         arg = args.strip().lower()
@@ -534,7 +476,6 @@ class AsyncShell:
         print("  start <act> | stop <act>       switch activity power")
         print("  find                           find-my-remote")
         print("  testir <hex..>                 play an IR payload once (nothing saved)")
-        print("  addir <dev> <name> <hex..>     save a new IR command (quote multi-word names)")
         print("  proxy on|off                   toggle pass-through")
         print("  backup [file] [devices=ID,..]  back up the hub (subset = devices only)")
         print("  restore <file> [devices=ID,..] [activities=ID,..] [erase]")
@@ -729,9 +670,9 @@ async def _main_run(argv: list[str]) -> None:
             # it. This reads the hub's connect banner (authoritative for the
             # version and name) and brings the mDNS advertisement up.
             await proxy.wait_until_discoverable(timeout=5.0)
-            version = proxy.sync.hub_version
-            mode = "control mode" if proxy.sync.can_issue_commands() else "observe mode — an app is attached"
-            print(f"hub connected — version {version} ({mode})")
+            st = await proxy.status()
+            mode = "control mode" if st.controllable else "observe mode — an app is attached"
+            print(f"hub connected — version {st.hub_version} ({mode})")
         else:
             print("hub not connected yet (the shell still works; events appear when it connects)")
         try:

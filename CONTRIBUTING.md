@@ -172,7 +172,23 @@ The integration and the library are **versioned independently**:
 
 Library stability contract: names exported from the package root
 (`sofabaton.__all__`) follow semver; everything else is internal. Changes to
-the public API surface are guarded by `tests/lib/test_public_api.py`.
+the public API surface are guarded by `tests/lib/test_public_api.py`, and
+every public engine method must be placed in a facade tier (wrapped,
+delegated, listener, or engine-only with a reason) or
+`tests/lib/test_aio.py` fails; see `ENGINE_ONLY` in `lib/aio.py`.
+
+Library release checklist (run it with every integration release that
+touches `lib/`, so the PyPI package never falls behind the engine):
+
+1. Bump `custom_components/sofabaton_x1s/lib/version.py` (minor for any
+   surface change before 1.0; patch for engine-only fixes).
+2. Update `sofabaton-x/README.md` for anything the surface gained or lost,
+   and `tests/lib/test_public_api.py` for root exports.
+3. `pytest tests/lib -q` (boundary lint, facade tiers, public API), then
+   the full suite.
+4. Commit, then `git tag sofabaton-x-vX.Y.Z && git push origin sofabaton-x-vX.Y.Z`.
+   The release workflow refuses a tag that does not match `version.py`.
+5. Paste the release notes on the GitHub release created for the tag.
 
 CI (`sofabaton-x-ci.yml`) runs on PRs and pushes to `main`/`dev` that touch
 the library, the packaging metadata, or the tests: boundary lint, lib tests

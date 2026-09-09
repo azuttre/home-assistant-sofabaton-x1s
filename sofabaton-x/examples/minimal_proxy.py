@@ -48,10 +48,10 @@ async def main() -> None:
         await proxy.wait_until_discoverable(timeout=5)
 
         activities = await proxy.activities()
-        print("activities:", {aid: info.get("name") for aid, info in activities.items()})
+        print("activities:", {a.activity_id: a.name for a in activities})
 
         devices = await proxy.devices()
-        print("devices:", {did: info.get("name") for did, info in devices.items()})
+        print("devices:", {d.device_id: d.name for d in devices})
 
         # Switching an activity powers real equipment on and off, so it is
         # not run automatically. Pick an activity id from the listing

@@ -15,15 +15,34 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, AsyncIterator, Callable, Iterable, Optional
 
+from .config import HubConfig
 from .discovery import (
     DEFAULT_DISCOVERY_TIMEOUT,
     DiscoveredHub,
     HubBrowser,
     discover_hubs,
 )
+from .errors import FetchTimeoutError, HubBusyError, HubNotConnectedError
 from .hub_versions import HVER_BY_HUB_VERSION
+from .devices import parse_device_record
+from .models import (
+    Activity,
+    ActivityChanged,
+    Button,
+    CatalogReady,
+    Command,
+    ConnectionState,
+    Device,
+    Favorite,
+    HubEvent,
+    HubInfo,
+    HubStatus,
+    Macro,
+    RunningActivity,
+    StatusChanged,
+)
 from .protocol_const import BUTTONNAME_BY_CODE, ButtonName
 from .x1_proxy import X1Proxy
 
@@ -58,6 +77,36 @@ def _marshal_callback(loop: asyncio.AbstractEventLoop, callback: Callable) -> Ca
     return relay
 
 
+def _activity_from_row(act_id: int, row: dict) -> Activity:
+    return Activity(
+        activity_id=int(act_id),
+        name=str(row.get("name") or ""),
+        active=bool(row.get("active", False)),
+        needs_confirm=bool(row.get("needs_confirm", False)),
+    )
+
+
+def _device_from_row(dev_id: int, row: dict, hub_version: Optional[str]) -> Device:
+    power_state: Optional[int] = None
+    raw_body = row.get("raw_body")
+    if hub_version and isinstance(raw_body, (bytes, bytearray)) and raw_body:
+        try:
+            power_state = int(parse_device_record(bytes(raw_body), hub_version=hub_version).power_state) & 0xFF
+        except ValueError:
+            power_state = None
+    idle = row.get("idle_behavior")
+    code = row.get("device_class_code")
+    return Device(
+        device_id=int(dev_id),
+        name=str(row.get("name") or ""),
+        brand=row.get("brand") or None,
+        device_class=row.get("device_class"),
+        device_class_code=int(code) if isinstance(code, int) else None,
+        power_state=power_state,
+        idle_behavior=int(idle) if isinstance(idle, int) else None,
+    )
+
+
 class AsyncXProxy:
     """Asyncio proxy for a Sofabaton X1/X1S/X2 hub — the library's entry point.
 
@@ -77,9 +126,21 @@ class AsyncXProxy:
       :meth:`buttons`, :meth:`macros`, :meth:`favorites`. These return
       the data directly (no ``(data, ready)`` tuple): cached results
       come back immediately, otherwise the call fetches from the hub and
-      awaits completion, raising :class:`RuntimeError` when the hub is
-      held by a connected app client and nothing is cached, or
-      :class:`TimeoutError` when the fetch never lands.
+      awaits completion, raising :class:`HubBusyError` when the hub is
+      held by a connected app client and nothing is cached,
+      :class:`HubNotConnectedError` when there is no hub session, or
+      :class:`FetchTimeoutError` when the fetch never lands (all stdlib
+      subclasses: ``RuntimeError`` / ``TimeoutError``).
+    * **status** — :meth:`status` (live connection state and mode, no
+      hub traffic) and :meth:`hub_info` (identity from the connect
+      banner), both typed dataclasses with ``to_dict()``.
+    * **ready** — :meth:`wait_until_ready`: the connect-time initial
+      sync (banner, devices, activities) has cached the catalog minimum
+      for this hub session; ``HubStatus.catalog_ready`` mirrors it.
+    * **events** — :meth:`events`: one async iterator of typed
+      :class:`HubEvent` items folding every engine listener (activity
+      change, catalog update, hub and app link state, OTA) plus a
+      derived ``status_changed`` when the mode flips.
     * **control** — :meth:`press`, :meth:`start_activity`,
       :meth:`stop_activity`, :meth:`find_remote`.
     * **live edit** — :meth:`sync_activity`, :meth:`sync_device`: diff a
@@ -106,7 +167,6 @@ class AsyncXProxy:
             "get_cached_activity_detail_ids",
             "get_known_device_ids",
             "get_known_activity_ids",
-            "get_banner_info",
             "get_app_activations",
             # live in-memory cache invalidation (NOT persistence: the
             # library never writes to disk, and the cache-snapshot
@@ -129,18 +189,12 @@ class AsyncXProxy:
             "update_discovery_identity",
             "enable_proxy",
             "disable_proxy",
-            # provisioning / mutation
-            "create_wifi_device",
+            # provisioning / mutation (whole-entity operations a bundle
+            # diff cannot express; row-level edits go through sync_*)
             "delete_device",
-            "delete_favorite",
-            "reorder_favorites",
-            "command_to_favorite",
-            "command_to_button",
-            "add_device_to_activity",
             "reorder_activities",
             "create_activity",
             "play_ir_blob",
-            "persist_ir_blob",
             "erase_configuration",
             # backup / restore (symmetric, schema-versioned)
             "backup_device",
@@ -163,6 +217,35 @@ class AsyncXProxy:
         }
     )
 
+    # Engine methods the explicit coroutines above are built on (reads,
+    # readiness, control, live edit, lifecycle). They are reachable only
+    # through those coroutines, never by name. Listed so the triage guard
+    # (see ``engine_method_triage``) can prove every public engine method
+    # sits in exactly one tier.
+    WRAPPED_ENGINE_METHODS: frozenset[str] = frozenset(
+        {
+            "get_activities",
+            "get_devices",
+            "get_commands_for_entity",
+            "get_buttons_for_entity",
+            "get_macros_for_activity",
+            "ensure_commands_for_activity",
+            "send_command",
+            "can_issue_commands",
+            "find_remote",
+            "sync_activity",
+            "sync_device",
+            "start",
+            "stop",
+            "set_zeroconf",
+            "on_burst_end",
+            "has_banner_identity",
+            "fetch_banner_info",
+            "get_banner_info",
+            "get_proxy_status",
+        }
+    )
+
     def __init__(
         self,
         *,
@@ -171,9 +254,14 @@ class AsyncXProxy:
         hub_listen_port: int = 8200,
         app_discovery_port: int = 8102,
         loop: Optional[asyncio.AbstractEventLoop] = None,
+        initial_sync: bool = True,
         **proxy_kwargs: Any,
     ) -> None:
         """Construct a proxy for the hub at ``hub_ip``.
+
+        ``initial_sync`` (default on) makes the facade read the banner,
+        devices and activities every time the hub connects, so the
+        catalog minimum is always cached; see :meth:`wait_until_ready`.
 
         The proxy has two network faces. Only the four arguments below
         describe them; everything else (``mdns_instance``, ``mdns_txt``,
@@ -207,17 +295,49 @@ class AsyncXProxy:
             **proxy_kwargs,
         )
         self._init_burst_state()
+        if initial_sync:
+            self._arm_initial_sync()
+
+    @classmethod
+    def from_config(
+        cls,
+        config: HubConfig,
+        *,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+        **overrides: Any,
+    ) -> "AsyncXProxy":
+        """Construct a proxy from a :class:`HubConfig` record.
+
+        The record is the one shape every configuration path produces
+        (library discovery, a foreign mDNS stack, manual entry, a REST
+        body or config file); ``overrides`` are applied on top of the
+        record's keyword arguments, e.g. ``diag_dump=False``.
+        """
+
+        kwargs = config.proxy_kwargs()
+        kwargs.update(overrides)
+        return cls(loop=loop, **kwargs)
 
     @classmethod
     def wrap(
-        cls, proxy: X1Proxy, *, loop: Optional[asyncio.AbstractEventLoop] = None
+        cls,
+        proxy: X1Proxy,
+        *,
+        loop: Optional[asyncio.AbstractEventLoop] = None,
+        initial_sync: bool = False,
     ) -> "AsyncXProxy":
-        """Wrap an already-constructed engine (e.g. mid-migration code)."""
+        """Wrap an already-constructed engine (e.g. mid-migration code).
+
+        ``initial_sync`` defaults off here: an application that built the
+        engine itself usually runs its own connect-time sync already.
+        """
 
         self = object.__new__(cls)
         self._loop = loop or asyncio.get_running_loop()
         self._proxy = proxy
         self._init_burst_state()
+        if initial_sync:
+            self._arm_initial_sync()
         return self
 
     def _init_burst_state(self) -> None:
@@ -230,6 +350,20 @@ class AsyncXProxy:
         # Set on any hub/client connection-state change (lazily wired) so
         # the readiness waiters can wake.
         self._state_event: Optional[asyncio.Event] = None
+        # events(): per-consumer queues fed by one set of engine listeners.
+        self._event_queues: set[asyncio.Queue] = set()
+        self._event_listeners_armed = False
+        self._event_seq = 0
+        self._last_mode: Optional[str] = None
+        self.events_dropped = 0
+        # Burst keys with a fetch in flight: a second read for the same
+        # key joins the pending burst instead of issuing another request.
+        self._inflight: set[str] = set()
+        # Connect-time initial sync (banner, devices, activities).
+        self._initial_sync_armed = False
+        self._initial_sync_task: Optional[asyncio.Task] = None
+        self._catalog_ready = False
+        self._ready_event: Optional[asyncio.Event] = None
 
     # -- escape hatches ----------------------------------------------------
 
@@ -412,28 +546,38 @@ class AsyncXProxy:
 
     async def activities(
         self, *, timeout: float = DEFAULT_FETCH_TIMEOUT
-    ) -> dict[int, dict]:
-        """Return ``{activity_id: {name, active, ...}}`` for all activities."""
+    ) -> list[Activity]:
+        """Return every activity in the hub's catalog, sorted by id."""
 
         # The catalog getters gate fetching on ``force_refresh``, not
         # ``fetch_if_missing`` (which the per-entity getters use).
-        return await self._read(
+        rows = await self._read(
             self._proxy.get_activities, "activities", timeout=timeout, fetch_kw="force_refresh"
         )
+        return [_activity_from_row(act_id, row) for act_id, row in sorted(dict(rows).items())]
 
     async def devices(
         self, *, timeout: float = DEFAULT_FETCH_TIMEOUT
-    ) -> dict[int, dict]:
-        """Return ``{device_id: {name, brand, ...}}`` for all devices."""
+    ) -> list[Device]:
+        """Return every device in the hub's catalog, sorted by id.
 
-        return await self._read(
+        ``Device.power_state`` is projected from the row's stored record
+        as of the last devices fetch (see :class:`Device`).
+        """
+
+        rows = await self._read(
             self._proxy.get_devices, "devices", timeout=timeout, fetch_kw="force_refresh"
         )
+        hub_version = self._proxy.hub_version
+        return [
+            _device_from_row(dev_id, row, hub_version)
+            for dev_id, row in sorted(dict(rows).items())
+        ]
 
     async def commands(
         self, device_id: int, *, timeout: float = DEFAULT_FETCH_TIMEOUT
-    ) -> list[dict]:
-        """Return a device's commands as ``[{command_id, label}, ...]``.
+    ) -> list[Command]:
+        """Return a device's commands, sorted by id.
 
         Send one with ``send(device_id, command_id)``.
         """
@@ -445,19 +589,18 @@ class AsyncXProxy:
             timeout=timeout,
         )
         return [
-            {"command_id": cid, "label": label}
+            Command(command_id=int(cid), label=str(label))
             for cid, label in sorted(dict(cmds).items())
         ]
 
     async def buttons(
         self, entity_id: int, *, timeout: float = DEFAULT_FETCH_TIMEOUT
-    ) -> list[dict]:
+    ) -> list[Button]:
         """Return the buttons bound to an activity or device.
 
-        Each item is ``{button_code, name, device_id, command_id}`` — the
-        button code you can send to ``entity_id`` plus the underlying
-        target device command it maps to (``device_id``/``command_id`` are
-        ``None`` for unbound slots).
+        Each :class:`Button` carries the code you can send to
+        ``entity_id`` plus the underlying target device command it maps
+        to (``device_id``/``command_id`` are ``None`` for unbound slots).
         """
 
         codes = await self._read(
@@ -469,23 +612,23 @@ class AsyncXProxy:
         details = await self.run(
             lambda: dict(self._proxy.state.button_details.get(entity_id & 0xFF, {}))
         )
-        out: list[dict] = []
+        out: list[Button] = []
         for code in codes:
             bound = details.get(code, {})
             out.append(
-                {
-                    "button_code": code,
-                    "name": BUTTONNAME_BY_CODE.get(code),
-                    "device_id": bound.get("device_id"),
-                    "command_id": bound.get("command_id"),
-                }
+                Button(
+                    button_code=int(code),
+                    name=BUTTONNAME_BY_CODE.get(code),
+                    device_id=bound.get("device_id"),
+                    command_id=bound.get("command_id"),
+                )
             )
         return out
 
     async def macros(
         self, activity_id: int, *, timeout: float = DEFAULT_FETCH_TIMEOUT
-    ) -> list[dict]:
-        """Return an activity's macros as ``[{command_id, label}, ...]``.
+    ) -> list[Macro]:
+        """Return an activity's macros.
 
         Send one with ``send(activity_id, command_id)``.
         """
@@ -497,14 +640,15 @@ class AsyncXProxy:
             timeout=timeout,
         )
         return [
-            {"command_id": m.get("command_id"), "label": m.get("label")}
+            Macro(command_id=int(m.get("command_id")), label=m.get("label"))
             for m in macros
+            if m.get("command_id") is not None
         ]
 
     async def favorites(
         self, activity_id: int, *, timeout: float = DEFAULT_FETCH_TIMEOUT
-    ) -> list[dict]:
-        """Return an activity's favorites as ``[{device_id, command_id, label}]``.
+    ) -> list[Favorite]:
+        """Return an activity's favorites.
 
         Each favorite is a device command; send one with
         ``send(device_id, command_id)``. Returns an empty list when the
@@ -512,7 +656,7 @@ class AsyncXProxy:
         """
 
         # The favorite slots come from the activity keymap; fetching the
-        # buttons populates them (best-effort — don't fail favorites if the
+        # buttons populates them (best-effort: don't fail favorites if the
         # keymap can't be fetched).
         try:
             await self.buttons(activity_id, timeout=timeout)
@@ -521,7 +665,7 @@ class AsyncXProxy:
 
         # ensure_commands_for_activity resolves each favorite's command
         # label, but the per-command fetches it kicks complete
-        # asynchronously — poll until it reports ready (or timeout).
+        # asynchronously: poll until it reports ready (or timeout).
         deadline = self._loop.time() + timeout
         while True:
             _, ready = await self.run(
@@ -537,12 +681,13 @@ class AsyncXProxy:
             self._proxy.state.get_activity_favorite_labels, activity_id & 0xFF
         )
         return [
-            {
-                "device_id": fav.get("device_id"),
-                "command_id": fav.get("command_id"),
-                "label": fav.get("name"),
-            }
+            Favorite(
+                device_id=int(fav.get("device_id")),
+                command_id=int(fav.get("command_id")),
+                label=fav.get("name"),
+            )
             for fav in rich
+            if fav.get("device_id") is not None and fav.get("command_id") is not None
         ]
 
     async def current_activity(self) -> dict | None:
@@ -566,6 +711,290 @@ class AsyncXProxy:
             }
 
         return await self.run(_read)
+
+    # -- status surface ------------------------------------------------------
+
+    async def status(self) -> HubStatus:
+        """Return the live connection state of the proxied hub.
+
+        Pure state read, no hub traffic, available in every mode. ``mode``
+        is ``"disconnected"`` (no hub session), ``"observe"`` (an app
+        client holds the hub through the proxy: reads serve cache, sends
+        are refused) or ``"control"`` (the proxy owns the hub).
+        """
+
+        def _read() -> HubStatus:
+            transport = self._proxy.transport
+            hub_connected = bool(transport.is_hub_connected)
+            app_connected = bool(transport.is_client_connected)
+            controllable = bool(self._proxy.can_issue_commands())
+            if controllable:
+                mode = "control"
+            elif hub_connected:
+                mode = "observe"
+            else:
+                mode = "disconnected"
+            acts, _ = self._proxy.get_activities(force_refresh=False)
+            devs, _ = self._proxy.get_devices(force_refresh=False)
+            act = self._proxy.state.current_activity
+            running = None
+            if act is not None:
+                act &= 0xFF
+                running = RunningActivity(
+                    activity_id=act, name=self._proxy.state.get_activity_name(act)
+                )
+            return HubStatus(
+                hub_connected=hub_connected,
+                app_connected=app_connected,
+                controllable=controllable,
+                mode=mode,
+                hub_version=self._proxy.hub_version,
+                proxy_enabled=bool(self._proxy.get_proxy_status()),
+                running_activity=running,
+                activities_cached=len(acts or {}),
+                devices_cached=len(devs or {}),
+                catalog_ready=self._catalog_ready,
+            )
+
+        return await self.run(_read)
+
+    async def hub_info(self, *, refresh: bool = False) -> HubInfo:
+        """Return the hub's identity as read from its connect banner.
+
+        Cached-else-fetch like the reads: the banner known from the
+        session is returned directly; ``refresh=True`` (or an unknown
+        banner) re-reads it from the hub, which needs control mode and
+        raises :class:`HubBusyError` / :class:`HubNotConnectedError`
+        otherwise. When nothing is known yet and no fetch is possible the
+        result has ``known=False`` rather than raising, so a status page
+        can render before the first banner lands.
+        """
+
+        def _from_banner(info: dict) -> HubInfo:
+            if not info:
+                return HubInfo(
+                    known=False,
+                    model=None,
+                    name=None,
+                    mac=None,
+                    firmware_version=None,
+                    production_batch=None,
+                )
+            return HubInfo(
+                known=True,
+                model=info.get("model"),
+                name=info.get("name") or None,
+                mac=info.get("mac"),
+                firmware_version=info.get("firmware_version"),
+                production_batch=info.get("production_batch"),
+            )
+
+        cached = await self.run(self._proxy.get_banner_info)
+        if cached and not refresh:
+            return _from_banner(cached)
+        if not self._proxy.can_issue_commands():
+            # An explicit refresh is refused with the typed reason; a plain
+            # read degrades to whatever is known (possibly nothing).
+            if refresh:
+                self._raise_if_cannot_fetch("banner")
+            return _from_banner(cached or {})
+        await self.run(
+            functools.partial(self._proxy.fetch_banner_info, force_refresh=True)
+        )
+        # Re-read the engine's cache rather than trusting the fetch's return
+        # value: the banner lands through the frame handler and the getter
+        # is the one place it is guaranteed to be.
+        return _from_banner(await self.run(self._proxy.get_banner_info))
+
+    # -- connect-time initial sync ------------------------------------------
+
+    def _arm_initial_sync(self) -> None:
+        """Run the catalog minimum fetch on every hub connect (once armed)."""
+
+        if self._initial_sync_armed:
+            return
+        self._initial_sync_armed = True
+
+        def _on_link(*_args: Any) -> None:
+            # Engine thread; decide on the loop.
+            self._loop.call_soon_threadsafe(self._maybe_start_initial_sync)
+
+        self._proxy.on_hub_state_change(_on_link)
+        self._proxy.on_client_state_change(_on_link)
+
+    def _maybe_start_initial_sync(self) -> None:
+        if not self._proxy.transport.is_hub_connected:
+            # Session gone: what was cached is no longer known-good, and a
+            # sync parked on a fetch that can no longer land is abandoned
+            # so the next connect starts a fresh one.
+            self._set_catalog_ready(False)
+            task = self._initial_sync_task
+            if task is not None and not task.done():
+                task.cancel()
+            return
+        if self._catalog_ready or not self._proxy.can_issue_commands():
+            return
+        if self._initial_sync_task is not None and not self._initial_sync_task.done():
+            return
+        self._initial_sync_task = self._loop.create_task(self._run_initial_sync())
+
+    async def _run_initial_sync(self) -> None:
+        """Banner, devices, activities: the minimum every session caches.
+
+        Runs in order, sharing the burst bridge with concurrent reads.
+        Never raises: a failure (hub dropped mid-fetch, app attached,
+        reply never landed) leaves ``catalog_ready`` False and the next
+        link-state change tries again.
+        """
+
+        try:
+            await self.run(
+                functools.partial(self._proxy.fetch_banner_info, force_refresh=True)
+            )
+            await self._await_fetch(
+                self._proxy.get_devices, "devices",
+                timeout=DEFAULT_FETCH_TIMEOUT, fetch_kw="force_refresh",
+            )
+            await self._await_fetch(
+                self._proxy.get_activities, "activities",
+                timeout=DEFAULT_FETCH_TIMEOUT, fetch_kw="force_refresh",
+            )
+        except (RuntimeError, TimeoutError):
+            return
+        if self._proxy.transport.is_hub_connected:
+            self._set_catalog_ready(True)
+
+    def _set_catalog_ready(self, ready: bool) -> None:
+        if ready == self._catalog_ready:
+            return
+        self._catalog_ready = ready
+        if self._ready_event is None:
+            self._ready_event = asyncio.Event()
+        if ready:
+            self._ready_event.set()
+        else:
+            self._ready_event.clear()
+        self._dispatch_event("catalog_ready", CatalogReady(ready=ready))
+
+    async def wait_until_ready(self, timeout: float = 30.0) -> bool:
+        """Wait until the connect-time initial sync has cached the catalog.
+
+        True once banner, devices and activities are known for the
+        current hub session (``HubStatus.catalog_ready``); False on
+        timeout, or immediately when the facade was constructed with
+        ``initial_sync=False``.
+        """
+
+        if self._catalog_ready:
+            return True
+        if not self._initial_sync_armed:
+            return False
+        if self._ready_event is None:
+            self._ready_event = asyncio.Event()
+        try:
+            await asyncio.wait_for(self._ready_event.wait(), timeout)
+        except TimeoutError:
+            return self._catalog_ready
+        return self._catalog_ready
+
+    # -- event stream --------------------------------------------------------
+
+    def _current_mode(self) -> str:
+        if self._proxy.can_issue_commands():
+            return "control"
+        if self._proxy.transport.is_hub_connected:
+            return "observe"
+        return "disconnected"
+
+    def _ensure_event_listeners(self) -> None:
+        """Register the engine listeners that feed :meth:`events` (once)."""
+
+        if self._event_listeners_armed:
+            return
+        self._event_listeners_armed = True
+        self._last_mode = self._current_mode()
+        emit = self._emit_event_threadsafe
+
+        def on_activity(new_id, old_id, name) -> None:
+            emit(
+                "activity_changed",
+                ActivityChanged(
+                    activity_id=None if new_id is None else int(new_id) & 0xFF,
+                    previous_activity_id=None if old_id is None else int(old_id) & 0xFF,
+                    name=name,
+                ),
+            )
+
+        def on_hub_state(connected: bool) -> None:
+            emit("hub_state", ConnectionState(connected=bool(connected)))
+            self._emit_mode_change_threadsafe()
+
+        def on_app_state(connected: bool) -> None:
+            emit("app_state", ConnectionState(connected=bool(connected)))
+            self._emit_mode_change_threadsafe()
+
+        self._proxy.on_activity_change(on_activity)
+        self._proxy.on_activity_list_update(lambda: emit("activity_list_updated", None))
+        self._proxy.on_hub_state_change(on_hub_state)
+        self._proxy.on_client_state_change(on_app_state)
+        self._proxy.on_ota_update(lambda: emit("ota", None))
+
+    def _emit_mode_change_threadsafe(self) -> None:
+        mode = self._current_mode()
+        previous = self._last_mode
+        if mode == previous:
+            return
+        self._last_mode = mode
+        self._emit_event_threadsafe(
+            "status_changed", StatusChanged(mode=mode, previous_mode=previous or "disconnected")
+        )
+
+    def _emit_event_threadsafe(self, kind: str, payload: Any) -> None:
+        # Engine thread -> loop. Sequence numbers are assigned on the loop
+        # so they are strictly ordered as consumers observe them.
+        self._loop.call_soon_threadsafe(self._dispatch_event, kind, payload)
+
+    def _dispatch_event(self, kind: str, payload: Any) -> None:
+        self._event_seq += 1
+        event = HubEvent(seq=self._event_seq, kind=kind, payload=payload)
+        for queue in list(self._event_queues):
+            if queue.full():
+                # Bounded, drop-oldest: a slow consumer loses history, never
+                # stalls the engine. The gap shows up as a jump in ``seq``.
+                try:
+                    queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    pass
+                self.events_dropped += 1
+            queue.put_nowait(event)
+
+    async def events(self, *, maxsize: int = 256) -> AsyncIterator[HubEvent]:
+        """Iterate over hub events as they happen, as typed :class:`HubEvent`.
+
+        Kinds: ``activity_changed`` (:class:`ActivityChanged`),
+        ``activity_list_updated`` (no payload), ``hub_state`` and
+        ``app_state`` (:class:`ConnectionState`), ``status_changed``
+        (:class:`StatusChanged`, derived: fires once whenever the mode
+        flips between disconnected / observe / control) and ``ota`` (no
+        payload). Each consumer gets its own bounded queue; when it falls
+        ``maxsize`` events behind the oldest are dropped, counted in
+        ``events_dropped``, and visible as a gap in ``seq``. The
+        ``on_*`` listener registrations keep working alongside.
+
+        Usage::
+
+            async for event in proxy.events():
+                print(event.kind, event.to_dict()["payload"])
+        """
+
+        self._ensure_event_listeners()
+        queue: asyncio.Queue = asyncio.Queue(maxsize=maxsize)
+        self._event_queues.add(queue)
+        try:
+            while True:
+                yield await queue.get()
+        finally:
+            self._event_queues.discard(queue)
 
     # -- control surface -----------------------------------------------------
 
@@ -695,31 +1124,66 @@ class AsyncXProxy:
         data, ready = await self.run(getter, *args, **{fetch_kw: False})
         if ready:
             return data
-        if not self._proxy.can_issue_commands():
-            if not self._proxy.transport.is_hub_connected:
-                raise RuntimeError(
-                    f"cannot fetch {key!r}: the hub is not connected yet "
-                    "(await wait_until_controllable() first)"
-                )
-            raise RuntimeError(
-                f"cannot fetch {key!r}: an app client is connected and holds the hub"
-            )
+        return await self._await_fetch(getter, key, *args, timeout=timeout, fetch_kw=fetch_kw)
+
+    async def _await_fetch(
+        self,
+        getter: Callable,
+        key: str,
+        *args: Any,
+        timeout: float,
+        fetch_kw: str = "fetch_if_missing",
+    ) -> Any:
+        """Issue (or join) the hub fetch behind ``key`` and await its burst.
+
+        When a fetch for ``key`` is already in flight the call only
+        registers for its completion, so concurrent reads and the
+        connect-time initial sync share one request.
+        """
+
+        self._raise_if_cannot_fetch(key)
 
         future = self._loop.create_future()
         self._burst_waiters.setdefault(key, []).append(future)
         self._ensure_burst_dispatch(key.split(":", 1)[0])
 
-        await self.run(getter, *args, **{fetch_kw: True})
+        owner = key not in self._inflight
+        if owner:
+            self._inflight.add(key)
+            await self.run(getter, *args, **{fetch_kw: True})
         try:
             await asyncio.wait_for(future, timeout)
         except TimeoutError:
-            pending = self._burst_waiters.get(key)
-            if pending and future in pending:
-                pending.remove(future)
-            raise TimeoutError(f"timed out after {timeout}s fetching {key!r}")
+            self._drop_burst_waiter(key, future)
+            raise FetchTimeoutError(f"timed out after {timeout}s fetching {key!r}")
+        except asyncio.CancelledError:
+            self._drop_burst_waiter(key, future)
+            raise
+        finally:
+            if owner:
+                self._inflight.discard(key)
 
         data, _ = await self.run(getter, *args, **{fetch_kw: False})
         return data
+
+    def _drop_burst_waiter(self, key: str, future: asyncio.Future) -> None:
+        pending = self._burst_waiters.get(key)
+        if pending and future in pending:
+            pending.remove(future)
+
+    def _raise_if_cannot_fetch(self, what: str) -> None:
+        """Raise the typed reason a hub fetch is impossible right now."""
+
+        if self._proxy.can_issue_commands():
+            return
+        if not self._proxy.transport.is_hub_connected:
+            raise HubNotConnectedError(
+                f"cannot fetch {what!r}: the hub is not connected yet "
+                "(await wait_until_controllable() first)"
+            )
+        raise HubBusyError(
+            f"cannot fetch {what!r}: an app client is connected and holds the hub"
+        )
 
     def _ensure_burst_dispatch(self, kind: str) -> None:
         if kind in self._burst_dispatch_kinds:
@@ -820,6 +1284,200 @@ class AsyncHubBrowser:
 
     async def __aexit__(self, *exc_info: Any) -> None:
         await self.stop()
+
+
+# ---------------------------------------------------------------------------
+# Engine-method triage
+# ---------------------------------------------------------------------------
+#
+# The facade is curated by hand on purpose: it is a service layer built one
+# feature at a time, not a pass-through of X1Proxy. That only stays honest
+# if every public engine method was *placed* somewhere deliberately. The
+# tiers are:
+#
+#   * wrapped   -- behind an explicit coroutine (WRAPPED_ENGINE_METHODS)
+#   * delegated -- awaitable by name, raw engine signature (PROXY_METHODS)
+#   * listener  -- loop-marshaled registration (_LISTENER_METHODS)
+#   * engine-only -- not on the facade, with the reason recorded below
+#
+# tests/lib/test_aio.py asserts the four sets partition the engine's public
+# methods exactly, so a new engine method fails CI until it is placed. The
+# guard forces a decision, never exposure. Roadmap for the parked entries:
+# docs/internal/sofabaton-x-phase1-facade-plan.md.
+
+_R_TRANSPORT = (
+    "transport plumbing: invoked by the bridge, deframer and opcode "
+    "handlers, never by a consumer"
+)
+_R_ACK = "ack/exchange primitive composed by higher-level engine operations"
+_R_SYNC = (
+    "single-shot write primitive composed by sync_activity/sync_device "
+    "(phase 1 plan, decision 2)"
+)
+_R_PHASE3 = "write operation parked for phase 3 (phase 1 plan, section 11)"
+_R_INTEGRATION = (
+    "Home Assistant orchestration hosted in the library, not promoted "
+    "(phase 1 plan, decision 3)"
+)
+_R_F2 = "superseded by phase 1 F2 status()/hub_info()"
+_R_F6 = "cache snapshot serializer; phase 1 F6 state document"
+_R_INTERNAL_READ = (
+    "per-entity request/assembly internal behind the facade reads and backup_*"
+)
+_R_CARD = "Home Assistant card concern"
+
+
+def _reasons(reason: str, names: Iterable[str]) -> dict[str, str]:
+    return {name: reason for name in names}
+
+
+ENGINE_ONLY: dict[str, str] = {
+    **_reasons(
+        _R_TRANSPORT,
+        (
+            "handle_active_state",
+            "notify_ack",
+            "notify_activity_inputs_frame",
+            "notify_hub_ready",
+            "notify_ota_in_progress",
+            "note_ack_ready_refresh",
+            "note_buttons_frame",
+            "note_catalog_status_ack",
+            "ingest_activity_row",
+            "ingest_device_row",
+            "record_app_activation",
+            "record_banner_payload",
+            "record_hub_name",
+            "record_idle_behavior_value",
+            "try_finish_activities_burst",
+            "try_finish_activity_map_burst",
+            "try_finish_buttons_burst",
+            "try_finish_devices_burst",
+            "try_finish_ir_dump_burst",
+            "flag_pending_redundant_off_check",
+            "parse_device_commands",
+            "cache_macro_record",
+            "drop_cached_macro_records",
+            "set_assigned_device_id",
+            "update_x2_remote_sync_id",
+            "get_routed_local_ip",
+            "enqueue_cmd",
+        ),
+    ),
+    **_reasons(
+        _R_ACK,
+        (
+            "wait_for_ack",
+            "wait_for_ack_any",
+            "wait_for_ack_family_low",
+            "wait_for_any_response",
+            "wait_for_assigned_device_id",
+            "wait_for_macro_record",
+            "wait_for_activity_inputs_burst",
+            "wait_for_read_burst_quiesce",
+            "wait_for_x2_remote_sync_id",
+            "wait_for_virtual_device",
+            "clear_ack_queue",
+            "reset_ack_queues",
+            "exchange",
+            "execute_exchange",
+            "query_device_input_index",
+            "fetch_device_input_entries",
+            "start_virtual_device",
+            "update_virtual_device",
+        ),
+    ),
+    **_reasons(
+        _R_SYNC,
+        (
+            "set_idle_behavior",
+            "overwrite_command_payload",
+            "persist_command_record",
+            # demoted from PROXY_METHODS in 0.2.0 (phase 1 plan, decision 12)
+            "command_to_button",
+            "command_to_favorite",
+            "delete_favorite",
+            "reorder_favorites",
+            "add_device_to_activity",
+            "persist_ir_blob",
+        ),
+    ),
+    **_reasons(
+        _R_PHASE3,
+        (
+            "create_device",
+            "reorder_devices",
+            "set_ir_learn_mode",
+            "ir_learn_command",
+            "cancel_ir_learn",
+            "get_idle_behavior",
+            "fetch_idle_behavior",
+            "request_idle_behavior",
+            "request_favorites_order",
+            "apply_external_activity_state",
+        ),
+    ),
+    **_reasons(
+        _R_INTEGRATION,
+        ("create_wifi_device", "create_wifi_mqtt_device", "run_wifi_inplace_plan"),
+    ),
+    **_reasons(_R_F2, ("request_banner_info",)),
+    **_reasons(_R_F6, ("export_cache_state", "import_cache_state", "wipe_all_cached_state")),
+    **_reasons(
+        _R_INTERNAL_READ,
+        (
+            "assemble_activity_backup_from_state",
+            "assemble_device_backup_from_state",
+            "assemble_hub_bundle_from_state",
+            "clear_cached_entity_detail",
+            "activities_referencing_device",
+            "get_single_command_for_entity",
+            "request_buttons_for_entity",
+            "request_commands_for_entity",
+            "request_macros_for_activity",
+            "request_ip_commands_for_device",
+        ),
+    ),
+    **_reasons(_R_CARD, ("on_redundant_off_press",)),
+}
+
+
+def public_engine_methods(engine_cls: type = X1Proxy) -> frozenset[str]:
+    """Names of the public *methods* on ``engine_cls`` (properties excluded)."""
+
+    return frozenset(
+        name
+        for name, member in inspect.getmembers(engine_cls)
+        if not name.startswith("_") and inspect.isfunction(member)
+    )
+
+
+def engine_method_triage(engine_cls: type = X1Proxy) -> dict[str, set[str]]:
+    """Check that the facade tiers partition the engine's public methods.
+
+    Returns three sets, all empty when the triage is complete:
+
+    * ``untriaged`` -- public engine methods placed in no tier;
+    * ``overlap`` -- names placed in more than one tier;
+    * ``stale`` -- names placed in a tier that the engine no longer has.
+    """
+
+    tiers = {
+        "wrapped": set(AsyncXProxy.WRAPPED_ENGINE_METHODS),
+        "delegated": set(AsyncXProxy.PROXY_METHODS),
+        "listener": set(AsyncXProxy._LISTENER_METHODS),
+        "engine_only": set(ENGINE_ONLY),
+    }
+    placed: dict[str, int] = {}
+    for names in tiers.values():
+        for name in names:
+            placed[name] = placed.get(name, 0) + 1
+    public = public_engine_methods(engine_cls)
+    return {
+        "untriaged": set(public) - set(placed),
+        "overlap": {name for name, count in placed.items() if count > 1},
+        "stale": set(placed) - set(public),
+    }
 
 
 async def async_discover_hubs(

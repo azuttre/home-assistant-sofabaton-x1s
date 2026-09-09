@@ -74,6 +74,13 @@ class FakeProxy:
     def on_activity_change(self, cb): pass
 
     def can_issue_commands(self): return self._controllable
+    def get_proxy_status(self): return self.proxy_enabled
+    def has_banner_identity(self): return True
+    def get_banner_info(self):
+        return {"model": "X1", "name": "Living Room", "mac": "AABBCCDDEEFF",
+                "firmware_version": 7, "production_batch": "20240101"}
+    def fetch_banner_info(self, *, force_refresh=True, timeout=2.0):
+        return (self.get_banner_info(), True)
 
     # cached getters (ready=True when controllable; observe mode keeps cache)
     # Catalog getters gate on force_refresh, matching the real engine.
@@ -199,18 +206,14 @@ def test_run_makes_proxy_discoverable_after_connect(monkeypatch):
 
     calls: list[str] = []
 
-    class _Sync:
-        hub_version = "X1"
-
-        def has_banner_identity(self) -> bool:
-            return True
-
-        def can_issue_commands(self) -> bool:
-            return True
-
     class _FakeAsyncProxy:
+        # The run banner reads status() only; no .sync access is needed.
         def __init__(self, **_kwargs):
-            self.sync = _Sync()
+            pass
+
+        async def status(self):
+            calls.append("status")
+            return types.SimpleNamespace(controllable=True, hub_version="X1")
 
         async def __aenter__(self):
             return self
@@ -238,4 +241,4 @@ def test_run_makes_proxy_discoverable_after_connect(monkeypatch):
 
     asyncio.run(cli._main_run(["--hub-ip", "1.2.3.4", "--connect-timeout", "0.1"]))
 
-    assert calls == ["wait_connected", "wait_until_discoverable"]
+    assert calls == ["wait_connected", "wait_until_discoverable", "status"]

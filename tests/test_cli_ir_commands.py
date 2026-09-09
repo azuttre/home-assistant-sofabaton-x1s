@@ -1,4 +1,8 @@
-"""Tests for the CLI's IR-payload commands (``testir`` / ``addir``)."""
+"""Tests for the CLI's IR-payload command (``testir``).
+
+``addir`` was retired in sofabaton-x 0.2.0 (persist_ir_blob left the facade);
+it returns with the phase 3 payload path.
+"""
 
 from importlib import import_module
 from pathlib import Path
@@ -52,7 +56,21 @@ class _StubProxy:
 
     async def devices(self):
         self.calls.append(("devices", {}))
-        return self._devices
+        # The facade returns typed Device rows (list, sorted by id); the
+        # stub keeps its dict fixture and projects it the same way.
+        models = import_module("custom_components.sofabaton_x1s.lib.models")
+        return [
+            models.Device(
+                device_id=dev_id,
+                name=row.get("name", ""),
+                brand=row.get("brand"),
+                device_class=row.get("device_class"),
+                device_class_code=None,
+                power_state=None,
+                idle_behavior=None,
+            )
+            for dev_id, row in sorted(self._devices.items())
+        ]
 
     async def commands(self, device_id):
         self.calls.append(("commands", {"device_id": device_id}))
@@ -112,59 +130,5 @@ def test_testir_refuses_short_or_invalid_payload() -> None:
     _run(shell.cmd_testir("01 20"))          # too short
     _run(shell.cmd_testir("not hex"))        # not hex
     _run(shell.cmd_testir(""))               # usage
-
-    assert proxy.calls == []
-
-
-# ----- addir ---------------------------------------------------------------
-
-
-def test_addir_persists_with_quoted_name_and_fresh_occupancy() -> None:
-    cli = _cli()
-    proxy = _StubProxy(
-        devices={3: {"name": "TV", "device_class": "ir"}},
-        persist_result={"command_id": 7, "command_name": "Power Toggle", "page_count": 2},
-    )
-    shell = cli.AsyncShell(proxy)
-
-    _run(shell.cmd_addir(f'3 "Power Toggle" {PAYLOAD_HEX}'))
-
-    # occupancy is refreshed before the write
-    assert _called(proxy, "commands") == [{"device_id": 3}]
-    assert _called(proxy, "persist_ir_blob") == [
-        {"device_id": 3, "command_name": "Power Toggle", "blob": PAYLOAD}
-    ]
-
-
-def test_addir_refuses_non_ir_device() -> None:
-    cli = _cli()
-    proxy = _StubProxy(devices={3: {"name": "Plug", "device_class": "wifi_ip"}})
-    shell = cli.AsyncShell(proxy)
-
-    _run(shell.cmd_addir(f"3 Toggle {PAYLOAD_HEX}"))
-
-    assert _called(proxy, "persist_ir_blob") == []
-
-
-def test_addir_refuses_unknown_device() -> None:
-    cli = _cli()
-    proxy = _StubProxy(devices={1: {"name": "TV", "device_class": "ir"}})
-    shell = cli.AsyncShell(proxy)
-
-    _run(shell.cmd_addir(f"9 Toggle {PAYLOAD_HEX}"))
-
-    assert _called(proxy, "persist_ir_blob") == []
-
-
-def test_addir_usage_and_parse_errors_touch_nothing() -> None:
-    cli = _cli()
-    proxy = _StubProxy()
-    shell = cli.AsyncShell(proxy)
-
-    _run(shell.cmd_addir(""))                       # usage
-    _run(shell.cmd_addir("3 Toggle"))               # missing payload
-    _run(shell.cmd_addir("x Toggle 01 20"))         # bad device id
-    _run(shell.cmd_addir("3 Toggle zz"))            # bad hex
-    _run(shell.cmd_addir('3 "Unterminated 01 20'))  # bad quoting
 
     assert proxy.calls == []

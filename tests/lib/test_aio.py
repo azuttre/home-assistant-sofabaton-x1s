@@ -102,6 +102,27 @@ class FakeProxy:
     def on_client_state_change(self, cb) -> None:
         self.client_state_listeners.append(cb)
 
+    # The remaining engine listeners, for the events() stream.
+    def on_activity_change(self, cb) -> None:
+        self._listeners.setdefault("activity", []).append(cb)
+
+    def on_activity_list_update(self, cb) -> None:
+        self._listeners.setdefault("activity_list", []).append(cb)
+
+    def on_ota_update(self, cb) -> None:
+        self._listeners.setdefault("ota", []).append(cb)
+
+    def on_app_activation(self, cb) -> None:
+        self._listeners.setdefault("activation", []).append(cb)
+
+    def fire_activity_change(self, new_id, old_id, name) -> None:
+        for cb in self._listeners.get("activity", []):
+            cb(new_id, old_id, name)
+
+    def fire_simple(self, which: str) -> None:
+        for cb in self._listeners.get(which, []):
+            cb()
+
     def set_connected(self, *, hub: bool, client: bool = False) -> None:
         self.transport.is_hub_connected = hub
         self.transport.is_client_connected = client
@@ -131,6 +152,9 @@ class FakeProxy:
     # -- gating / lifecycle ---------------------------------------------
     def can_issue_commands(self) -> bool:
         return self.can_issue
+
+    def get_proxy_status(self) -> bool:
+        return True
 
     def has_banner_identity(self) -> bool:
         return self.banner_known
@@ -229,6 +253,37 @@ def test_proxy_methods_exist_on_real_engine() -> None:
     assert not missing, f"PROXY_METHODS drifted from X1Proxy: {sorted(missing)}"
 
 
+def test_every_public_engine_method_is_triaged() -> None:
+    # The facade is curated by hand on purpose. This guard does not force
+    # exposure; it forces a *decision*: every public X1Proxy method must
+    # sit in exactly one tier (wrapped / delegated / listener / engine-only
+    # with a reason), so a new engine method fails here until placed.
+    triage = aio.engine_method_triage(x1_proxy_mod.X1Proxy)
+    assert not triage["untriaged"], (
+        "public engine methods not placed in any facade tier "
+        f"(wrap, delegate, or add to aio.ENGINE_ONLY with a reason): "
+        f"{sorted(triage['untriaged'])}"
+    )
+    assert not triage["overlap"], f"placed in more than one tier: {sorted(triage['overlap'])}"
+    assert not triage["stale"], f"placed but gone from the engine: {sorted(triage['stale'])}"
+
+
+def test_engine_only_entries_carry_a_reason() -> None:
+    empty = [name for name, reason in aio.ENGINE_ONLY.items() if not str(reason).strip()]
+    assert not empty, f"ENGINE_ONLY entries without a reason: {empty}"
+
+
+def test_triage_flags_an_unplaced_engine_method() -> None:
+    class Grown(x1_proxy_mod.X1Proxy):
+        def brand_new_public_method(self) -> None:  # pragma: no cover - never called
+            pass
+
+    triage = aio.engine_method_triage(Grown)
+    assert triage["untriaged"] == {"brand_new_public_method"}
+    assert not triage["overlap"]
+    assert not triage["stale"]
+
+
 def test_human_surface_delegates_to_real_engine_methods() -> None:
     # Each clean method wraps a real engine method; assert those exist so
     # the human surface can't silently drift from the engine.
@@ -291,8 +346,10 @@ def test_activities_devices_read_cached_via_force_refresh() -> None:
         fake.make_activities_ready({1: {"name": "Watch TV"}})
         fake._ready["devices"] = {5: {"name": "TV"}}
         proxy = _wrap(fake)
-        assert await proxy.activities() == {1: {"name": "Watch TV"}}
-        assert await proxy.devices() == {5: {"name": "TV"}}
+        acts = await proxy.activities()
+        assert [(a.activity_id, a.name, a.active) for a in acts] == [(1, "Watch TV", False)]
+        devs = await proxy.devices()
+        assert [(d.device_id, d.name, d.power_state) for d in devs] == [(5, "TV", None)]
         assert fake.fetch_calls == []  # cached: no refresh fetch kicked
 
     asyncio.run(main())
@@ -321,7 +378,7 @@ def test_read_returns_cached_without_fetch() -> None:
         fake = FakeProxy()
         fake.make_commands_ready(5, {0xC6: "Power"})
         proxy = _wrap(fake)
-        assert await proxy.commands(5) == [{"command_id": 0xC6, "label": "Power"}]
+        assert [c.to_dict() for c in await proxy.commands(5)] == [{"command_id": 0xC6, "label": "Power"}]
         assert fake.fetch_calls == []  # already cached: no hub fetch
 
     asyncio.run(main())
@@ -342,7 +399,7 @@ def test_read_fetches_then_awaits_burst() -> None:
 
         asyncio.ensure_future(land_later())
         result = await proxy.commands(5)
-        assert result == [{"command_id": 0xC6, "label": "Power"}]
+        assert [c.to_dict() for c in result] == [{"command_id": 0xC6, "label": "Power"}]
         assert ("commands", 5) in fake.fetch_calls  # fetch was kicked
 
     asyncio.run(main())
@@ -462,7 +519,7 @@ def test_read_returns_cached_even_when_app_connected() -> None:
         fake.can_issue = False
         fake.make_commands_ready(5, {0xC6: "Power"})
         proxy = _wrap(fake)
-        assert await proxy.commands(5) == [{"command_id": 0xC6, "label": "Power"}]
+        assert [c.to_dict() for c in await proxy.commands(5)] == [{"command_id": 0xC6, "label": "Power"}]
 
     asyncio.run(main())
 
@@ -490,7 +547,7 @@ def test_favorites_returns_rich_device_command_label() -> None:
             {"name": "Denon Power", "device_id": 3, "command_id": 45}
         ]
         proxy = _wrap(fake)
-        assert await proxy.favorites(101) == [
+        assert [f.to_dict() for f in await proxy.favorites(101)] == [
             {"device_id": 3, "command_id": 45, "label": "Denon Power"}
         ]
 
@@ -505,13 +562,13 @@ def test_commands_and_buttons_return_send_pairs() -> None:
         fake.state.button_details = {101: {174: {"device_id": 3, "command_id": 20}}}
         proxy = _wrap(fake)
 
-        assert await proxy.commands(5) == [{"command_id": 12, "label": "Sleep"}]
+        assert [c.to_dict() for c in await proxy.commands(5)] == [{"command_id": 12, "label": "Sleep"}]
 
         btns = await proxy.buttons(101)
-        assert btns == [
-            {"button_code": 174, "name": btns[0]["name"], "device_id": 3, "command_id": 20}
+        assert [b.to_dict() for b in btns] == [
+            {"button_code": 174, "name": btns[0].name, "device_id": 3, "command_id": 20}
         ]
-        assert set(btns[0]) == {"button_code", "name", "device_id", "command_id"}
+        assert set(btns[0].to_dict()) == {"button_code", "name", "device_id", "command_id"}
 
     asyncio.run(main())
 
@@ -565,14 +622,14 @@ def test_delegated_method_runs_in_executor() -> None:
     async def main():
         call_thread = {}
 
-        # create_wifi_device is a still-delegated PROXY_METHODS name.
+        # delete_device is a delegated PROXY_METHODS name.
         class WithProvision(FakeProxy):
-            def create_wifi_device(self, **kwargs):
+            def delete_device(self, *args, **kwargs):
                 call_thread["t"] = threading.get_ident()
                 return {"ok": True}
 
         proxy = _wrap(WithProvision())
-        assert await proxy.create_wifi_device() == {"ok": True}
+        assert await proxy.delete_device(5) == {"ok": True}
         assert call_thread["t"] != threading.get_ident()
 
     asyncio.run(main())
@@ -761,5 +818,421 @@ def test_async_hub_browser_marshals_callbacks() -> None:
         assert seen == [("Den", loop_thread)]
         # The snapshot survives stop(); it reflects the last browse state.
         assert [hub.name for hub in browser.hubs] == ["Den"]
+
+    asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
+# typed errors + status surface (phase 1 F4 / F2)
+# ---------------------------------------------------------------------------
+
+errors = importlib.import_module(f"{_pkg.__name__}.errors")
+models = importlib.import_module(f"{_pkg.__name__}.models")
+
+
+def test_typed_errors_are_stdlib_subclasses() -> None:
+    assert issubclass(errors.HubNotConnectedError, RuntimeError)
+    assert issubclass(errors.HubBusyError, RuntimeError)
+    assert issubclass(errors.FetchTimeoutError, TimeoutError)
+
+
+def test_read_raises_typed_busy_and_not_connected() -> None:
+    async def main():
+        fake = FakeProxy()
+        proxy = _wrap(fake)
+        fake.set_connected(hub=True, client=True)
+        try:
+            await proxy.commands(1)
+        except errors.HubBusyError:
+            pass
+        else:
+            raise AssertionError("expected HubBusyError")
+        fake.set_connected(hub=False)
+        try:
+            await proxy.commands(1)
+        except errors.HubNotConnectedError:
+            pass
+        else:
+            raise AssertionError("expected HubNotConnectedError")
+
+    asyncio.run(main())
+
+
+def test_read_timeout_is_typed() -> None:
+    async def main():
+        fake = FakeProxy()
+        proxy = _wrap(fake)
+        try:
+            await proxy.commands(1, timeout=0.05)
+        except errors.FetchTimeoutError:
+            pass
+        else:
+            raise AssertionError("expected FetchTimeoutError")
+
+    asyncio.run(main())
+
+
+def test_status_reports_mode_and_counts() -> None:
+    async def main():
+        fake = FakeProxy()
+        fake.make_activities_ready({1: {"name": "TV"}, 2: {"name": "Music"}})
+        fake.state.current_activity = 0x0102
+        fake.state.activity_names[2] = "Music"
+        proxy = _wrap(fake)
+
+        st = await proxy.status()
+        assert isinstance(st, models.HubStatus)
+        assert st.mode == "control" and st.controllable and st.hub_connected
+        assert st.hub_version == "X1" and st.proxy_enabled
+        assert st.activities_cached == 2 and st.devices_cached == 0
+        assert st.running_activity == models.RunningActivity(activity_id=2, name="Music")
+        assert st.to_dict()["running_activity"] == {"activity_id": 2, "name": "Music"}
+
+        fake.set_connected(hub=True, client=True)
+        assert (await proxy.status()).mode == "observe"
+        fake.set_connected(hub=False)
+        st = await proxy.status()
+        assert st.mode == "disconnected" and not st.app_connected
+
+    asyncio.run(main())
+
+
+def test_hub_info_cached_then_refresh_then_busy() -> None:
+    async def main():
+        fake = FakeProxy()
+        proxy = _wrap(fake)
+
+        # Nothing known and control mode: hub_info fetches the banner.
+        info = await proxy.hub_info()
+        assert fake.banner_fetches == 1
+        assert isinstance(info, models.HubInfo) and info.known
+        assert info.model == "X1S" and info.name == "Living Room"
+
+        # Known banner is served from cache without a fetch.
+        await proxy.hub_info()
+        assert fake.banner_fetches == 1
+        # refresh=True forces a re-read.
+        await proxy.hub_info(refresh=True)
+        assert fake.banner_fetches == 2
+
+        # Observe mode: cached identity still served, refresh refused typed.
+        fake.set_connected(hub=True, client=True)
+        assert (await proxy.hub_info()).known
+        try:
+            await proxy.hub_info(refresh=True)
+        except errors.HubBusyError:
+            pass
+        else:
+            raise AssertionError("expected HubBusyError")
+
+    asyncio.run(main())
+
+
+def test_hub_info_unknown_without_fetch_is_not_an_error() -> None:
+    async def main():
+        fake = FakeProxy()
+        fake.set_connected(hub=False)
+        proxy = _wrap(fake)
+        info = await proxy.hub_info()
+        assert not info.known and info.model is None
+        assert fake.banner_fetches == 0
+
+    asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
+# typed catalog results (phase 1 F3)
+# ---------------------------------------------------------------------------
+
+devices_mod = importlib.import_module(f"{_pkg.__name__}.devices")
+
+
+def test_devices_project_power_state_from_stored_record() -> None:
+    async def main():
+        fake = FakeProxy()
+        fake.hub_version = "X1S"
+        on = devices_mod.DeviceConfig(name="TV", brand="Sony", power_state=1)
+        # The create payload carries a 3-byte header in front of the record
+        # body; the catalog row stores the body alone (what parse expects).
+        body_on = devices_mod.build_device_create_payload(on, hub_version="X1S")[3:]
+        # The catalog row keeps the record body; the facade parses the
+        # power byte out of it (None when the body is missing or bad).
+        fake._ready["devices"] = {
+            5: {"name": "TV", "brand": "Sony", "device_class": "ir",
+                "device_class_code": 1, "raw_body": body_on, "idle_behavior": 2},
+            6: {"name": "Amp", "raw_body": b"\x00\x01"},
+            7: {"name": "Lamp"},
+        }
+        proxy = _wrap(fake)
+        devs = {d.device_id: d for d in await proxy.devices()}
+        assert devs[5].power_state == 1
+        assert devs[5].brand == "Sony" and devs[5].device_class == "ir"
+        assert devs[5].device_class_code == 1 and devs[5].idle_behavior == 2
+        assert devs[6].power_state is None  # unparseable body
+        assert devs[7].power_state is None and devs[7].brand is None
+        assert devs[5].to_dict()["power_state"] == 1
+
+    asyncio.run(main())
+
+
+def test_activities_carry_flags_and_sort_by_id() -> None:
+    async def main():
+        fake = FakeProxy()
+        fake.make_activities_ready({
+            102: {"name": "Music", "active": True, "needs_confirm": True},
+            101: {"name": "TV", "active": False},
+        })
+        proxy = _wrap(fake)
+        acts = await proxy.activities()
+        assert [a.activity_id for a in acts] == [101, 102]
+        assert acts[1] == models.Activity(activity_id=102, name="Music", active=True, needs_confirm=True)
+        assert acts[0].to_dict() == {"activity_id": 101, "name": "TV", "active": False, "needs_confirm": False}
+
+    asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
+# event stream (phase 1 F5)
+# ---------------------------------------------------------------------------
+
+
+async def _collect(proxy, n, *, maxsize=256, timeout=2.0):
+    out = []
+    agen = proxy.events(maxsize=maxsize)
+    try:
+        while len(out) < n:
+            out.append(await asyncio.wait_for(agen.__anext__(), timeout))
+    finally:
+        await agen.aclose()
+    return out
+
+
+def test_events_fold_every_listener_into_typed_hub_events() -> None:
+    async def main():
+        fake = FakeProxy()
+        proxy = _wrap(fake)
+
+        async def fire():
+            await asyncio.sleep(0.01)
+            # From a worker thread, like the engine.
+            def _engine():
+                fake.fire_activity_change(0x0102, None, "Music")
+                fake.fire_simple("activity_list")
+                fake.fire_simple("ota")
+            t = threading.Thread(target=_engine)
+            t.start(); t.join()
+
+        asyncio.ensure_future(fire())
+        events = await _collect(proxy, 3)
+        assert [e.kind for e in events] == ["activity_changed", "activity_list_updated", "ota"]
+        assert [e.seq for e in events] == [1, 2, 3]
+        assert events[0].payload == models.ActivityChanged(activity_id=2, previous_activity_id=None, name="Music")
+        assert events[1].payload is None
+        assert events[0].to_dict() == {
+            "seq": 1, "kind": "activity_changed",
+            "payload": {"activity_id": 2, "previous_activity_id": None, "name": "Music"},
+        }
+        assert isinstance(events[0], models.HubEvent)
+
+    asyncio.run(main())
+
+
+def test_events_emit_status_changed_once_per_mode_flip() -> None:
+    async def main():
+        fake = FakeProxy()
+        proxy = _wrap(fake)
+
+        async def fire():
+            await asyncio.sleep(0.01)
+            fake.set_connected(hub=True, client=True)   # control -> observe
+            fake.set_connected(hub=True, client=True)   # no flip: no status event
+            fake.set_connected(hub=False)               # observe -> disconnected
+
+        asyncio.ensure_future(fire())
+        # 1st set: hub_state, app_state, status_changed; 2nd: hub_state, app_state;
+        # 3rd: hub_state, app_state, status_changed.
+        events = await _collect(proxy, 8)
+        kinds = [e.kind for e in events]
+        assert kinds.count("status_changed") == 2
+        flips = [e.payload for e in events if e.kind == "status_changed"]
+        assert flips[0] == models.StatusChanged(mode="observe", previous_mode="control")
+        assert flips[1] == models.StatusChanged(mode="disconnected", previous_mode="observe")
+        assert events[0].payload == models.ConnectionState(connected=True)
+
+    asyncio.run(main())
+
+
+def test_events_bounded_queue_drops_oldest_and_counts() -> None:
+    async def main():
+        fake = FakeProxy()
+        proxy = _wrap(fake)
+        agen = proxy.events(maxsize=2)
+        # Prime the generator so its queue is registered, then flood it
+        # before consuming.
+        first_task = asyncio.ensure_future(agen.__anext__())
+        await asyncio.sleep(0.01)
+        for i in range(5):
+            fake.fire_simple("ota")
+        await asyncio.sleep(0.01)
+        first = await first_task
+        second = await asyncio.wait_for(agen.__anext__(), 1.0)
+        await agen.aclose()
+        # All five dispatches run on the loop before the pending get
+        # resumes, so capacity 2 keeps the newest two (4, 5) and drops
+        # three (1, 2, 3), each counted.
+        assert proxy.events_dropped == 3
+        assert (first.seq, second.seq) == (4, 5)
+
+    asyncio.run(main())
+
+
+def test_events_consumer_exit_unregisters_queue() -> None:
+    async def main():
+        fake = FakeProxy()
+        proxy = _wrap(fake)
+        agen = proxy.events()
+        task = asyncio.ensure_future(agen.__anext__())
+        await asyncio.sleep(0.01)
+        assert len(proxy._event_queues) == 1
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        # Cancellation ran the generator's finally: the queue is gone.
+        assert not proxy._event_queues
+        await agen.aclose()
+        # Listeners stay armed (registered once) even with no consumer.
+        fake.fire_simple("ota")
+        await asyncio.sleep(0.01)
+        assert proxy.events_dropped == 0
+
+    asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
+# connect-time initial sync (phase 1 F6)
+# ---------------------------------------------------------------------------
+
+
+def _land(fake, key, data=None) -> None:
+    """Emulate the hub reply landing for a catalog burst."""
+
+    if key == "devices":
+        fake._ready["devices"] = data if data is not None else {}
+    elif key == "activities":
+        fake._ready["activities"] = data if data is not None else {}
+    fake.fire_burst(key)
+
+
+def test_initial_sync_runs_on_connect_in_order_and_marks_ready() -> None:
+    async def main():
+        fake = FakeProxy()
+        fake.set_connected(hub=False)
+        proxy = aio.AsyncXProxy.wrap(fake, initial_sync=True)
+        assert not (await proxy.status()).catalog_ready
+
+        fake.set_connected(hub=True)          # hub connects: sync starts
+        await asyncio.sleep(0.02)
+        assert fake.banner_fetches == 1
+        assert fake.fetch_calls == [("devices", None)]   # devices requested first
+
+        _land(fake, "devices", {5: {"name": "TV"}})
+        await asyncio.sleep(0.02)
+        assert fake.fetch_calls == [("devices", None), ("activities", None)]
+        assert not proxy._catalog_ready
+
+        _land(fake, "activities", {1: {"name": "Watch TV"}})
+        assert await proxy.wait_until_ready(timeout=1.0)
+        st = await proxy.status()
+        assert st.catalog_ready and st.activities_cached == 1 and st.devices_cached == 1
+        # The catalog is served from cache now: no new fetch.
+        assert [a.name for a in await proxy.activities()] == ["Watch TV"]
+        assert fake.fetch_calls == [("devices", None), ("activities", None)]
+
+    asyncio.run(main())
+
+
+def test_read_during_initial_sync_joins_the_inflight_fetch() -> None:
+    async def main():
+        fake = FakeProxy()
+        fake.set_connected(hub=False)
+        proxy = aio.AsyncXProxy.wrap(fake, initial_sync=True)
+        fake.set_connected(hub=True)
+        await asyncio.sleep(0.02)
+        assert fake.fetch_calls == [("devices", None)]
+
+        # A consumer asks for devices while the sync's fetch is in flight.
+        read = asyncio.ensure_future(proxy.devices())
+        await asyncio.sleep(0.02)
+        assert fake.fetch_calls == [("devices", None)]   # no second request
+
+        _land(fake, "devices", {5: {"name": "TV"}})
+        devs = await asyncio.wait_for(read, 1.0)
+        assert [d.name for d in devs] == ["TV"]
+
+    asyncio.run(main())
+
+
+def test_initial_sync_disconnect_mid_fetch_stays_not_ready_and_reruns() -> None:
+    async def main():
+        fake = FakeProxy()
+        fake.set_connected(hub=False)
+        proxy = aio.AsyncXProxy.wrap(fake, initial_sync=True)
+        events = proxy.events()
+        first = asyncio.ensure_future(events.__anext__())
+
+        fake.set_connected(hub=True)
+        await asyncio.sleep(0.02)
+        fake.set_connected(hub=False)          # drop while devices is pending
+        await asyncio.sleep(0.02)
+        assert not proxy._catalog_ready
+        assert not await proxy.wait_until_ready(timeout=0.05)
+
+        # Reconnect: the sync runs again from the banner.
+        fake.set_connected(hub=True)
+        await asyncio.sleep(0.02)
+        assert fake.banner_fetches == 2
+        _land(fake, "devices")
+        await asyncio.sleep(0.02)
+        _land(fake, "activities")
+        assert await proxy.wait_until_ready(timeout=1.0)
+
+        # The stream carried the ready flip.
+        seen = [await first]
+        agen = events
+        for _ in range(12):
+            try:
+                seen.append(await asyncio.wait_for(agen.__anext__(), 0.05))
+            except TimeoutError:
+                break
+        await agen.aclose()
+        ready_events = [e.payload for e in seen if e.kind == "catalog_ready"]
+        assert ready_events == [models.CatalogReady(ready=True)]
+
+    asyncio.run(main())
+
+
+def test_initial_sync_waits_for_control_mode() -> None:
+    async def main():
+        fake = FakeProxy()
+        fake.set_connected(hub=False)
+        proxy = aio.AsyncXProxy.wrap(fake, initial_sync=True)
+        fake.set_connected(hub=True, client=True)   # observe: app holds the hub
+        await asyncio.sleep(0.02)
+        assert fake.banner_fetches == 0 and fake.fetch_calls == []
+
+        fake.set_connected(hub=True)                # app left: control mode
+        await asyncio.sleep(0.02)
+        assert fake.banner_fetches == 1 and fake.fetch_calls == [("devices", None)]
+
+    asyncio.run(main())
+
+
+def test_ready_waiter_is_false_when_initial_sync_is_off() -> None:
+    async def main():
+        proxy = _wrap(FakeProxy())          # wrap() defaults initial_sync=False
+        assert not await proxy.wait_until_ready(timeout=0.01)
+        assert not (await proxy.status()).catalog_ready
 
     asyncio.run(main())

@@ -95,6 +95,30 @@ from .wifi_inplace_plan import (  # noqa: F401
     desired_snapshot_from_config,
 )
 
+# Hub configuration record (discovery / manual / REST intake).
+from .config import ConfigSource, HubConfig  # noqa: F401
+
+# Typed results and failures of the asyncio facade.
+from .models import (  # noqa: F401
+    Activity,
+    ActivityChanged,
+    CatalogReady,
+    ConnectionState,
+    EventKind,
+    HubEvent,
+    StatusChanged,
+    Button,
+    Command,
+    Device,
+    Favorite,
+    HubInfo,
+    HubMode,
+    HubStatus,
+    Macro,
+    RunningActivity,
+)
+from .errors import FetchTimeoutError, HubBusyError, HubNotConnectedError  # noqa: F401
+
 # Asyncio facade over the threaded core.
 from .aio import AsyncHubBrowser, AsyncXProxy, async_discover_hubs  # noqa: F401
 
@@ -160,6 +184,30 @@ _CURATED = [
     "build_wifi_inplace_plan",
     "derive_device_level_bindings",
     "desired_snapshot_from_config",
+    # facade result types and failures
+    "Activity",
+    "Button",
+    "Command",
+    "Device",
+    "Favorite",
+    "Macro",
+    "HubInfo",
+    "HubMode",
+    "HubStatus",
+    "RunningActivity",
+    "FetchTimeoutError",
+    "HubBusyError",
+    "HubNotConnectedError",
+    # hub configuration record
+    "ConfigSource",
+    "HubConfig",
+    # facade event stream
+    "EventKind",
+    "ActivityChanged",
+    "ConnectionState",
+    "StatusChanged",
+    "CatalogReady",
+    "HubEvent",
     # asyncio facade
     "AsyncHubBrowser",
     "AsyncXProxy",

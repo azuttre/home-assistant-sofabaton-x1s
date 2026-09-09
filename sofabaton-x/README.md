@@ -22,24 +22,32 @@ the integration is its reference consumer.
   like a real hub, the official app connects to it, and every frame is
   relayed, decoded and observable. The hub keeps working with the app while
   your application gets full visibility and control.
-- **Catalogs**: read activities, devices, buttons, commands, macros and
-  favorites from the hub's wire protocol.
+- **Catalogs**: read activities, devices (with live power state),
+  buttons, commands, macros and favorites as typed results.
 - **Control**: send button/command presses, switch activities, trigger
   find-my-remote.
-- **Provisioning** (protocol side): create/update/delete devices and
-  activities, including virtual WiFi/IP devices.
-- **Backup / restore**: export and restore hub configuration.
+- **Status and events**: typed connection status and hub identity, and
+  one event stream for activity changes, catalog updates, hub and app
+  link state, OTA and mode flips. The hub's own activity-state MQTT
+  publishes (X2) can be fed back in as an external state source.
+- **Configuration as data**: one hub record for every intake path,
+  whether the library discovered the hub, a foreign mDNS stack did, a
+  user typed an address, or it arrived as a REST body.
+- **Backup / restore**: export and restore hub configuration, including
+  provisioning devices of any class from a hand-built bundle.
 - **Live editing**: diff an edited backup bundle against the captured
   baseline and sync the difference to the hub as targeted in-place writes
   (activity- or device-scoped), with a pure plan builder for dry-run
   previews.
-- **Events**: subscribe to hub/app connection state, activity changes,
-  OTA progress and catalog updates.
+- **IR payloads**: play a raw payload once, learn a code from a physical
+  remote through the hub's IR receiver, and convert between the hub's
+  stored formats, Pronto hex and raw timings (engine level today; a
+  facade payload surface is planned).
 
-Deliberately **out of scope**: executing the HTTP callbacks that virtual
-WiFi/IP devices define (e.g. a Roku-style ECP listener). The library carries
-the protocol artifacts for those features so applications can build them on
-top — the Home Assistant integration does exactly that.
+Deliberately **out of scope**: executing the HTTP or MQTT callbacks that
+network-class devices define (e.g. a Roku-style ECP listener). The
+library carries the protocol artifacts for those features so applications
+can build them on top — the Home Assistant integration does exactly that.
 
 ## ◇ Install
 
@@ -74,13 +82,13 @@ async def main():
     async with proxy:
         await proxy.wait_until_controllable()      # own the hub (see below)
 
-        for act_id, act in (await proxy.activities()).items():
-            print(f"activity {act_id}: {act['name']}")
+        for act in await proxy.activities():           # list[Activity]
+            print(f"activity {act.activity_id}: {act.name}")
 
-        for dev_id, dev in (await proxy.devices()).items():
-            for cmd in await proxy.commands(dev_id):   # [{command_id, label}]
-                print(f"device {dev_id} ({dev['name']}): "
-                      f"command {cmd['command_id']} = {cmd['label']}")
+        for dev in await proxy.devices():              # list[Device]
+            for cmd in await proxy.commands(dev.device_id):   # list[Command]
+                print(f"device {dev.device_id} ({dev.name}): "
+                      f"command {cmd.command_id} = {cmd.label}")
 
         # Fires one real command — command 5 on device 1. Pick your own
         # (entity_id, command_id) pair from the listing printed above.
@@ -105,6 +113,35 @@ proxy = AsyncXProxy(
 )
 ```
 
+### Configuration as data
+
+Every way a hub can reach your application produces the same record, a
+`HubConfig` dataclass that round-trips through a plain dict (a REST body,
+a config file) and builds the proxy:
+
+```python
+from sofabaton import AsyncXProxy, HubConfig
+
+cfg = HubConfig(host="192.168.1.50")                    # manual entry: host is enough
+cfg = HubConfig.from_discovered(hub)                    # from async_discover_hubs / HubBrowser
+cfg = HubConfig.from_advertisement(                     # from a foreign mDNS stack's record
+    service_type, instance_name, host=host, port=port, properties=txt_properties,
+)
+cfg = HubConfig.from_dict(json_body)                    # from a REST body or config file
+
+proxy = AsyncXProxy.from_config(cfg)                    # same as AsyncXProxy(**cfg.proxy_kwargs())
+```
+
+`from_advertisement` accepts what mDNS libraries hand out (bytes or str
+keys and values) and raises `ValueError` for anything that is not a
+Sofabaton hub advertisement. An unrecognised `HVER` does not reject the
+record: `hub_version` stays `None` and the connect banner settles it.
+`is_proxy` is `True` when the record describes one of *your own* proxy
+advertisements (they mimic hubs by design and carry the `HA_PROXY` TXT
+key); use it to map such a record back to the hub you already front
+instead of proxying a proxy. `source` (`"server"`, `"client"`,
+`"manual"`) is informational.
+
 ### Ports
 
 The proxy has two network faces. Apart from `hub_ip`, every port defaults
@@ -124,24 +161,71 @@ The hub model (X1/X1S/X2) is confirmed from the connect banner, so
 for the complete port map and firewall guidance.
 
 Everything is keyed on **`(entity_id, command_id)`** — you browse to get
-those ids, then `send(entity_id, command_id)`. The reads return them
-directly (cached if available, else fetched):
+those ids, then `send(entity_id, command_id)`. The reads return typed
+dataclasses (each with a `to_dict()`), cached if available, else fetched:
 
-| read                         | returns                                        |
-| ---------------------------- | ---------------------------------------------- |
-| `activities()` / `devices()` | `{id: {name, ...}}`                            |
-| `commands(device_id)`        | `[{command_id, label}]`                        |
-| `macros(activity_id)`        | `[{command_id, label}]`                        |
-| `favorites(activity_id)`     | `[{device_id, command_id, label}]`             |
-| `buttons(entity_id)`         | `[{button_code, name, device_id, command_id}]` |
-| `current_activity()`         | `{activity_id, name}` or `None` when idle      |
+| read                     | returns                                                                                  |
+| ------------------------ | ---------------------------------------------------------------------------------------- |
+| `activities()`           | `list[Activity]`: `activity_id`, `name`, `active`, `needs_confirm`                       |
+| `devices()`              | `list[Device]`: `device_id`, `name`, `brand`, `device_class`, `device_class_code`, `power_state`, `idle_behavior` |
+| `commands(device_id)`    | `list[Command]`: `command_id`, `label`                                                   |
+| `macros(activity_id)`    | `list[Macro]`: `command_id`, `label`                                                     |
+| `favorites(activity_id)` | `list[Favorite]`: `device_id`, `command_id`, `label`                                     |
+| `buttons(entity_id)`     | `list[Button]`: `button_code`, `name`, `device_id`, `command_id`                         |
+| `current_activity()`     | `{activity_id, name}` or `None` when idle                                                |
+
+Lists are sorted by id. `Device.power_state` is the hub's live power byte
+(0 off, 1 on) as of the last devices fetch, or `None` when the row carried
+no parseable record; the hub commits it with a short lag after a power
+command, so it is not an instantaneous read.
 
 `current_activity()` is the exception to the table above — it reads the
 hub's **live** running-activity state (no fetch) and works in observe mode
 too; subscribe to changes with `on_activity_change(cb)`.
 
+Two typed status reads sit beside the catalog reads, both returning
+dataclasses with a `to_dict()`:
+
+| status read                | returns                                                                                              |
+| -------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `status()`                 | `HubStatus`: `hub_connected`, `app_connected`, `controllable`, `mode`, `hub_version`, `proxy_enabled`, `running_activity`, cached counts, `catalog_ready` |
+| `hub_info(refresh=False)`  | `HubInfo`: `known`, `model`, `name`, `mac`, `firmware_version`, `production_batch` (from the connect banner) |
+
+`status()` is a pure state read and works in every mode; `mode` is
+`"disconnected"`, `"observe"` or `"control"` and explains why a send was
+refused. `hub_info()` serves the banner known from the session and only
+re-reads it on `refresh=True`, which needs control mode.
+
+A read that has to fetch and cannot raises a typed error: `HubBusyError`
+(an app holds the hub), `HubNotConnectedError` (no hub session), or
+`FetchTimeoutError` (the reply never landed). They subclass `RuntimeError`
+and `TimeoutError`, so existing `except` clauses keep working.
+
 Control: `send(entity_id, command_id)` (alias `press`),
 `start_activity(act)`, `stop_activity(act)`, `find_remote()`.
+
+### Events
+
+Every engine listener is also available as one typed stream:
+
+```python
+async for event in proxy.events():          # HubEvent(seq, kind, payload)
+    print(event.seq, event.kind, event.to_dict()["payload"])
+```
+
+| kind                    | payload                                            |
+| ----------------------- | -------------------------------------------------- |
+| `activity_changed`      | `ActivityChanged`: `activity_id`, `previous_activity_id`, `name` (`activity_id` is `None` when the hub powered off) |
+| `activity_list_updated` | none (re-read `activities()`)                      |
+| `hub_state` / `app_state` | `ConnectionState`: `connected`                   |
+| `status_changed`        | `StatusChanged`: `mode`, `previous_mode` (derived; fires once per mode flip) |
+| `catalog_ready`         | `CatalogReady`: `ready` (the connect-time initial sync finished, or the session dropped) |
+| `ota`                   | none (the hub goes silent for a few minutes)       |
+
+Each consumer gets its own bounded queue (`maxsize=256` by default). A
+consumer that falls behind loses the oldest events rather than stalling
+the engine; drops are counted in `proxy.events_dropped` and show up as a
+gap in `seq`. The `on_*` registrations keep working alongside the stream.
 
 ### Two modes
 
@@ -160,6 +244,17 @@ gives it two distinct modes:
 afterwards, so await the matching readiness primitive before reading or
 acting (otherwise a read raises with the reason — hub not connected, or
 an app holds it).
+
+Every time the hub connects, the proxy also runs a small **initial
+sync** on its own: it reads the connect banner, the device list and the
+activity list, so that minimum is always cached for the session (and
+`hub_info()` / `activities()` / `devices()` never need a fetch of their
+own afterwards). `await proxy.wait_until_ready()` resolves once that has
+happened; `status().catalog_ready` mirrors it and the `catalog_ready`
+event announces it. The sync needs control mode, so with an app already
+attached it runs as soon as the app lets go. Pass `initial_sync=False`
+to the constructor to opt out (an application that runs its own
+connect-time sync, as the Home Assistant integration does).
 
 The mode is not fixed at startup — it follows the app. If the official
 app connects while you hold control, you are demoted to observe mode
@@ -223,7 +318,6 @@ x> commands 1                        # list (command_id, label) for device 1
 x> send 1 5                          # numeric ids, exactly like the Python API
 x> send 101 POWER_ON                 # the CLI also resolves button names to codes
 x> testir 01 20 00 10 01 00 94 ac .. # fire a raw IR payload once (nothing saved)
-x> addir 1 "Power Toggle" 01 20 ..   # save that payload as a new command
 ```
 
 The last form is a CLI convenience: `send` (alias `press`) accepts either
@@ -232,17 +326,16 @@ The Python API itself is numeric-only — `send(entity_id, command_id)` —
 with the `ButtonName` constants importable from the package root when
 you want named button codes.
 
-`testir` and `addir` work with raw IR payload hex (the bytes a command
-replays, as shown in a backup's `data_hex` fields): `testir` plays a
-payload once without saving, `addir` persists it as a new command on an
-existing IR device and prints the assigned command id. In the Python API
-these are `play_ir_blob(blob)` and
-`persist_ir_blob(device_id=..., command_name=..., blob=...)`.
+`testir` works with raw IR payload hex (the bytes a command replays, as
+shown in a backup's `data_hex` fields) and plays it once without saving;
+in the Python API this is `play_ir_blob(blob)`. Saving a payload as a
+new command goes through the bundle edit path (`sync_device`) until the
+facade's payload surface lands.
 
-Runnable examples — discovery, watching a live session, taking control
-of a hub, reading per-entity detail (commands/macros/favorites),
-schema-versioned backup/restore, adding an IR command with a custom hex
-payload to an existing device, provisioning a WiFi-IP device from
+Runnable examples — discovery, accepting a hub record from a platform's
+own discovery, watching the event stream, watching a live session, taking
+control of a hub, reading per-entity detail (commands/macros/favorites),
+schema-versioned backup/restore, provisioning a network device from
 scratch via restore, and building an HTTP callback listener on top of the
 library — live in
 [`sofabaton-x/examples/`](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/tree/main/sofabaton-x/examples).
@@ -275,8 +368,10 @@ between minor releases. The public surface is async-first by design:
 synchronous engine (reachable via `AsyncXProxy.sync` when you need the
 raw surface) is internal and not semver-covered. The library raises
 stdlib exceptions (`ValueError` for malformed/unclassifiable input,
-`RuntimeError` / `TimeoutError` for transport and ack failures); there
-are no custom exception types. Until 1.0, pin a minor version.
+`RuntimeError` / `TimeoutError` for transport and ack failures). The
+facade's three typed errors (`HubBusyError`, `HubNotConnectedError`,
+`FetchTimeoutError`) are subclasses of those, never a separate
+hierarchy. Until 1.0, pin a minor version.
 
 ## ◇ Issues & release notes
 
