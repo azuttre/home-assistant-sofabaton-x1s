@@ -1273,3 +1273,62 @@ def test_stop_release_hub_bounces_shared_listener_after_stop(monkeypatch) -> Non
         assert calls == ["stop", "release 1.2.3.4"]   # release: AFTER the stop, for this hub's IP
 
     asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
+# refresh reads (review 2026-09-09: fetch-then-prune, never clear)
+# ---------------------------------------------------------------------------
+
+
+def test_devices_refresh_forces_a_fetch_and_awaits_it() -> None:
+    async def main():
+        fake = FakeProxy()
+        fake._ready["devices"] = {5: {"name": "TV"}}
+        proxy = _wrap(fake)
+        assert [d.name for d in await proxy.devices()] == ["TV"]
+        assert fake.fetch_calls == []                       # cached read
+
+        read = asyncio.ensure_future(proxy.devices(refresh=True))
+        await asyncio.sleep(0.02)
+        assert fake.fetch_calls == [("devices", None)]      # a forced re-read
+        assert fake._ready["devices"] == {5: {"name": "TV"}}   # nothing cleared meanwhile
+        _land(fake, "devices", {5: {"name": "TV"}, 6: {"name": "Amp"}})
+        devs = await asyncio.wait_for(read, 1.0)
+        assert [d.name for d in devs] == ["TV", "Amp"]
+
+        # activities(refresh=True) takes the same path.
+        fake.make_activities_ready({1: {"name": "Watch TV"}})
+        read = asyncio.ensure_future(proxy.activities(refresh=True))
+        await asyncio.sleep(0.02)
+        assert fake.fetch_calls[-1] == ("activities", None)
+        _land(fake, "activities", {1: {"name": "Watch TV"}})
+        assert [a.name for a in await asyncio.wait_for(read, 1.0)] == ["Watch TV"]
+
+    asyncio.run(main())
+
+
+def test_refused_refresh_raises_and_keeps_the_cached_catalog() -> None:
+    async def main():
+        fake = FakeProxy()
+        fake._ready["devices"] = {5: {"name": "TV"}}
+        proxy = _wrap(fake)
+        fake.set_connected(hub=True, client=True)           # an app holds the hub
+        try:
+            await proxy.devices(refresh=True)
+        except errors.HubBusyError:
+            pass
+        else:
+            raise AssertionError("expected HubBusyError")
+        assert fake.fetch_calls == []                       # never asked
+        # The plain read still serves the last catalog.
+        assert [d.name for d in await proxy.devices()] == ["TV"]
+
+        fake.set_connected(hub=False)
+        try:
+            await proxy.activities(refresh=True)
+        except errors.HubNotConnectedError:
+            pass
+        else:
+            raise AssertionError("expected HubNotConnectedError")
+
+    asyncio.run(main())

@@ -5,9 +5,9 @@ from __future__ import annotations
 from fastapi import APIRouter, Request, Response, status
 
 from . import API_PREFIX
-from .manager import HubConflict, HubManager, HubNotFound
+from .manager import HubConflict, HubManager, HubNotFound, HubStartFailed
 from .models import HubCreate, HubView, Problem
-from .problems import ApiProblem, hub_not_found
+from .problems import ApiProblem, hub_not_found, hub_start_failed
 
 router = APIRouter(prefix=f"{API_PREFIX}/hubs", tags=["hubs"])
 
@@ -27,7 +27,7 @@ async def list_hubs(request: Request) -> list[HubView]:
     response_model=HubView,
     status_code=status.HTTP_201_CREATED,
     summary="Register a hub",
-    responses={409: {"model": Problem}, 422: {"model": Problem}},
+    responses={409: {"model": Problem}, 422: {"model": Problem}, 503: {"model": Problem}},
 )
 async def add_hub(request: Request, body: HubCreate) -> HubView:
     manager = manager_of(request)
@@ -40,6 +40,9 @@ async def add_hub(request: Request, body: HubCreate) -> HubView:
     except HubConflict as err:
         raise ApiProblem(409, "hub_conflict", "Hub already registered or not a hub",
                          detail=str(err), hub_id=err.existing_hub_id) from err
+    except HubStartFailed as err:
+        # The record was persisted; the proxy could not start. Enable retries.
+        raise hub_start_failed(err.hub_id, err.cause) from err
     return await manager.view(record.hub_id)
 
 
@@ -63,7 +66,7 @@ async def remove_hub(request: Request, hub_id: str) -> Response:
 
 
 @router.post("/{hub_id}/enable", operation_id="enableHub", response_model=HubView,
-             summary="Reconnect a disabled hub", responses={404: {"model": Problem}})
+             summary="Reconnect a disabled hub", responses={404: {"model": Problem}, 503: {"model": Problem}})
 async def enable_hub(request: Request, hub_id: str) -> HubView:
     manager = manager_of(request)
     try:
@@ -71,6 +74,8 @@ async def enable_hub(request: Request, hub_id: str) -> HubView:
         return await manager.view(hub_id)
     except HubNotFound:
         raise hub_not_found(hub_id) from None
+    except HubStartFailed as err:
+        raise hub_start_failed(err.hub_id, err.cause) from err
 
 
 @router.post("/{hub_id}/disable", operation_id="disableHub", response_model=HubView,

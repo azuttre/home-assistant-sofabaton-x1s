@@ -303,3 +303,92 @@ def test_event_listeners_do_not_deadlock_under_transport_lock() -> None:
         await agen.aclose()
 
     asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
+# review 2026-09-09: a sync cancelled by a quick reconnect must run again
+# ---------------------------------------------------------------------------
+
+
+def test_reconnect_during_active_sync_restarts_the_sync() -> None:
+    # The first session's sync is mid-fetch (its task alive) when the hub
+    # drops and returns before the loop turns. The reconnect used to see
+    # the old task still pending and skip starting a new one; the old
+    # task then died of the cancellation and nothing ever synced.
+    async def main():
+        engine = _engine()
+        proxy = aio.AsyncXProxy.wrap(engine, initial_sync=True)
+        _hub_link(engine, True)
+        await asyncio.sleep(0.05)
+        first = proxy._initial_sync_task
+        assert first is not None and not first.done()
+        banner_requests = _pending_local_bytes(engine)
+        gen = proxy._session_gen
+
+        _hub_link(engine, False)
+        _hub_link(engine, True)
+        await asyncio.sleep(0.05)
+
+        assert proxy._session_gen == gen + 1
+        assert first.cancelled()
+        second = proxy._initial_sync_task
+        assert second is not None and second is not first and not second.done()
+        # The new session asked the hub for its banner again.
+        assert _pending_local_bytes(engine) > banner_requests
+        second.cancel()
+
+    asyncio.run(main())
+
+
+def test_sync_that_ends_without_readiness_is_retried_later(monkeypatch) -> None:
+    # The banner request never lands (the engine's own wait times out).
+    # The sync ends without readiness; the hub is still connected, so
+    # nothing else would ever start a new one. The done-callback does,
+    # after a pause.
+    async def main():
+        monkeypatch.setattr(aio, "INITIAL_SYNC_RETRY_S", 0.08)
+        engine = _engine()
+        proxy = aio.AsyncXProxy.wrap(engine, initial_sync=True)
+        banner_attempts = 0
+
+        def no_banner(**kw):
+            nonlocal banner_attempts
+            banner_attempts += 1
+            return ({}, False)
+
+        engine.fetch_banner_info = no_banner
+        _hub_link(engine, True)
+        await asyncio.sleep(0.02)
+        first = proxy._initial_sync_task
+        assert first is not None and first.done() and not first.cancelled()
+        assert banner_attempts == 1 and not proxy._catalog_ready
+
+        await asyncio.sleep(0.1)                 # past one retry pause, short of two
+        second = proxy._initial_sync_task
+        assert second is not None and second is not first
+        assert banner_attempts == 2 and not proxy._catalog_ready
+        # Once the session ends, the pending retry finds no link and does nothing.
+        _hub_link(engine, False)
+        await asyncio.sleep(0.2)
+        assert banner_attempts == 2
+
+    asyncio.run(main())
+
+
+def test_refused_refresh_keeps_the_committed_catalog_on_the_real_engine() -> None:
+    async def main():
+        engine = _engine("X1S")
+        proxy = aio.AsyncXProxy.wrap(engine)
+        engine.state.devices = {5: {"name": "TV", "brand": "Sony", "device_class": "ir", "raw_body": b""}}
+        engine._devices_catalog_ready = True
+        _hub_link(engine, True)
+        assert [d.name for d in await proxy.devices()] == ["TV"]
+
+        with engine.transport._app_lock:
+            engine.transport._app_sock = _Sock()         # the app takes the hub
+        with pytest.raises(errors.HubBusyError):
+            await proxy.devices(refresh=True)
+        assert [d.name for d in await proxy.devices()] == ["TV"]
+        assert not engine._burst.active
+
+    asyncio.run(main())

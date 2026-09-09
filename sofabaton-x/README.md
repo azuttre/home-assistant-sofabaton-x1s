@@ -177,7 +177,11 @@ dataclasses (each with a `to_dict()`), cached if available, else fetched:
 Lists are sorted by id. `Device.power_state` is the hub's live power byte
 (0 off, 1 on) as of the last devices fetch, or `None` when the row carried
 no parseable record; the hub commits it with a short lag after a power
-command, so it is not an instantaneous read.
+command, so it is not an instantaneous read. `activities(refresh=True)`
+and `devices(refresh=True)` re-read the list from the hub (fresh power
+bytes included). The engine is fetch-then-prune: a refresh that cannot
+be issued or never lands raises the typed error and the cached list
+stays readable; nothing is cleared first.
 
 `current_activity()` is the exception to the table above — it reads the
 hub's **live** running-activity state (no fetch) and works in observe mode

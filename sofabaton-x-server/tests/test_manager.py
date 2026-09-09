@@ -11,7 +11,7 @@ import pytest
 from sofabaton import HubConfig
 
 from sofabaton_server.config import Settings
-from sofabaton_server.manager import HubConflict, HubDisabled, HubManager, HubNotFound
+from sofabaton_server.manager import HubConflict, HubDisabled, HubManager, HubNotFound, HubStartFailed
 from sofabaton_server.store import HubStore
 
 from fakes import Factory
@@ -197,3 +197,80 @@ def test_store_rejects_foreign_schema(tmp_path: Path) -> None:
     (tmp_path / "hubs.json").write_text(json.dumps({"schema": 99, "hubs": []}), encoding="utf-8")
     with pytest.raises(ValueError):
         HubStore(tmp_path).load()
+
+
+def test_concurrent_disable_and_enable_settle_consistently(tmp_path: Path) -> None:
+    # Review finding: disable yielded while cancelling its watcher; an
+    # enable arriving in that gap saw the proxy still registered, did
+    # nothing, and disable then stopped it: record enabled, no proxy.
+    factory = Factory()
+
+    async def main():
+        m = _manager(tmp_path, factory)
+        await m.start()
+        await m.add(HubConfig(host="192.168.1.50"))
+        first = factory.latest("192.168.1.50")
+
+        disable = asyncio.ensure_future(m.disable("192.168.1.50"))
+        await asyncio.sleep(0)                  # disable is inside its transition
+        enable = asyncio.ensure_future(m.enable("192.168.1.50"))
+        await asyncio.gather(disable, enable)
+
+        rec = m.record("192.168.1.50")
+        assert rec.enabled is True
+        assert m.proxy("192.168.1.50") is not first          # a fresh proxy runs
+        assert first.stops == [True] and m.proxy("192.168.1.50").started
+        await m.stop()
+
+    _run(main())
+
+
+def test_failed_start_registers_nothing_and_enable_retries(tmp_path: Path) -> None:
+    factory = Factory()
+    factory.start_error = OSError("port in use")
+
+    async def main():
+        m = _manager(tmp_path, factory)
+        await m.start()
+        with pytest.raises(HubStartFailed) as info:
+            await m.add(HubConfig(host="192.168.1.50"))
+        assert info.value.hub_id == "192.168.1.50"
+        assert m.record("192.168.1.50").enabled is True       # kept as asked
+        with pytest.raises(HubDisabled):
+            m.proxy("192.168.1.50")                            # nothing phantom
+        assert (await m.view("192.168.1.50")).status is None
+        assert factory.latest("192.168.1.50").stops == [False]
+
+        factory.start_error = None
+        await m.enable("192.168.1.50")
+        assert m.proxy("192.168.1.50").started
+        await m.stop()
+
+    _run(main())
+
+
+def test_start_failure_at_boot_leaves_other_hubs_running(tmp_path: Path) -> None:
+    factory = Factory()
+
+    def picky(config: HubConfig):
+        proxy = factory(config)
+        proxy.start_error = OSError("port in use") if config.host == "10.0.0.1" else None
+        return proxy
+
+    async def main():
+        m = _manager(tmp_path, factory)
+        await m.start()
+        await m.add(HubConfig(host="10.0.0.1"))
+        await m.add(HubConfig(host="10.0.0.2"))
+        await m.stop()
+
+        m2 = HubManager(Settings(data_dir=tmp_path), proxy_factory=picky)
+        await m2.start()                                       # boot survives the failure
+        assert not factory.latest("10.0.0.1").started
+        assert factory.latest("10.0.0.2").started
+        assert m2.record("10.0.0.1").enabled is True
+        with pytest.raises(HubDisabled):
+            m2.proxy("10.0.0.1")
+        await m2.stop()
+
+    _run(main())

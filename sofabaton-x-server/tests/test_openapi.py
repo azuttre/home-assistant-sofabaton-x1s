@@ -52,3 +52,19 @@ def _is_named(schema: dict) -> bool:
     if "anyOf" in schema:
         return all(_is_named(s) or s == {"type": "null"} for s in schema["anyOf"])
     return False
+
+
+def test_every_422_is_a_problem() -> None:
+    spec = json.loads((Path(openapi.__file__).parents[2] / "openapi.json").read_text(encoding="utf-8"))
+    schemas = spec["components"]["schemas"]
+    assert "HTTPValidationError" not in schemas and "ValidationError" not in schemas
+    seen = 0
+    for operations in spec["paths"].values():
+        for operation in operations.values():
+            response = operation.get("responses", {}).get("422")
+            if response is None:
+                continue
+            seen += 1
+            assert response["description"] == "Validation error"
+            assert response["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/Problem"}
+    assert seen >= 1

@@ -49,6 +49,19 @@ class HubDisabled(RuntimeError):
     """The hub is configured but disabled; no proxy is running for it."""
 
 
+class HubStartFailed(RuntimeError):
+    """The proxy for a hub could not start (a port in use, for instance).
+
+    The record is kept exactly as it was (enabled stays as the caller set
+    it) and nothing is registered, so a later ``enable()`` retries.
+    """
+
+    def __init__(self, hub_id: str, cause: BaseException) -> None:
+        super().__init__(f"hub {hub_id} could not start: {cause}")
+        self.hub_id = hub_id
+        self.cause = cause
+
+
 class HubManager:
     def __init__(
         self,
@@ -65,7 +78,14 @@ class HubManager:
         self._watchers: dict[str, asyncio.Task] = {}
         self._hub_listeners: list[HubEventListener] = []
         self._server_listeners: list[ServerEventListener] = []
+        self._rekey_listeners: list[Callable[[str, str], Any]] = []
         self._lock = asyncio.Lock()
+        # Every lifecycle transition (add, remove, enable, disable, the
+        # re-key from host to MAC) runs under this lock from start to
+        # finish. A disable that yields while cancelling its watcher and
+        # an enable arriving in that gap would otherwise leave the record
+        # enabled with no proxy running.
+        self._transition = asyncio.Lock()
         self._started = False
         # Shared Zeroconf instance (set by the discovery service before hubs
         # start); each proxy adopts it instead of creating its own.
@@ -92,7 +112,12 @@ class HubManager:
         self._started = True
         for record in list(self._records.values()):
             if record.enabled:
-                await self._start_hub(record)
+                try:
+                    await self._start_hub(record)
+                except HubStartFailed:
+                    # Logged by _start_hub. The server still comes up: the
+                    # record stays enabled and a later enable() retries.
+                    continue
 
     async def stop(self) -> None:
         """Shutdown: stop every running proxy (no release; the hubs come back)."""
@@ -108,6 +133,11 @@ class HubManager:
 
     def on_server_event(self, listener: ServerEventListener) -> None:
         self._server_listeners.append(listener)
+
+    def on_rekey(self, listener: Callable[[str, str], Any]) -> None:
+        """``listener(old_hub_id, new_hub_id)``, before ``hub_rekeyed`` is emitted."""
+
+        self._rekey_listeners.append(listener)
 
     # -- queries -------------------------------------------------------------
 
@@ -153,6 +183,10 @@ class HubManager:
     # -- mutations -----------------------------------------------------------
 
     async def add(self, config: HubConfig, *, enabled: bool = True) -> HubRecord:
+        async with self._transition:
+            return await self._add_locked(config, enabled=enabled)
+
+    async def _add_locked(self, config: HubConfig, *, enabled: bool) -> HubRecord:
         async with self._lock:
             if config.is_proxy:
                 owner = self._find_by_identity(config)
@@ -176,31 +210,34 @@ class HubManager:
         return record
 
     async def remove(self, hub_id: str) -> None:
-        record = self.record(hub_id)
-        if hub_id in self._proxies:
-            await self._stop_hub(hub_id, release=True)
-        async with self._lock:
-            self._records.pop(record.hub_id, None)
-            self._persist()
+        async with self._transition:
+            record = self.record(hub_id)
+            if hub_id in self._proxies:
+                await self._stop_hub(hub_id, release=True)
+            async with self._lock:
+                self._records.pop(record.hub_id, None)
+                self._persist()
         self._emit_server("hub_removed", hub_id)
 
     async def enable(self, hub_id: str) -> HubRecord:
-        record = self.record(hub_id)
-        if not record.enabled:
-            record.enabled = True
-            self._persist()
-            self._emit_server("hub_enabled", hub_id)
-        if hub_id not in self._proxies and self._started:
-            await self._start_hub(record)
-        return record
+        async with self._transition:
+            record = self.record(hub_id)
+            if not record.enabled:
+                record.enabled = True
+                self._persist()
+                self._emit_server("hub_enabled", hub_id)
+            if hub_id not in self._proxies and self._started:
+                await self._start_hub(record)
+            return record
 
     async def disable(self, hub_id: str) -> HubRecord:
-        record = self.record(hub_id)
-        if record.enabled:
-            record.enabled = False
-            self._persist()
-        if hub_id in self._proxies:
-            await self._stop_hub(hub_id, release=True)
+        async with self._transition:
+            record = self.record(hub_id)
+            if record.enabled:
+                record.enabled = False
+                self._persist()
+            if hub_id in self._proxies:
+                await self._stop_hub(hub_id, release=True)
         self._emit_server("hub_disabled", hub_id)
         return record
 
@@ -226,12 +263,29 @@ class HubManager:
         proxy = self._factory(record.config)
         if self.zeroconf is not None:
             proxy.set_zeroconf(self.zeroconf)
+        try:
+            await proxy.start()
+        except asyncio.CancelledError:
+            await self._discard_failed(proxy)
+            raise
+        except Exception as err:  # noqa: BLE001
+            await self._discard_failed(proxy)
+            log.warning("hub %s could not start (%s): %s", record.hub_id, record.config.host, err)
+            raise HubStartFailed(record.hub_id, err) from err
+        # Registered only once the engine is actually running, so a failed
+        # start leaves nothing behind for enable() to mistake for a proxy.
         self._proxies[record.hub_id] = proxy
-        await proxy.start()
         self._watchers[record.hub_id] = asyncio.create_task(
             self._watch(record.hub_id, proxy), name=f"hub-watch:{record.hub_id}"
         )
         log.info("hub %s started (%s)", record.hub_id, record.config.host)
+
+    @staticmethod
+    async def _discard_failed(proxy: AsyncXProxy) -> None:
+        try:
+            await proxy.stop()
+        except Exception:  # noqa: BLE001
+            log.debug("cleanup of a proxy that failed to start raised", exc_info=True)
 
     async def _stop_hub(self, hub_id: str, *, release: bool) -> None:
         watcher = self._watchers.pop(hub_id, None)
@@ -252,7 +306,8 @@ class HubManager:
         current_id = hub_id
         async for event in proxy.events():
             if event.kind == "catalog_ready" and getattr(event.payload, "ready", False):
-                current_id = await self._note_ready(current_id, proxy)
+                async with self._transition:
+                    current_id = await self._note_ready(current_id, proxy)
             self._emit_hub(current_id, event)
 
     async def _note_ready(self, hub_id: str, proxy: AsyncXProxy) -> str:
@@ -274,6 +329,11 @@ class HubManager:
                 self._proxies[new_id] = self._proxies.pop(hub_id)
                 if hub_id in self._watchers:
                     self._watchers[new_id] = self._watchers.pop(hub_id)
+                for listener in list(self._rekey_listeners):
+                    try:
+                        listener(hub_id, new_id)
+                    except Exception:  # noqa: BLE001
+                        log.exception("rekey listener failed")
                 self._emit_server("hub_rekeyed", new_id)
                 hub_id = new_id
         self._persist()

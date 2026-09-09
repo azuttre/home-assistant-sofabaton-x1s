@@ -139,10 +139,10 @@ async def main() -> dict:
                 problem(f"current_activity after start: {cur}")
 
             # Power state is live in the device row but the facade serves the
-            # cached catalog; force a refresh through the public delegate.
+            # cached catalog; ask for a refresh (fetch-then-prune, the
+            # cached list stays readable until the reply lands).
             t = _t0()
-            await proxy.clear_devices_catalog()
-            devs2 = await proxy.devices()
+            devs2 = await proxy.devices(refresh=True)
             step("devices_after_start", secs=round(_t0() - t, 2),
                  power=[(d.device_id, d.name, d.power_state) for d in devs2])
 
@@ -157,8 +157,7 @@ async def main() -> dict:
                 problem(f"current_activity after stop: {cur}")
 
             t = _t0()
-            await proxy.clear_devices_catalog()
-            devs3 = await proxy.devices()
+            devs3 = await proxy.devices(refresh=True)
             step("devices_after_stop", secs=round(_t0() - t, 2),
                  power=[(d.device_id, d.name, d.power_state) for d in devs3])
 

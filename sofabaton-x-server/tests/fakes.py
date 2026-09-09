@@ -45,6 +45,8 @@ class FakeProxy:
         self.running: Optional[RunningActivity] = None
         self.sent: list[tuple[str, tuple]] = []
         self.catalog_clears = 0
+        self.refreshes = 0
+        self.start_error: Optional[BaseException] = None
         self.activities_data = [
             Activity(activity_id=101, name="Watch TV", active=False, needs_confirm=False),
             Activity(activity_id=102, name="Music", active=False, needs_confirm=False),
@@ -60,6 +62,8 @@ class FakeProxy:
         self.zeroconf = zc
 
     async def start(self) -> None:
+        if self.start_error is not None:
+            raise self.start_error
         self.started = True
 
     async def stop(self, *, release_hub: bool = False) -> None:
@@ -98,8 +102,10 @@ class FakeProxy:
         self._maybe_fail()
         return list(self.activities_data)
 
-    async def devices(self) -> list[Device]:
+    async def devices(self, *, refresh: bool = False) -> list[Device]:
         self._maybe_fail()
+        if refresh:
+            self.refreshes += 1
         return list(self.devices_data)
 
     async def clear_devices_catalog(self) -> None:
@@ -167,9 +173,11 @@ class Factory:
 
     def __init__(self) -> None:
         self.built: dict[str, list[FakeProxy]] = {}
+        self.start_error: Optional[BaseException] = None   # injected into new proxies
 
     def __call__(self, config: HubConfig) -> FakeProxy:
         proxy = FakeProxy(config)
+        proxy.start_error = self.start_error
         self.built.setdefault(config.host, []).append(proxy)
         return proxy
 

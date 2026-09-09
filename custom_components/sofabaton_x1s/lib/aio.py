@@ -55,6 +55,9 @@ __all__ = [
 
 # Default deadline for an awaited read that has to fetch from the hub.
 DEFAULT_FETCH_TIMEOUT = 10.0
+# Pause before the connect-time initial sync is retried after a failure
+# with the hub still connected (a burst that never landed, for instance).
+INITIAL_SYNC_RETRY_S = 5.0
 
 
 def _marshal_callback(loop: asyncio.AbstractEventLoop, callback: Callable) -> Callable:
@@ -570,28 +573,38 @@ class AsyncXProxy:
     # -- read surface --------------------------------------------------------
 
     async def activities(
-        self, *, timeout: float = DEFAULT_FETCH_TIMEOUT
+        self, *, refresh: bool = False, timeout: float = DEFAULT_FETCH_TIMEOUT
     ) -> list[Activity]:
-        """Return every activity in the hub's catalog, sorted by id."""
+        """Return every activity in the hub's catalog, sorted by id.
+
+        ``refresh=True`` re-reads the list from the hub. The engine is
+        fetch-then-prune: the cached catalog stays in place until a
+        complete reply replaces it, so a refused or failed refresh raises
+        the typed error and leaves the last catalog readable.
+        """
 
         # The catalog getters gate fetching on ``force_refresh``, not
         # ``fetch_if_missing`` (which the per-entity getters use).
-        rows = await self._read(
-            self._proxy.get_activities, "activities", timeout=timeout, fetch_kw="force_refresh"
+        rows = await self._catalog_rows(
+            self._proxy.get_activities, "activities", refresh=refresh, timeout=timeout
         )
         return [_activity_from_row(act_id, row) for act_id, row in sorted(dict(rows).items())]
 
     async def devices(
-        self, *, timeout: float = DEFAULT_FETCH_TIMEOUT
+        self, *, refresh: bool = False, timeout: float = DEFAULT_FETCH_TIMEOUT
     ) -> list[Device]:
         """Return every device in the hub's catalog, sorted by id.
 
         ``Device.power_state`` is projected from the row's stored record
-        as of the last devices fetch (see :class:`Device`).
+        as of the last devices fetch (see :class:`Device`); pass
+        ``refresh=True`` to re-read the list, and with it the power
+        bytes, from the hub. Fetch-then-prune as for :meth:`activities`:
+        a refresh that cannot be issued raises before anything is
+        touched, and one that never lands leaves the cached catalog.
         """
 
-        await self._read(
-            self._proxy.get_devices, "devices", timeout=timeout, fetch_kw="force_refresh"
+        await self._catalog_rows(
+            self._proxy.get_devices, "devices", refresh=refresh, timeout=timeout
         )
         # The getter returns the JSON export view, which strips the stored
         # record body on purpose; the power-state byte lives in that body,
@@ -880,9 +893,25 @@ class AsyncXProxy:
             return
         if self._initial_sync_task is not None and not self._initial_sync_task.done():
             return
-        self._initial_sync_task = self._loop.create_task(
-            self._run_initial_sync(self._session_gen)
-        )
+        task = self._loop.create_task(self._run_initial_sync(self._session_gen))
+        task.add_done_callback(self._on_initial_sync_done)
+        self._initial_sync_task = task
+
+    def _on_initial_sync_done(self, task: "asyncio.Task[None]") -> None:
+        """A sync task ended: decide again.
+
+        Cancelled (a disconnect landed mid-sync): re-evaluate right away,
+        so a reconnect that was processed while the old task was still
+        winding down gets its sync after all. Ended without readiness (a
+        fetch timed out while the hub stayed connected): try again after
+        a pause rather than hammering the hub. Succeeded: ``catalog_ready``
+        is set and the re-evaluation is a no-op.
+        """
+
+        if task.cancelled():
+            self._loop.call_soon(self._maybe_start_initial_sync)
+        elif not self._catalog_ready:
+            self._loop.call_later(INITIAL_SYNC_RETRY_S, self._maybe_start_initial_sync)
 
     async def _run_initial_sync(self, session_gen: int) -> None:
         """Banner, devices, activities: the minimum every session caches.
@@ -1159,6 +1188,13 @@ class AsyncXProxy:
         return _marshal_callback(self._loop, callback)
 
     # -- lazy-read plumbing --------------------------------------------------
+
+    async def _catalog_rows(
+        self, getter: Callable, key: str, *, refresh: bool, timeout: float
+    ) -> Any:
+        if not refresh:
+            return await self._read(getter, key, timeout=timeout, fetch_kw="force_refresh")
+        return await self._await_fetch(getter, key, timeout=timeout, fetch_kw="force_refresh")
 
     async def _read(
         self,

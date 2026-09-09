@@ -114,6 +114,7 @@ class EventRelay:
         self._subs: set[Subscription] = set()
         manager.on_hub_event(self._on_hub_event)
         manager.on_server_event(self._on_server_event)
+        manager.on_rekey(self._on_rekey)
 
     @property
     def subscribers(self) -> int:
@@ -132,6 +133,14 @@ class EventRelay:
 
     def _on_server_event(self, hub_id: str, kind: str) -> None:
         self._broadcast(hub_id, WsServerEvent(hub_id=hub_id, kind=kind))
+
+    def _on_rekey(self, old_id: str, new_id: str) -> None:
+        # A filter on the temporary host id follows the hub to its MAC,
+        # so such a client sees the hub_rekeyed that comes next and
+        # everything after it.
+        for sub in list(self._subs):
+            if sub.hub_ids is not None and old_id in sub.hub_ids:
+                sub.hub_ids = (sub.hub_ids - {old_id}) | {new_id}
 
     def _broadcast(self, hub_id: str, message: Any) -> None:
         for sub in list(self._subs):

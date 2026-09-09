@@ -121,3 +121,27 @@ def test_ws_message_types_are_openapi_components(tmp_path: Path) -> None:
                  "ActivityChanged", "ConnectionState", "StatusChanged", "CatalogReady"):
         assert name in schemas, name
     assert "/api/v1/events" in spec["info"]["description"]
+
+
+def test_host_id_filter_follows_the_hub_to_its_mac(tmp_path: Path) -> None:
+    # Review finding: a client that subscribed with ?hub_id=<host> right
+    # after registering by host went silent once the ready sync re-keyed
+    # the hub to its MAC. The filter migrates, so it sees hub_rekeyed and
+    # everything after.
+    client, factory = _rig(tmp_path)
+    with client:
+        client.post(HUBS, json={"host": "10.0.0.1"})
+        client.post(HUBS, json={"host": "10.0.0.2"})
+        proxy = factory.latest("10.0.0.1")
+        with client.websocket_connect(f"{EVENTS}?hub_id=10.0.0.1") as ws:
+            ws.receive_json()                                    # hello
+            client.portal.call(proxy.ready, "E2:6A:44:86:1B:45")
+            got = [ws.receive_json() for _ in range(2)]
+            assert {m["type"] for m in got} == {"hub_event", "server_event"}
+            assert all(m["hub_id"] == "e26a44861b45" for m in got)
+            assert any(m.get("kind") == "hub_rekeyed" for m in got)
+
+            client.portal.call(factory.latest("10.0.0.2").emit, "ota")   # still filtered out
+            client.portal.call(proxy.emit, "ota")
+            msg = ws.receive_json()
+            assert msg["hub_id"] == "e26a44861b45" and msg["event"]["kind"] == "ota"

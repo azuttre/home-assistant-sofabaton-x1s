@@ -45,9 +45,9 @@ def test_status_info_and_catalog_reads(rig) -> None:
 
     devs = client.get(f"{h}/devices").json()
     assert [(d["device_id"], d["power_state"]) for d in devs] == [(1, 0), (2, 1)]
-    assert proxy.catalog_clears == 0
+    assert proxy.refreshes == 0
     client.get(f"{h}/devices?refresh=true")
-    assert proxy.catalog_clears == 1                         # refresh clears then re-reads
+    assert proxy.refreshes == 1 and proxy.catalog_clears == 0   # a forced re-read, never a clear
 
     assert client.get(f"{h}/devices/1/commands").json() == [
         {"command_id": 1, "label": "Power"}, {"command_id": 2, "label": "Mute"}]
@@ -120,3 +120,18 @@ def test_disabled_hub_reads_are_409(rig) -> None:
     assert r.status_code == 409 and r.json()["type"] == "hub_disabled"
     r = client.get(f"{h}/status")
     assert r.status_code == 200 and r.json()["enabled"] is False and r.json()["status"] is None
+
+
+def test_refused_refresh_keeps_the_cached_devices(rig) -> None:
+    # Review finding: ?refresh used to clear the catalog before asking the
+    # hub, so a refresh refused while an app held the hub left the server
+    # with no devices at all. The library's fetch-then-prune refresh raises
+    # and leaves the last catalog readable.
+    client, proxy = rig
+    h = f"{HUBS}/192.168.1.50"
+    proxy.fail_with = HubBusyError("app client holds the hub")
+    r = client.get(f"{h}/devices?refresh=true")
+    assert r.status_code == 409 and r.json()["type"] == "hub_busy"
+    assert proxy.catalog_clears == 0
+    proxy.fail_with = None
+    assert [d["device_id"] for d in client.get(f"{h}/devices").json()] == [1, 2]

@@ -93,8 +93,13 @@ Errors are `Problem` bodies (`type`, `title`, `status`, `detail`,
 | 409 | `hub_disabled` | enable the hub |
 | 409 | `hub_busy`, `send_refused` | the app holds the hub; retry later or tell the user |
 | 503 | `hub_not_connected` | the hub is offline or reconnecting; retry with backoff |
+| 503 | `hub_start_failed` | the hub's proxy could not start (a port in use); the record is kept, retry `/enable` after fixing the host |
 | 504 | `hub_timeout` | the hub did not answer; retry once, then surface it |
-| 422 | validation | fix the request |
+| 422 | `validation_error`, `invalid_hub_config` | fix the request (`detail` names the field) |
+
+A filter passed as `?hub_id=<host>` on the event stream follows the hub
+when it is re-keyed to its MAC, so a client that subscribed right after
+registering by host sees `hub_rekeyed` and everything after it.
 
 ## 5. Events
 

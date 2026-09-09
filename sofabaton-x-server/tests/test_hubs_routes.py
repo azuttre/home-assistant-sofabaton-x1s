@@ -66,6 +66,13 @@ def test_hub_errors_are_problem_bodies(tmp_path: Path) -> None:
 
         r = client.post(HUBS, json={"host": ""})
         assert r.status_code == 422                       # pydantic: host required
+        # Framework validation failures wear the same Problem shape as
+        # every other error (review finding: they used to be FastAPI's
+        # {"detail": [...]} list, which generated clients cannot decode).
+        body = r.json()
+        assert body["type"] == "validation_error" and body["status"] == 422
+        assert body["title"] == "Invalid request" and "host" in body["detail"]
+        assert set(body) == {"type", "title", "status", "detail", "hub_id", "mode"}
         r = client.post(HUBS, json={"host": "10.0.0.1", "port": 70000})
         assert r.status_code == 422 and r.json()["type"] == "invalid_hub_config"
 
@@ -85,3 +92,26 @@ def test_openapi_lists_hub_operations_with_named_components(tmp_path: Path) -> N
     assert {"listHubs", "addHub", "getHub", "removeHub", "enableHub", "disableHub"} <= ops
     schemas = spec["components"]["schemas"]
     assert {"HubView", "HubConfig", "HubStatus", "HubCreate", "Problem"} <= set(schemas)
+
+
+def test_failed_proxy_start_is_503_and_enable_retries(tmp_path: Path) -> None:
+    factory = Factory()
+    factory.start_error = OSError(98, "address already in use")
+    with _client(tmp_path, factory) as client:
+        r = client.post(HUBS, json={"host": "192.168.1.70"})
+        assert r.status_code == 503 and r.json()["type"] == "hub_start_failed"
+        assert r.json()["hub_id"] == "192.168.1.70" and "address already in use" in r.json()["detail"]
+        # The record exists (still enabled, as asked) but no proxy runs:
+        # status is absent rather than a phantom "connected".
+        view = client.get(f"{HUBS}/192.168.1.70").json()
+        assert view["enabled"] is True and view["status"] is None
+        assert factory.latest("192.168.1.70").started is False
+        assert factory.latest("192.168.1.70").stops == [False]      # cleaned up, no release
+
+        # Same failure on enable, then the port frees up and enable retries.
+        r = client.post(f"{HUBS}/192.168.1.70/enable")
+        assert r.status_code == 503 and r.json()["type"] == "hub_start_failed"
+        factory.start_error = None
+        r = client.post(f"{HUBS}/192.168.1.70/enable")
+        assert r.status_code == 200 and r.json()["status"]["mode"] == "control"
+        assert len(factory.built["192.168.1.70"]) == 3

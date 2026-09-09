@@ -155,9 +155,9 @@ async def list_devices(request: Request, hub_id: str,
                        refresh: bool = Query(False, description="re-fetch the device list from the hub (fresh power state)")) -> list[Device]:
     proxy = _proxy(request, hub_id)
     async with hub_errors(hub_id):
-        if refresh:
-            await proxy.clear_devices_catalog()
-        return await proxy.devices()
+        # Fetch-then-prune in the library: a refused or failed refresh
+        # raises and leaves the cached catalog in place.
+        return await proxy.devices(refresh=refresh)
 
 
 @router.get("/devices/{device_id}/commands", operation_id="listDeviceCommands", response_model=list[Command],

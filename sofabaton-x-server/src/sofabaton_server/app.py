@@ -153,14 +153,23 @@ def _publish_ws_components(app: FastAPI) -> None:
                 components.setdefault(name, definition)
             components[message_type.__name__] = schema
         # The document is committed and compared byte for byte, so nothing
-        # in it may depend on the framework version. FastAPI's default 422
-        # description changed wording between releases ("Unprocessable
-        # Entity" / "Unprocessable Content"); the contract states its own.
+        # in it may depend on the framework version: FastAPI's default 422
+        # description changed wording between releases, and its
+        # HTTPValidationError body is not what this app sends. Every 422
+        # the app can produce is a Problem (the validation handler in
+        # problems.py makes that true for bad input too), so the contract
+        # states its own description and schema.
+        problem_ref = {"$ref": "#/components/schemas/Problem"}
         for operations in spec.get("paths", {}).values():
             for operation in operations.values():
                 responses = operation.get("responses", {}) if isinstance(operation, dict) else {}
                 if "422" in responses:
-                    responses["422"]["description"] = "Validation error"
+                    responses["422"] = {
+                        "description": "Validation error",
+                        "content": {"application/json": {"schema": problem_ref}},
+                    }
+        for orphan in ("HTTPValidationError", "ValidationError"):
+            components.pop(orphan, None)
         blank = chr(10) + chr(10)
         spec["info"]["description"] = (
             spec["info"].get("description", "")
