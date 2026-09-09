@@ -1,0 +1,2 @@
+# Shell scripts run on Linux hosts (the NAS bench runner); never check them out with CRLF.
+*.sh text eol=lf

@@ -2028,3 +2028,24 @@ Findings:
 - **`hub_lost` at connect time** is expected: a hub stops advertising
   itself the moment it is in session, so the table marks it absent
   right after registration.
+
+### Linux run: the release check passes (DiskStation, 2026-09-09)
+
+Same program on Marcel's Synology DiskStation (Linux 4.4 x86_64,
+python3.13; Home Assistant runs there in a host-mode container, so the
+bench hubs were registered on TCP 8201 / UDP 8103 while the enabled X2
+entry held 8200 / 8102). `scripts/hub-bench/run_bench_200_linux.sh`
+built both wheels on the host; its closed-port probe answered "refused"
+in under a millisecond. Result: **problems: none**, every step green,
+29 WebSocket messages, 0 dropped.
+
+| release step | what the log shows |
+| --- | --- |
+| X1S disabled while the X1 stays | unregistered 14:55:33.634, one 4.0 s bounce, hub advertising itself again at :34.802 (1.2 s later), zero unrecognised dial-backs; X1 in control mode with no link event |
+| X1 removed while the X1S stays | unregistered :41.728, one 4.0 s bounce, advertising again at :43.025 (1.3 s) |
+
+So on a host where a closed port refuses, the hub gives up on its very
+first refused retry and the feedback loop never has to fire; the 4 s
+window alone covers the 3.0 s dial-back timer. The Windows result was
+the host, not the library. The server's release semantics count as
+validated.

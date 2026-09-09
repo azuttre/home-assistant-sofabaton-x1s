@@ -14,6 +14,11 @@
 #   bash scripts/hub-bench/run_bench_200_linux.sh [tag]
 #   PYTHON=python3.13 bash scripts/hub-bench/run_bench_200_linux.sh diskstation
 #
+# If Home Assistant runs on the same host, its shared listener holds TCP
+# 8200 and UDP 8102 for every enabled hub (the X2, say); register the
+# bench hubs on other ports:
+#   BENCH_HUB_LISTEN_PORT=8201 BENCH_APP_PORT=8103 PYTHON=python3.13 bash scripts/hub-bench/run_bench_200_linux.sh diskstation
+#
 # Without scripts/.ha-token and scripts/.ha-config.json, disable the X1
 # and X1S entries in Home Assistant yourself before running, and enable
 # them afterwards.
@@ -48,6 +53,25 @@ rm -rf "$ROOT/dist-bench"
 "$PY" -m pip install -q zeroconf fastapi uvicorn httpx websockets >/dev/null
 "$PY" -m pip install -q --force-reinstall --no-deps "$ROOT"/dist-bench/*.whl >/dev/null
 "$PY" -c "import sofabaton, sofabaton_server, sofabaton.hub_listener as h; print('== installed sofabaton', sofabaton.__version__, 'server', sofabaton_server.__version__, 'release window', h.DEFAULT_RELEASE_DOWNTIME_S)"
+
+echo "== ports in use on this host (TCP 8200 / UDP 8102 taken means: set BENCH_HUB_LISTEN_PORT / BENCH_APP_PORT)"
+if command -v ss >/dev/null 2>&1 || command -v netstat >/dev/null 2>&1; then
+  (ss -lntup 2>/dev/null || netstat -lntup 2>/dev/null) | grep -E ":(8200|8102|${BENCH_HUB_LISTEN_PORT:-8200}|${BENCH_APP_PORT:-8102})[[:space:]]" || echo "   none of them bound"
+else
+  # DSM ships neither tool; bind probes tell the truth instead.
+  "$PY" - "${BENCH_HUB_LISTEN_PORT:-8200}" "${BENCH_APP_PORT:-8102}" <<'PYEOF'
+import socket, sys
+for port, kind in ((int(sys.argv[1]), socket.SOCK_STREAM), (int(sys.argv[2]), socket.SOCK_DGRAM)):
+    label = f"{port}/{'tcp' if kind == socket.SOCK_STREAM else 'udp'}"
+    s = socket.socket(socket.AF_INET, kind)
+    try:
+        s.bind(("0.0.0.0", port)); print(f"   {label}: free")
+    except OSError as e:
+        print(f"   {label}: IN USE ({e.strerror}); set BENCH_HUB_LISTEN_PORT / BENCH_APP_PORT")
+    finally:
+        s.close()
+PYEOF
+fi
 
 echo "== closed-port check (must say refused on this host)"
 if [ -f "$ROOT/scripts/hub-bench/closed_port_check.py" ]; then

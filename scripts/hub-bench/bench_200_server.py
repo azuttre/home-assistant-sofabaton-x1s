@@ -36,6 +36,16 @@ PORT = 8481
 BASE = f"http://127.0.0.1:{PORT}/api/v1"
 HUBS = {"X1S": "192.168.2.151", "X1": "192.168.2.108"}
 SETTLE_S = 8.0
+# On a host that also runs Home Assistant (its shared listener holds TCP
+# 8200 and UDP 8102 for any enabled hub), register the hubs on other
+# ports: BENCH_HUB_LISTEN_PORT=8201 BENCH_APP_PORT=8103. The CALL_ME tells
+# the hub where to dial back, so any free port works.
+HUB_LISTEN_PORT = int(os.environ.get("BENCH_HUB_LISTEN_PORT", "8200"))
+APP_PORT = int(os.environ.get("BENCH_APP_PORT", "8102"))
+
+
+def _ports(payload: dict) -> dict:
+    return {**payload, "hub_listen_port": HUB_LISTEN_PORT, "app_discovery_port": APP_PORT}
 
 REPORT: dict = {"steps": [], "problems": [], "ws": []}
 T0 = time.monotonic()
@@ -120,12 +130,21 @@ def main() -> None:
         by_host = {s["config"]["host"]: s for s in seen}
 
         # -- 2. register: X1S from the table, X1 by host only -------------------
-        r = http.post("/hubs", json=by_host[HUBS["X1S"]]["config"])
-        step("register_x1s_from_table", status=r.status_code, hub_id=r.json().get("hub_id"))
+        step("ports", hub_listen_port=HUB_LISTEN_PORT, app_discovery_port=APP_PORT)
+        r = http.post("/hubs", json=_ports(by_host[HUBS["X1S"]]["config"]))
+        body = _body(r)
+        step("register_x1s_from_table", status=r.status_code, hub_id=body.get("hub_id"), detail=body.get("_text"))
+        if r.status_code != 201:
+            problem(f"registering X1S failed: {r.status_code} {body.get('_text') or body}")
+            return
+        r = http.post("/hubs", json=_ports({"host": HUBS["X1"]}))
+        body = _body(r)
+        step("register_x1_by_host", status=r.status_code, hub_id=body.get("hub_id"), detail=body.get("_text"))
+        if r.status_code != 201:
+            problem(f"registering X1 failed: {r.status_code} {body.get('_text') or body}")
+            return
         r = http.post("/hubs", json={"host": HUBS["X1"]})
-        step("register_x1_by_host", status=r.status_code, hub_id=r.json().get("hub_id"))
-        r = http.post("/hubs", json={"host": HUBS["X1"]})
-        step("duplicate_refused", status=r.status_code, type=r.json().get("type"))
+        step("duplicate_refused", status=r.status_code, type=_body(r).get("type"))
         if r.status_code != 409:
             problem("duplicate registration was not refused")
 
@@ -265,6 +284,16 @@ def _wait_advertised(http: httpx.Client, host: str, desc: str):
         return "unverifiable on win32"
     problem(f"timed out waiting for {desc} (60s)")
     return False
+
+
+def _body(r: httpx.Response) -> dict:
+    """The JSON body, or {'_text': ...} for a non-JSON reply (a 500 page)."""
+
+    try:
+        data = r.json()
+        return data if isinstance(data, dict) else {"_text": str(data)}
+    except ValueError:
+        return {"_text": r.text[:300]}
 
 
 def _try(fn):

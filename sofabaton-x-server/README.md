@@ -7,9 +7,11 @@ integration (Homey, Hubitat, openHAB, ...) talks to; the server owns
 persistence, discovery policy and network exposure, the library owns the
 hub protocol.
 
-Status: **in development** (settings, hub records with enable/disable,
-reads and control, the event stream; discovery, packaging and the live
-program follow the plan in `docs/internal/sofabaton-x-server-plan.md`).
+Status: **0.1.0**, the v1 scope: hub records with enable/disable,
+reads and control, the event stream, discovery and the server's own
+advertisement, packaging. Live-validated against an X1 and an X1S.
+Writes (editing hub configuration, provisioning, IR learning) come with
+the library's next phase.
 
 > Unofficial; not affiliated with or endorsed by Sofabaton.
 
