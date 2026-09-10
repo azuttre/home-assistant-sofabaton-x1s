@@ -1704,9 +1704,14 @@ class ActivitySyncMixin:
                 wifi_power_state = None
 
         ip_device = self.hub_version in (HUB_VERSION_X1S, HUB_VERSION_X2)
+        # A step that names the callback address pins it (the X1 Roku head
+        # IS the callback target, so a rename must not move it to whatever
+        # the routed local IP is today); a step without one keeps the
+        # historical behaviour.
+        pinned_ip = str(payload.get("ip_address") or "").strip()
         body = self._build_wifi_device_payload(
             device_name=new_name,
-            ip_address=self.get_routed_local_ip(),
+            ip_address=pinned_ip or self.get_routed_local_ip(),
             state_byte=0x01,
             device_id=dev_lo,
             ip_device=ip_device,

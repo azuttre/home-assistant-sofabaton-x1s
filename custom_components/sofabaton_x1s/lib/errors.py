@@ -10,6 +10,8 @@
 # unchanged.
 from __future__ import annotations
 
+from typing import Sequence
+
 __all__ = [
     "HubNotConnectedError",
     "HubBusyError",
@@ -18,6 +20,8 @@ __all__ = [
     "SnapshotOutdatedError",
     "StateDocumentError",
     "HubRejectedError",
+    "WifiUpdateDeclined",
+    "WifiUpdateFailed",
     "IrLearnError",
 ]
 
@@ -73,6 +77,42 @@ class HubRejectedError(RuntimeError):
     carries the step that failed. Retrying is safe for idempotent writes
     (rename, reorder, sync); check the snapshot first for the others.
     """
+
+
+class WifiUpdateDeclined(RuntimeError):
+    """:meth:`AsyncXProxy.update_wifi_device` refused before any write.
+
+    ``reason`` is ``"drift"`` (live records match neither the deployed
+    nor the desired labels; ``command_ids`` names them), ``"missing"``
+    (records the deployment wrote are gone; ``command_ids``),
+    ``"device"`` (the device is not on the hub or is not the deployed
+    one) or ``"planner"`` (the in-place planner declined the diff;
+    ``detail`` carries its words). Nothing was written; the consumer
+    resolves it explicitly, typically by removing and deploying again.
+    """
+
+    def __init__(self, reason: str, *, command_ids: Sequence[int] = (), detail: str | None = None) -> None:
+        self.reason = str(reason)
+        self.command_ids = tuple(int(c) for c in command_ids)
+        self.detail = detail
+        text = detail or f"the in-place update was declined ({self.reason})"
+        if self.command_ids:
+            text += f": command ids {list(self.command_ids)}"
+        super().__init__(text)
+
+
+class WifiUpdateFailed(HubRejectedError):
+    """:meth:`AsyncXProxy.update_wifi_device` started writing and a step was
+    refused. ``failed_at`` is the step kind, ``completed_steps`` how many
+    landed before it. The device is partly updated; the next update with
+    the same spec resumes (the drift gate accepts a record that already
+    carries the desired label).
+    """
+
+    def __init__(self, failed_at: str, *, completed_steps: int = 0, message: str | None = None) -> None:
+        self.failed_at = str(failed_at)
+        self.completed_steps = int(completed_steps)
+        super().__init__(message or f"the hub rejected the in-place update at {self.failed_at}")
 
 
 class IrLearnError(RuntimeError):

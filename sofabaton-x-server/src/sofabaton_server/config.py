@@ -38,10 +38,30 @@ class Settings:
     # Hosts to register on first start when hubs.json is empty.
     initial_hubs: tuple[str, ...] = ()
     log_level: str = "info"
+    # Callback devices (callbacks plan, section 5): what gets baked into
+    # the hub records as the address the hub calls back on. Distinct from
+    # advertise_url, which is what clients use. None = the routed local
+    # IP toward each hub (right on host networking, a container address
+    # on bridge networking); the port is the listener's, 8060 by default
+    # (the X1 can call no other).
+    callback_host: Optional[str] = None
+    callback_port: int = 8060
 
     def __post_init__(self) -> None:
         if isinstance(self.port, bool) or not isinstance(self.port, int) or not (0 < self.port < 65536):
             raise ValueError(f"port must be a port number, got {self.port!r}")
+        if (isinstance(self.callback_port, bool) or not isinstance(self.callback_port, int)
+                or not (0 <= self.callback_port < 65536)):
+            raise ValueError(f"callback_port must be a port number, got {self.callback_port!r}")
+        if self.callback_host is not None:
+            host = str(self.callback_host).strip()
+            if host:
+                import ipaddress
+                try:
+                    ipaddress.IPv4Address(host)
+                except (ipaddress.AddressValueError, ValueError) as err:
+                    raise ValueError(f"callback_host must be a dotted-decimal IPv4 address, got {self.callback_host!r}") from err
+            object.__setattr__(self, "callback_host", host or None)
         if not isinstance(self.bind, str) or not self.bind.strip():
             raise ValueError("bind must be a non-empty address")
         if (self.tls_cert is None) != (self.tls_key is None):
@@ -84,7 +104,7 @@ _LIST_FIELDS = {"trusted_proxies", "initial_hubs"}
 def _coerce(name: str, value: Any) -> Any:
     if value is None:
         return None
-    if name == "port":
+    if name in ("port", "callback_port"):
         return int(value)
     if name in _LIST_FIELDS:
         if isinstance(value, str):

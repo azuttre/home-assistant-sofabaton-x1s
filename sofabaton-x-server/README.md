@@ -50,6 +50,14 @@ cd sofabaton-x-server && docker compose up -d
 
 Use Docker on Linux with `network_mode: host` so mDNS, the app's UDP
 broadcast and the hub's TCP dial-back can reach the LAN interface.
+Callback devices (Button events below) need the hubs to reach the
+server's callback listener. On host networking nothing is needed. On a
+bridge network the server's own address is the container's, which the
+hubs cannot reach: set `SOFABATON_CALLBACK_HOST` to the Docker host's
+LAN address and publish the callback port (`-p 8060:8060`). The
+server cannot detect this itself; it shows the address it will use as
+`effective_destination` on the callback device record and on
+`GET /api/v1/server`.
 The supplied compose file configures this. `/data` holds `hubs.json`,
 `server.json` and one `state-<hub_id>.json` per hub (the library's cache
 document; see Snapshot below).
@@ -118,6 +126,8 @@ variables, then flags; each layer overrides the one before.
 | `--root-path` | `SOFABATON_ROOT_PATH` | none | path prefix a reverse proxy mounts the API under |
 | `--trusted-proxy ADDR` (repeatable) | `SOFABATON_TRUSTED_PROXIES=a,b` | none | sources whose `X-Forwarded-*` headers are honoured |
 | `--tls-cert` / `--tls-key` | `SOFABATON_TLS_CERT` / `_KEY` | none | bring your own certificate (a reverse proxy is the usual way) |
+| `--callback-host` | `SOFABATON_CALLBACK_HOST` | routed local IP per hub | IPv4 address the hubs call back on for callback devices (see Button events); set the host's LAN address inside a container on a bridge network |
+| `--callback-port` | `SOFABATON_CALLBACK_PORT` | `8060` | port of the callback listener; the X1 can call no other |
 | `--log-level` | `SOFABATON_LOG_LEVEL` | `info` | |
 
 `--print-settings` prints the effective settings and exits.
@@ -261,6 +271,79 @@ current snapshot before recovery. Automatically retrying an additive restore
 can create duplicates. If a write request times out, check the hub's jobs
 before submitting it again.
 
+## Button events
+
+The hubs never report presses of IR or Bluetooth commands, but a Wifi
+device's commands call an address when pressed. The server turns that
+into button events: it deploys a **callback device** on a hub, a managed
+Wifi device whose commands call the server's own listener, and relays
+every press to your platform.
+
+```
+POST /hubs/{id}/callback-device        {"name": "Server", "slots": [{"label": "Play"}, {"label": "Pause"}]}
+GET  /hubs/{id}/callback-device        the record: device_id, labels, target, stale, effective_destination
+PUT  /hubs/{id}/callback-device        rename slots or change the power / input hooks in place (a job)
+DELETE /hubs/{id}/callback-device      remove it from the hub and forget it (409 while activities reference it; ?force=true)
+POST /hubs/{id}/callback-device/redeploy   deploy a stale one again from its stored spec
+GET  /hubs/{id}/presses?after=<seq>    the catch-up view of the press stream
+GET  /server/callback-listener         the listener's state; POST .../retry tries to bind it now
+```
+
+Every deploy writes all ten slots (unnamed ones are `Button n`), each as
+a short and a long press record: command ids `1..10` and `11..20`. Bind
+them like any command with the generic routes (`PUT
+/activities/{aid}/buttons/{button}`, favorites, activity membership); an
+in-place update never touches those bindings. On the X1S and X2,
+`power_on_slot` / `power_off_slot` fire when an activity powers on or
+off and `input_slots` are offered as activity-start inputs; the X1
+ignores both (its firmware fires one power and one input callback per
+transition regardless) and always calls port 8060.
+
+Presses arrive as `press` messages on `/events` and in `GET
+/hubs/{id}/presses`. Both carry the same `seq`, a counter of this server
+instance; de-duplicate across the two channels by it, and after a
+reconnect or a `dropped` message fetch `?after=<last seq you saw>`.
+`expired: true` means presses newer than that were already evicted from
+the ring (100 per hub); accept the gap. The `hello` message and `GET
+/server` carry an `instance_id`: when it changes the server restarted,
+the ring is empty and the sequence started over. `resolution` says how a
+press matched the record: `deployed`, `stale` (the record is flagged
+stale, see below), `unknown_slot`, `unknown_device`; nothing is dropped.
+
+The listener is a separate plain-HTTP port (8060 by default, the same
+default as the Home Assistant integration and Emulated Roku, so only
+one of them can own it on a host). It runs while any hub has a callback
+device, accepts only the hub's own address (or the forwarded client when
+the peer is a `--trusted-proxy`) and answers every request at once; the
+hub retries anything it dislikes. A port in use is not fatal: the deploy
+still succeeds, `callback_listener_failed` is announced, `GET
+/server/callback-listener` shows the error and the next retry, the
+server keeps retrying with backoff, and `POST
+/server/callback-listener/retry` tries at once.
+
+Failures split two ways. An immediate `409` is something the record
+alone decides: `callback_device_exists`, `callback_device_stale`,
+`callback_device_not_stale`, `callback_device_referenced` (the detail
+names the activities and reference kinds), `callback_port_x1`. Anything
+that needs the hub happens inside the accepted job and fails it with a
+coded error: `callback_update_declined` (a record's label matches
+neither what was deployed nor what you asked, so the device was edited
+elsewhere; or the planner refused the diff; nothing was written) and
+`callback_update_failed` (the hub rejected a step; the next update with
+the same spec resumes).
+
+If the device disappears from the hub (deleted in the Sofabaton app, an
+erase), the record is marked `stale` (`callback_device_stale` server
+event), presses that still arrive are tagged `resolution: "stale"`, and
+`redeploy` creates it again from the stored spec. The server verifies
+identity (brand, name and the callback path inside the first record)
+before it clears the flag on its own. Every create, update and delete
+writes its intent to `hubs.json` before the hub is touched; at boot and
+before every deploy the server reconciles it, and a device it created
+but forgot (a crash before the save, a lost data directory) is adopted
+by that same identity check instead of being created twice
+(`adopted: true` on the record).
+
 ## Discovery
 
 The server browses for hubs for as long as it runs and keeps a table of
@@ -300,6 +383,7 @@ JSON objects discriminated by `type`:
 | `hub_event` | `hub_id` and the library `event` (`seq`, `kind`, `payload`): `activity_changed`, `activity_list_updated`, `hub_state`, `app_state`, `status_changed`, `catalog_ready`, `snapshot_changed`, `ota` |
 | `server_event` | `hub_id` and `kind`: `hub_added`, `hub_removed`, `hub_enabled`, `hub_disabled`, `hub_rekeyed`, `hub_discovered`, `hub_lost` |
 | `job_event` | `hub_id` and the full `job` record on every transition: queued, running, each progress report, done / failed / cancelled |
+| `press` | a button press the hub delivered to the callback listener: `seq` (the server-instance press sequence, shared with `GET /hubs/{id}/presses`), `hub_id`, `device_id`, `command_id`, `slot`, `label`, `press_type` (`short` / `long`), `resolution`, `transport`, `source`, `received_at` (see Button events) |
 | `dropped` | `count` of older messages discarded because this client fell behind; sent before the next message that gets through |
 
 `seq` is the library's per-hub counter and passes through untouched, so

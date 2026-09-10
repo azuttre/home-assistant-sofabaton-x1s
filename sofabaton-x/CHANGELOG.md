@@ -110,6 +110,14 @@ compatibility guarantee.
 - Facade operations for activity/device management, backup, restore and erase.
 - `IrPayload` conversion, playback, capture and command payload reads.
 
+- `NetworkCommand` payloads (`http`, `roku`, `hue`, `sonos`) for the edit
+  helpers, with a device-class check.
+- `deploy_wifi_device` / `update_wifi_device` with `WifiDeviceSpec`,
+  `WifiDeployment`, `WifiUpdateDeclined` and `WifiUpdateFailed`; the
+  in-place planner carries a pinned callback address (`target_host`).
+- `local_address()`: the routed local IPv4 toward the hub (the default
+  callback target; a container on a bridge network must pass its host's).
+
 ## Earlier releases
 
 For 0.1.x and earlier, see the

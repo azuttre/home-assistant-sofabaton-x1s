@@ -18,18 +18,20 @@ from typing import Any, AsyncIterator, Optional
 from fastapi import FastAPI
 
 from . import API_PREFIX, API_VERSION, __version__
+from .callbacks import CallbackService, ListenerState
 from .config import Settings
 from .discovery import DiscoveryService
 from .jobs import JobRunner
 from .manager import HubManager
 from .problems import install as install_problem_handler, problem_body
+from .routes_callbacks import router as callbacks_router, server_router as callback_listener_router
 from .routes_discovery import router as discovery_router
 from .routes_edit import router as edit_router
 from .routes_hub_data import router as hub_data_router
 from .routes_hubs import router as hubs_router
 from .routes_payload import router as payload_router
 from .routes_snapshot import router as snapshot_router
-from .ws import WS_MESSAGE_TYPES, EventRelay, router as events_router
+from .ws import WS_MESSAGE_TYPES, EventRelay, WsPress, router as events_router
 
 # ``sofabaton`` is the library's import name (PyPI: sofabaton-x). Only
 # its version is needed at the skeleton stage; the hub manager (S1) is
@@ -50,11 +52,15 @@ class ServerInfo:
     uptime_seconds: float
     base_url: str | None = None
     features: list[str] = field(default_factory=list)
+    # Minted at boot; the press sequence and ring belong to it.
+    instance_id: str = ""
+    callback_listener: ListenerState | None = None
 
 
 def create_app(settings: Settings | None = None, *, manager: Optional[HubManager] = None,
                discovery: Optional[DiscoveryService] = None,
-               ws_queue_size: Optional[int] = None) -> FastAPI:
+               ws_queue_size: Optional[int] = None,
+               callbacks: Optional[CallbackService] = None) -> FastAPI:
     """Build the application. ``manager`` is injectable for tests; by
     default one is created from the settings and started with the app."""
 
@@ -63,16 +69,21 @@ def create_app(settings: Settings | None = None, *, manager: Optional[HubManager
     hub_manager = manager or HubManager(settings)
     discovery_service = discovery or DiscoveryService(settings, hub_manager)
     job_runner = JobRunner(problem_for=problem_body)
+    callback_service = callbacks or CallbackService(hub_manager, settings)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         # Discovery first: it owns the shared Zeroconf the proxies adopt.
         await discovery_service.start()
         await hub_manager.start()
+        # Then the callback devices: pending intents reconcile against
+        # the running hubs, and the listener comes up when any exist.
+        await callback_service.start()
         try:
             yield
         finally:
             await job_runner.shutdown()
+            await callback_service.stop()
             await hub_manager.stop()
             await discovery_service.stop()
 
@@ -98,9 +109,15 @@ def create_app(settings: Settings | None = None, *, manager: Optional[HubManager
     app.state.hub_manager = hub_manager
     app.state.discovery = discovery_service
     app.state.job_runner = job_runner
-    app.state.event_relay = EventRelay(hub_manager, jobs=job_runner, **({"maxsize": ws_queue_size} if ws_queue_size else {}))
+    relay = EventRelay(hub_manager, jobs=job_runner, **({"maxsize": ws_queue_size} if ws_queue_size else {}))
+    relay.instance_id = callback_service.ring.instance_id
+    callback_service.on_press(lambda press: relay.publish(press.hub_id, WsPress(**press.to_dict())))
+    app.state.event_relay = relay
+    app.state.callbacks = callback_service
     install_problem_handler(app)
     app.include_router(hubs_router)
+    app.include_router(callbacks_router)
+    app.include_router(callback_listener_router)
     app.include_router(hub_data_router)
     app.include_router(snapshot_router)
     app.include_router(edit_router)
@@ -126,7 +143,9 @@ def create_app(settings: Settings | None = None, *, manager: Optional[HubManager
             hubs=_hub_count(app),
             uptime_seconds=round(time.monotonic() - started, 1),
             base_url=settings.advertise_url,
-            features=["discovery"] if discovery_service.enabled else [],
+            features=(["discovery"] if discovery_service.enabled else []) + ["callbacks"],
+            instance_id=callback_service.ring.instance_id,
+            callback_listener=callback_service.listener_state(),
         )
 
     return app
@@ -185,7 +204,7 @@ def _publish_ws_components(app: FastAPI) -> None:
             spec["info"].get("description", "")
             + blank
             + f"WebSocket: `{API_PREFIX}/events` (optional `?hub_id=` filter, repeatable) streams "
-            "WsHello once, then WsHubEvent / WsServerEvent / WsJobEvent / WsDropped messages (see components)."
+            "WsHello once, then WsHubEvent / WsServerEvent / WsJobEvent / WsPress / WsDropped messages (see components)."
         )
         app.openapi_schema = spec
         return spec

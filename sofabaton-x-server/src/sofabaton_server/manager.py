@@ -259,6 +259,11 @@ class HubManager:
                 return record
         return None
 
+    def persist(self) -> None:
+        """Write ``hubs.json`` now (a record's callback device changed)."""
+
+        self._persist()
+
     def _persist(self) -> None:
         self._store.save([r.to_dict() for r in self._records.values()])
 

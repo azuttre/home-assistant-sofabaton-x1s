@@ -481,6 +481,71 @@ and `from_hex(text)` accept the other input formats. `read_payload(device_id,
 command_id)` returns `None` when no payload is stored, so check it before
 calling `play()`. `cancel_learn()` ends an active capture wait.
 
+### Network commands
+
+Wifi devices (`wifi_ip` on X1S and X2, `wifi_roku` everywhere, `wifi_hue`,
+`wifi_sonos`) store a request the hub renders at press time. `NetworkCommand`
+is that request in structured form; the same edit helpers save it, and the
+class must match the device's class or the helper refuses before anything is
+planned:
+
+```python
+from sofabaton import NetworkCommand, edits
+
+device_id = await proxy.add_device("Home automation", "wifi_ip")   # X1S / X2
+hook = NetworkCommand.http(host="192.168.1.20", port=8123, method="POST",
+                           path="/api/webhook/lights", content_type="application/json",
+                           body='{"state": "toggle"}')
+snap = await proxy.refresh(device_id=device_id)
+edited, command_id = edits.add_command(snap.bundle, device_id, hook, "Lights")
+await proxy.sync_device(baseline=snap.bundle, edited=edited, device_id=device_id)
+```
+
+`NetworkCommand.roku("keypress/Home")` is a Roku ECP path; the Roku device head
+carries the target address (set the device block's `ip_address` in the bundle
+and sync the device) and the hub always POSTs to port 8060.
+`NetworkCommand.hue(path, body_block)` and `.sonos(path, body_block)` cover the
+two REST-over-head-address classes. `set_command_payload` takes a
+`NetworkCommand` too.
+
+### Managed wifi devices
+
+A *managed* wifi device is one you create so the remote can call you:
+`WIFI_SLOT_COUNT` slots, each a short and a long press record whose callback
+path is `launch/<hub action id>/<device id>/<slot index>/<short|long>`, all
+pointing at one host and port. Deploy one from a `WifiDeviceSpec`, keep the
+returned `WifiDeployment`, and edit it in place later:
+
+```python
+from sofabaton import WifiDeviceSpec, WifiSlotSpec, WifiUpdateDeclined
+
+spec = WifiDeviceSpec(name="Server", slots=(WifiSlotSpec("Play"), WifiSlotSpec("Pause")),
+                      power_on_slot=1, input_slots=(2,))
+deployment = await proxy.deploy_wifi_device(spec, host="192.168.1.10", port=8060)
+store(deployment.to_dict())           # device id, spec, target, the 20 labels written
+
+# Bind the commands with the generic helpers; the update below never touches those.
+snap = await proxy.refresh(activity_id=101)
+edited = edits.bind_button(snap.bundle, 101, ButtonName.PLAY, device_id=deployment.device_id, command_id=1)
+await proxy.sync_activity(baseline=snap.bundle, edited=edited, activity_id=101)
+
+try:
+    deployment = await proxy.update_wifi_device(
+        deployment, WifiDeviceSpec(name="Server", slots=(WifiSlotSpec("Start"), WifiSlotSpec("Pause"))))
+except WifiUpdateDeclined as declined:      # "drift", "missing", "device" or "planner"
+    ...                                     # nothing was written; remove and deploy again
+```
+
+Every slot is written, defaults included (`Button n` / `Button n Long`). The
+callback target never changes in place: a new address is a remove and a new
+deploy. The X1 always calls port 8060 and ignores the power and input hooks.
+`update_wifi_device` refuses (`WifiUpdateDeclined`) when a record's label
+matches neither what the deployment wrote nor what the new spec asks, so an
+edit made in the Sofabaton app is never silently overwritten; a record that
+already carries the new label is an interrupted update being resumed. A write
+the hub rejects raises `WifiUpdateFailed` (a `HubRejectedError`) and the next
+update with the same spec resumes.
+
 A CLI ships as a console script:
 
 ```

@@ -159,13 +159,17 @@ Messages are JSON with a `type`:
   `hub_lost`.
 - `job_event`: `hub_id` and the full `job` record on queueing, starting,
   progress updates and completion (`done`, `failed` or `cancelled`).
+- `press`: a button press the hub delivered to the server's callback
+  listener (section 10): `seq`, `hub_id`, `device_id`, `command_id`,
+  `slot`, `label`, `press_type` (`short` / `long`), `resolution`,
+  `transport`, `source`, `received_at`.
 - `dropped`: `count` older messages were discarded because your client
   fell behind; re-read hub records, status, relevant snapshots and jobs.
 
 `seq` is per hub per session and restarts after enable. Reconnect with
 backoff on close; the `hello` tells you the current hub list. The
 message types are in `openapi.json` components (`WsHello`, `WsHubEvent`,
-`WsServerEvent`, `WsJobEvent`, `WsDropped`) for your generator. A gap in
+`WsServerEvent`, `WsJobEvent`, `WsPress`, `WsDropped`) for your generator.`WsServerEvent`, `WsJobEvent`, `WsDropped`) for your generator. A gap in
 the hub's sequence also requires reconciliation. There is no event replay:
 re-read relevant state after reconnecting rather than assuming every event
 was delivered. Job events do not carry the library's per-hub `seq`.
@@ -319,3 +323,43 @@ payload replacement can also remove data. Explain the affected scope in
 your client before the user commits the operation. Restore has no rollback:
 inspect `failed_at`, restored counts, `device_id_map` and the
 snapshot before recovery. Never automatically retry an additive restore.
+
+## 10. Button events
+
+Deploy a callback device once per hub and the remote becomes an input
+device for your platform:
+
+1. `POST /api/v1/hubs/{id}/callback-device` with the slot labels your
+   users will see (up to ten; every slot is written, unnamed ones as
+   `Button n`). The job result is the record: `device_id` and `labels`
+   (command ids `1..10` short, `11..20` long).
+2. Let the user bind those commands with the generic edit routes, or do
+   it for them: a hard button in an activity, a favorite, activity
+   membership. Nothing else is needed; the hub calls the server when the
+   user presses.
+3. Handle `press` messages on `/events`: `device_id` and `command_id`
+   identify the slot, `label` is what you named it, `press_type` tells
+   short from long. Ignore `resolution` values other than `deployed` if
+   you only want presses that match what you deployed.
+4. Keep `(instance_id, seq)` of the last press you handled. On
+   reconnect, or after a `dropped` message, `GET
+   /api/v1/hubs/{id}/presses?after=<seq>` returns what you missed, oldest
+   first; `expired: true` means the ring no longer reaches back that far.
+   A different `instance_id` (in `hello` and `GET /api/v1/server`) means
+   the server restarted: the sequence started over and there is no
+   history to fetch.
+5. Rename slots with `PUT /callback-device`; bindings survive, because
+   the device and its command ids stay. A failed job with
+   `callback_update_declined` means the device was edited outside the
+   server (or the planner refused the diff); show the detail and offer
+   remove-and-deploy. `callback_device_stale` on the record (and the
+   `callback_device_stale` server event) means the hub lost the device;
+   offer `POST /callback-device/redeploy`.
+
+Inside a container on a bridge network the hubs cannot reach the
+server's own address; the operator sets `--callback-host` to the Docker
+host's LAN address and publishes the callback port. Show
+`effective_destination` from the record when a deploy produces no
+presses, and the listener state from `GET /api/v1/server` when
+`callback_listener.bound` is false (the port is usually taken by a Home
+Assistant install or Emulated Roku on the same host).

@@ -795,3 +795,295 @@ def test_restore_adapts_the_engine_result_shape(monkeypatch) -> None:
         assert not failed.ok and failed.failed_at == ("device", 5) and failed.wrote_nothing
 
     asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
+# managed wifi devices: deploy and in-place update (callbacks plan, C0b / C0c)
+# ---------------------------------------------------------------------------
+
+wifi_device_mod = importlib.import_module(f"{_pkg.__name__}.wifi_device")
+_WifiDeviceSpec = wifi_device_mod.WifiDeviceSpec
+_WifiSlotSpec = wifi_device_mod.WifiSlotSpec
+_N = wifi_device_mod.WIFI_SLOT_COUNT
+_TARGET = "192.168.1.10"
+
+
+def _wifi_engine(monkeypatch, hub_version: str = "X1S", *, device_id: int = 12):
+    """A controllable engine whose wifi-create wire is stubbed; the
+    facade's own logic (spec normalization, the profile, the rebase, the
+    action id) runs for real."""
+
+    engine = _engine(hub_version)
+    _hub_link(engine, True)
+    creates: list[dict] = []
+
+    def fake_create(**kw):
+        creates.append(kw)
+        return {"device_id": device_id, "status": "success"}
+
+    monkeypatch.setattr(engine, "create_wifi_device", fake_create)
+    monkeypatch.setattr(engine, "_stable_hub_action_id", lambda: "aabbccddeeff")
+    return engine, creates
+
+
+def test_deploy_wifi_device_builds_the_profile_and_returns_the_deployment(monkeypatch) -> None:
+    async def main():
+        engine, creates = _wifi_engine(monkeypatch, "X1S")
+        proxy = aio.AsyncXProxy.wrap(engine)
+        spec = _WifiDeviceSpec(name=" Server ", slots=(_WifiSlotSpec("Play"),), power_on_slot=1, input_slots=(2,))
+
+        dep = await proxy.deploy_wifi_device(spec, host=_TARGET, port=8480)
+
+        assert dep.device_id == 12 and dep.hub_version == "X1S"
+        assert (dep.target.host, dep.target.port, dep.target.action_id) == (_TARGET, 8480, "aabbccddeeff")
+        assert dep.spec == spec.normalized()
+        assert len(dep.labels) == 2 * _N and dep.labels[1] == "Play" and dep.labels[1 + _N] == "Play Long"
+        assert dep.labels[2] == "Button 2"
+        kw = creates[0]
+        assert kw["ip_address"] == _TARGET and kw["request_port"] == 8480 and kw["device_name"] == "Server"
+        assert kw["brand_name"] == "m3tac0de" and kw["send_remote_sync"] is True
+        assert len(kw["commands"]) == 2 * _N
+        assert kw["commands"][0]["display_name"] == "Play" and kw["commands"][0]["press_type"] == "short"
+        assert kw["commands"][_N]["display_name"] == "Play Long" and kw["commands"][_N]["press_type"] == "long"
+        assert kw["commands"][_N]["command_index"] == 0
+        assert kw["power_on_command_id"] == 1 and kw["power_off_command_id"] is None
+        assert kw["input_command_ids"] == [2]
+
+    asyncio.run(main())
+
+
+def test_deploy_wifi_device_x1_rules(monkeypatch) -> None:
+    async def main():
+        engine, creates = _wifi_engine(monkeypatch, "X1")
+        proxy = aio.AsyncXProxy.wrap(engine)
+        spec = _WifiDeviceSpec(name="Server", power_on_slot=1, input_slots=(2,))
+        with pytest.raises(ValueError):
+            await proxy.deploy_wifi_device(spec, host=_TARGET, port=8480)   # X1 calls 8060, always
+        assert creates == []
+        dep = await proxy.deploy_wifi_device(spec, host=_TARGET, port=8060)
+        kw = creates[0]
+        # The hooks are ignored on an X1 (one power / one input callback per transition regardless).
+        assert kw["power_on_command_id"] is None and kw["input_command_ids"] is None
+        assert dep.target.port == 8060 and dep.spec.power_on_slot == 1   # the spec is kept as asked
+
+    asyncio.run(main())
+
+
+def test_deploy_wifi_device_refuses_when_the_hub_cannot_be_written(monkeypatch) -> None:
+    async def main():
+        engine, creates = _wifi_engine(monkeypatch, "X1S")
+        _hub_link(engine, False)
+        proxy = aio.AsyncXProxy.wrap(engine)
+        with pytest.raises(errors.HubNotConnectedError):
+            await proxy.deploy_wifi_device(_WifiDeviceSpec(name="Server"), host=_TARGET, port=8480)
+        assert creates == []
+        _hub_link(engine, True)
+        monkeypatch.setattr(engine, "create_wifi_device", lambda **kw: None)
+        with pytest.raises(errors.HubRejectedError):
+            await proxy.deploy_wifi_device(_WifiDeviceSpec(name="Server"), host=_TARGET, port=8480)
+
+    asyncio.run(main())
+
+
+def _live_device(dep, *, labels=None, name=None, ip=_TARGET) -> dict:
+    """A blob-free device backup as the engine reads the deployed device back."""
+
+    live_labels = dict(dep.labels)
+    live_labels.update(labels or {})
+    block = {"device_id": dep.device_id, "name": name or dep.spec.name, "brand": dep.spec.brand,
+             "device_class": "wifi_ip" if dep.hub_version != "X1" else "wifi_roku"}
+    if ip:
+        block["ip_address"] = ip
+    return {
+        "device": block,
+        "commands": [{"command_id": cid, "command_label": label} for cid, label in sorted(live_labels.items())],
+        "input_record": None, "macros": [], "button_bindings": [],
+    }
+
+
+def _live_activity(act_id: int, members: list[int]) -> dict:
+    return {"device": {"device_id": act_id, "name": f"Act {act_id}"},
+            "referenced_source_device_ids": list(members), "macros": [], "favorite_slots": [],
+            "button_bindings": []}
+
+
+def _update_engine(monkeypatch, dep, *, hub_version="X1S", device=None, run_result=None):
+    """An engine whose reads return the given live device and one activity
+    that lists it as a member (with a second device, so nothing empties);
+    the in-place runner is captured instead of hitting the wire."""
+
+    engine = _engine(hub_version)
+    _hub_link(engine, True)
+    engine.state.activities = {101: {"name": "Watch"}}
+    engine._activities_catalog_ready = True
+    live = device if device is not None else _live_device(dep)
+    monkeypatch.setattr(engine, "backup_device", lambda dev_id, **kw: live if dev_id == dep.device_id else None)
+    monkeypatch.setattr(engine, "backup_activity", lambda act_id, **kw: _live_activity(act_id, [dep.device_id, 5]))
+    runs: list = []
+
+    def fake_run(plan, *, progress_callback=None):
+        runs.append(plan)
+        if run_result is not None:
+            return run_result
+        return {"status": "success", "completed_steps": len(plan.steps), "total_steps": len(plan.steps), "counters": {}}
+
+    monkeypatch.setattr(engine, "run_wifi_inplace_plan", fake_run)
+    return engine, runs
+
+
+def _deployment(hub_version="X1S", **spec_kw):
+    spec = _WifiDeviceSpec(name="Server", slots=(_WifiSlotSpec("Play"), _WifiSlotSpec("Pause")), **spec_kw).normalized()
+    return wifi_device_mod.WifiDeployment(
+        device_id=12, spec=spec, target=wifi_device_mod.WifiTarget(_TARGET, 8060, "aabbccddeeff"),
+        labels=wifi_device_mod.labels_from_spec(spec), hub_version=hub_version)
+
+
+def test_update_wifi_device_with_an_unchanged_spec_writes_nothing(monkeypatch) -> None:
+    async def main():
+        dep = _deployment()
+        engine, runs = _update_engine(monkeypatch, dep)
+        proxy = aio.AsyncXProxy.wrap(engine)
+        again = await proxy.update_wifi_device(dep, _WifiDeviceSpec.from_dict(dep.spec.to_dict()))
+        assert runs == [] and again.labels == dep.labels and again.spec == dep.spec
+
+    asyncio.run(main())
+
+
+def test_update_wifi_device_renames_records_in_place(monkeypatch) -> None:
+    async def main():
+        dep = _deployment()
+        engine, runs = _update_engine(monkeypatch, dep)
+        proxy = aio.AsyncXProxy.wrap(engine)
+        progress = []
+        new_spec = _WifiDeviceSpec(name="Server", slots=(_WifiSlotSpec("Start"), _WifiSlotSpec("Pause")))
+
+        updated = await proxy.update_wifi_device(dep, new_spec, progress=progress.append)
+
+        assert len(runs) == 1
+        kinds = [(s.kind, s.payload.get("command_id"), s.payload.get("name")) for s in runs[0].steps]
+        assert kinds == [("command_rename", 1, "Start"), ("command_rename", 1 + _N, "Start Long")]
+        assert updated.labels[1] == "Start" and updated.labels[1 + _N] == "Start Long"
+        assert updated.labels[2] == "Pause" and updated.target == dep.target
+        # The activity the device is a member of was never planned away.
+        assert not any(s.kind == "membership_remove" for s in runs[0].steps)
+
+    asyncio.run(main())
+
+
+def test_update_wifi_device_rename_on_x1_pins_the_head_address(monkeypatch) -> None:
+    async def main():
+        dep = _deployment(hub_version="X1")
+        engine, runs = _update_engine(monkeypatch, dep, hub_version="X1")
+        proxy = aio.AsyncXProxy.wrap(engine)
+        head_writes = []
+
+        def fake_head(**kw):
+            head_writes.append(kw)
+            return devices_mod.build_device_create_payload(
+                devices_mod.DeviceConfig(name=kw["device_name"], brand=kw["brand_name"]), hub_version="X1")
+
+        monkeypatch.setattr(engine, "_build_wifi_device_payload", fake_head)
+        monkeypatch.setattr(engine, "get_routed_local_ip", lambda: "172.17.0.2")     # a container address
+
+        await proxy.update_wifi_device(dep, _WifiDeviceSpec(name="Renamed", slots=dep.spec.slots))
+
+        head = [s for s in runs[0].steps if s.kind == "wifi_head_commit"]
+        assert len(head) == 1 and head[0].payload["ip_address"] == _TARGET
+        # Drive the real executor for that step: the pinned address wins over the routed one.
+        monkeypatch.setattr(engine, "_send_step", lambda **kw: _ok_step())
+        assert engine._sync_step_wifi_head_commit(head[0].payload) is True
+        assert head_writes[-1]["ip_address"] == _TARGET
+
+    asyncio.run(main())
+
+
+def test_update_wifi_device_declines_drift_and_missing_records(monkeypatch) -> None:
+    async def main():
+        dep = _deployment()
+        # A record the app relabelled matches neither side: drift, nothing written.
+        engine, runs = _update_engine(monkeypatch, dep, device=_live_device(dep, labels={3: "Foreign"}))
+        proxy = aio.AsyncXProxy.wrap(engine)
+        with pytest.raises(errors.WifiUpdateDeclined) as info:
+            await proxy.update_wifi_device(dep, _WifiDeviceSpec(name="Server", slots=(_WifiSlotSpec("Start"),)))
+        assert info.value.reason == "drift" and info.value.command_ids == (3,) and runs == []
+
+        # A record the deployment wrote is gone: missing.
+        gone = _live_device(dep)
+        gone["commands"] = [row for row in gone["commands"] if row["command_id"] != 2 * _N]
+        engine, runs = _update_engine(monkeypatch, dep, device=gone)
+        proxy = aio.AsyncXProxy.wrap(engine)
+        with pytest.raises(errors.WifiUpdateDeclined) as info:
+            await proxy.update_wifi_device(dep, dep.spec)
+        assert info.value.reason == "missing" and info.value.command_ids == (2 * _N,) and runs == []
+
+        # The device is not readable at all.
+        engine, runs = _update_engine(monkeypatch, dep)
+        monkeypatch.setattr(engine, "backup_device", lambda dev_id, **kw: None)
+        proxy = aio.AsyncXProxy.wrap(engine)
+        with pytest.raises(errors.WifiUpdateDeclined) as info:
+            await proxy.update_wifi_device(dep, dep.spec)
+        assert info.value.reason == "device" and runs == []
+
+    asyncio.run(main())
+
+
+def test_update_wifi_device_resumes_an_interrupted_apply(monkeypatch) -> None:
+    async def main():
+        dep = _deployment()
+        # Slot 1's short record already carries the desired label (a previous
+        # update died after it); the long one still carries the deployed label.
+        engine, runs = _update_engine(monkeypatch, dep, device=_live_device(dep, labels={1: "Start"}))
+        proxy = aio.AsyncXProxy.wrap(engine)
+        new_spec = _WifiDeviceSpec(name="Server", slots=(_WifiSlotSpec("Start"), _WifiSlotSpec("Pause")))
+
+        updated = await proxy.update_wifi_device(dep, new_spec)
+
+        kinds = [(s.kind, s.payload.get("command_id")) for s in runs[0].steps]
+        assert kinds == [("command_rename", 1 + _N)]          # only what is still behind
+        assert updated.labels[1] == "Start"
+
+    asyncio.run(main())
+
+
+def test_update_wifi_device_reports_a_rejected_step(monkeypatch) -> None:
+    async def main():
+        dep = _deployment()
+        engine, runs = _update_engine(
+            monkeypatch, dep,
+            run_result={"status": "failed", "failed_at": "command_rename", "completed_steps": 1,
+                        "message": "The hub rejected: Renaming command"})
+        proxy = aio.AsyncXProxy.wrap(engine)
+        with pytest.raises(errors.WifiUpdateFailed) as info:
+            await proxy.update_wifi_device(dep, _WifiDeviceSpec(name="Server", slots=(_WifiSlotSpec("Start"),)))
+        assert info.value.failed_at == "command_rename" and info.value.completed_steps == 1
+        assert isinstance(info.value, errors.HubRejectedError) and len(runs) == 1
+
+    asyncio.run(main())
+
+
+def test_local_address_is_the_routed_ipv4_toward_the_hub() -> None:
+    import ipaddress
+
+    async def main():
+        engine = _engine("X1S")
+        proxy = aio.AsyncXProxy.wrap(engine)
+        address = proxy.local_address()
+        ipaddress.IPv4Address(address)             # a dotted-decimal IPv4, no hub traffic needed
+        assert address == engine.get_routed_local_ip()
+        assert _pending_local_bytes(engine) == 0
+
+    asyncio.run(main())
+
+
+def test_action_id_prefers_the_banner_mac_over_the_proxy_id() -> None:
+    """A hub registered by host has no mDNS TXT record; the banner the hub
+    sends on connect carries its MAC and must win over the proxy id, which
+    two hubs on one host would otherwise share (bench_220, 2026-09-11)."""
+
+    engine = _engine("X1S")
+    assert engine._stable_hub_action_id() == engine.proxy_id           # nothing known yet
+    with engine._banner_info_lock:
+        engine._banner_info = {"mac": "E2:6A:44:86:1B:45", "model": "X1S"}
+    assert engine._stable_hub_action_id() == "e26a44861b45"
+    engine.mdns_txt["MAC"] = "00:11:22:33:44:55"
+    assert engine._stable_hub_action_id() == "e26a44861b45"           # the banner still wins

@@ -54,6 +54,9 @@ class WsHello:
     server_version: str
     api_version: str
     hubs: list[WsHubSummary]
+    # Minted at boot; a client that sees a new one treats press history
+    # (the ``press`` sequence and the REST ring) as gone.
+    instance_id: str = ""
     type: Literal["hello"] = "hello"
 
 
@@ -84,7 +87,33 @@ class WsJobEvent:
     type: Literal["job_event"] = "job_event"
 
 
-WS_MESSAGE_TYPES = (WsHello, WsHubEvent, WsServerEvent, WsJobEvent, WsDropped)
+@dataclass(frozen=True)
+class WsPress:
+    """A button press the hub delivered to the callback listener.
+
+    ``seq`` is the server-instance press sequence shared with
+    ``GET /hubs/{id}/presses`` (de-duplicate across the two channels by
+    it; resume with ``?after=``). ``resolution`` says how the press was
+    matched to the callback device: ``deployed`` (label from the record),
+    ``stale`` (the record is flagged stale), ``unknown_slot`` (outside the
+    record), ``unknown_device`` (no record for that device id).
+    """
+
+    seq: int
+    hub_id: str
+    device_id: int
+    command_id: Optional[int]
+    slot: Optional[int]
+    label: Optional[str]
+    press_type: str
+    resolution: str
+    transport: str
+    source: str
+    received_at: str
+    type: Literal["press"] = "press"
+
+
+WS_MESSAGE_TYPES = (WsHello, WsHubEvent, WsServerEvent, WsJobEvent, WsPress, WsDropped)
 
 
 def _to_json(message: Any) -> dict[str, Any]:
@@ -124,6 +153,7 @@ class EventRelay:
                  maxsize: int = DEFAULT_QUEUE_SIZE) -> None:
         self._manager = manager
         self.maxsize = maxsize
+        self.instance_id = ""
         self._subs: set[Subscription] = set()
         manager.on_hub_event(self._on_hub_event)
         manager.on_server_event(self._on_server_event)
@@ -167,12 +197,18 @@ class EventRelay:
             if sub.wants(hub_id):
                 sub.offer(message)
 
+    def publish(self, hub_id: str, message: Any) -> None:
+        """Send a prepared message (a ``WsPress``) to the hub's subscribers."""
+
+        self._broadcast(hub_id, message)
+
     def hello(self) -> WsHello:
         return WsHello(
             server_version=__version__,
             api_version=API_VERSION,
             hubs=[WsHubSummary(hub_id=r.hub_id, enabled=r.enabled)
                   for r in (self._manager.record(h) for h in self._manager.ids())],
+            instance_id=self.instance_id,
         )
 
 

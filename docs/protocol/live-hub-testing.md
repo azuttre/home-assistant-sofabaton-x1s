@@ -2099,3 +2099,63 @@ and command renames take about 14 s because each carries a remote
 sync. Whole-hub refresh times above are with the per-entity catalog
 read skipped (one catalog read per hub).
 
+
+
+## ◇ Validated: sofabaton-x-server callback device (X1 + X1S, 2026-09-11)
+
+`scripts/hub-bench/bench_220_callbacks.py` drives a real server process
+(docs/internal/sofabaton-x-server-callbacks-plan.md, C6) over HTTP and
+WebSocket with both hubs in one instance, HA entries disabled for the run
+and re-enabled after. Three runs (`out/bench_220_c6a..c6c.json`, server
+logs under `out/logs/bench_220_c6*-server.log`); run c6c is the reference
+with **problems: none**. Presses were produced with `POST /send` on the
+callback commands (`REQ_ACTIVATE`, which the hub answers with exactly
+one HTTP callback each) rather than the physical remote.
+
+| step | X1S (`e26a44861b45`, device 12) | X1 (`cb383539684b`, device 13) |
+| --- | --- | --- |
+| deploy with port 8060 held by another socket | 202, job done in 14 s; record `deployed`, listener `bound: false` with the bind error and `callback_listener_failed` on the stream | deploy in 13 s |
+| `POST /server/callback-listener/retry` after freeing the port | bound on 8060, `callback_listener_started` | |
+| record vs hub | 20 records, labels `Play` / `Play Long` / `Hold pause`, brand `m3tac0de`, target = effective destination `192.168.2.197:8060`, action id = the hub MAC | same; the Roku head carries `ip_address 192.168.2.197` after a catalog refresh |
+| hooks | `power_on_slot 1`, `input_slots [2]` written | ignored with the logged reason |
+| presses for commands 1, 11, 12 | each within 1 s of the send, right slot / label / press type, `resolution deployed`, `source` = the hub, exactly one per activation | same |
+| `GET /presses?after=` | the one newer press, `expired false` | same |
+| bind VOL_UP (with long press) and a favorite through the generic routes, then rename slot 1 in place | both kept; hub labels `Start` / `Start Long`; the next press carries `Start` | same, with the device renamed to `Bench renamed` in the same update |
+| X1 head address after the device rename | | `192.168.2.197` (the pinned target, not the routed IP) |
+| a label edited outside the record (rename command 3, then update) | job failed, 409 `callback_update_declined`, `drift: command ids [3]`, nothing written | same |
+| activity 101 start / stop (the device is a member through the binding) | one press: slot 1 short `Start` from the power-on hook | n/a |
+| `DELETE /callback-device` while referenced | | 409 `callback_device_referenced`: activity 101 (member, favorite, binding, macro) |
+| `DELETE ?force=true` | | job done, device gone from the snapshot, record 404 |
+| purge from outside the server (`DELETE /devices/12`) | `stale: true` within a few seconds, `callback_device_stale` on the stream, listener still bound; `PUT` refused 409 `callback_device_stale` | |
+| `POST /callback-device/redeploy` | new device 12 with the renamed labels, `stale false` | |
+| server restart with `callback_device` wiped from `hubs.json`, then `POST /callback-device` | `adopted: true`, device 12 re-used, device count unchanged (12), the next press `deployed` with label `Start` | |
+| cleanup | forced delete, listener `wanted false`, no device left | |
+| WebSocket | 184 messages, 10 presses, 0 dropped | |
+
+Findings:
+
+- **Library defect, fixed in the run.** The callback path's action id
+  came from `_stable_hub_action_id()`, which read the MAC from the mDNS
+  TXT record and fell back to the proxy id. A hub registered by host has
+  no TXT record, so both hubs got `X1-HUB-PROXY` and the listener could
+  not tell them apart (run c6a). It now prefers the banner MAC the hub
+  sends on connect, then the TXT record, then the proxy id
+  (`tests/lib/test_aio_real_engine.py::test_action_id_prefers_the_banner_mac_over_the_proxy_id`).
+  The Home Assistant path is unchanged (its TXT record carries the same
+  MAC).
+- **Projection, not the hub.** Right after a deploy the snapshot's device
+  block has no `ip_address` on the X1: the create seeds the cache without
+  the raw record. `GET /devices?refresh=true` reads the catalog and the
+  head address appears. The driver refreshes before reading the block.
+- **Driver artifacts** (runs c6a and c6b): the WebSocket collector only
+  receives while the asyncio loop is spun; a plain `time.sleep` during
+  job waits starved it and the first press after a long job was lost to a
+  reconnect. Every such press was in the server log within 1 s of the
+  send. Both waits now spin the loop.
+- Not covered here: the X2, and the container runs on the DiskStation
+  (host networking with defaults, bridge networking with
+  `--callback-host` set), plan C6 steps 9 and 10.
+- Observed during the session, unrelated to the server: disabling the X1S
+  and X1 entries through `ha_entry.py` left the X2 entry `disabled_by:
+  user` as well (re-enabled at once, loaded again). Worth a look at the
+  integration's disable path.

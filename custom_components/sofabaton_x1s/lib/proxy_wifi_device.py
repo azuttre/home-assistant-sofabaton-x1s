@@ -627,6 +627,7 @@ class WifiDeviceMixin:
         power_off_command_id: int | None = None,
         input_command_ids: list[int] | None = None,
         send_remote_sync: bool = True,
+        ip_address: str | None = None,
     ) -> dict[str, Any] | None:
         """Build a network-callback :class:`DeviceCreateRequest` and run it.
 
@@ -637,6 +638,9 @@ class WifiDeviceMixin:
         writing after the create pass this and send one terminal
         trigger themselves (bench 2026-08-27: mid-batch triggers
         abort/restart the remote's multi-minute full sync).
+        ``ip_address`` pins the callback target the records (X1S/X2) or
+        the head (X1) carry; ``None`` uses the routed local IP, which is
+        what a consumer running on the hub's LAN wants.
         """
 
         if not self.can_issue_commands():
@@ -648,7 +652,7 @@ class WifiDeviceMixin:
             network_callback_profile={
                 "device_name": device_name,
                 "brand_name": brand_name,
-                "ip_address": self.get_routed_local_ip(),
+                "ip_address": str(ip_address or "").strip() or self.get_routed_local_ip(),
                 "request_port": request_port,
                 "slots": normalized_commands,
                 "power_on_command_id": power_on_command_id,
@@ -1197,13 +1201,29 @@ class WifiDeviceMixin:
         )
 
     def _stable_hub_action_id(self) -> str:
-        """Return a stable hub identifier for WiFi command actions."""
+        """Return a stable hub identifier for WiFi command actions: the hub's MAC.
 
-        raw_mac = str(self.mdns_txt.get("MAC") or self.mdns_txt.get("mac") or "").strip()
-        if raw_mac:
-            normalized_mac = re.sub(r"[^0-9A-Fa-f]", "", raw_mac).lower()
-            if normalized_mac:
-                return normalized_mac
+        The banner the hub sends on connect carries its own MAC and is the
+        ground truth; the mDNS TXT record is the same value when the
+        consumer registered the hub from an advertisement. A consumer that
+        registered by host alone has no TXT record, and before this read
+        the banner every such hub fell back to the proxy id, which two
+        hubs on one host share (bench_220, 2026-09-11). The proxy id is
+        the last resort only.
+        """
+
+        banner_mac = ""
+        getter = getattr(self, "get_banner_info", None)
+        if callable(getter):
+            try:
+                banner_mac = str((getter() or {}).get("mac") or "").strip()
+            except Exception:  # noqa: BLE001
+                banner_mac = ""
+        for raw_mac in (banner_mac, str(self.mdns_txt.get("MAC") or self.mdns_txt.get("mac") or "").strip()):
+            if raw_mac:
+                normalized_mac = re.sub(r"[^0-9A-Fa-f]", "", raw_mac).lower()
+                if normalized_mac:
+                    return normalized_mac
 
         return str(self.proxy_id).strip()
 

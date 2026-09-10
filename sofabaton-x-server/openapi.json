@@ -219,6 +219,322 @@
         "title": "Button",
         "type": "object"
       },
+      "CallbackDeviceRequest": {
+        "description": "What to deploy. Every slot is always written; unnamed ones are ``Button n``.",
+        "properties": {
+          "input_slots": {
+            "description": "slots offered as activity-start inputs (X1S/X2)",
+            "items": {
+              "type": "integer"
+            },
+            "title": "Input Slots",
+            "type": "array"
+          },
+          "name": {
+            "default": "Server",
+            "maxLength": 30,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "power_off_slot": {
+            "anyOf": [
+              {
+                "maximum": 10.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Power Off Slot"
+          },
+          "power_on_slot": {
+            "anyOf": [
+              {
+                "maximum": 10.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "slot the hub fires when an activity powers on (X1S/X2)",
+            "title": "Power On Slot"
+          },
+          "slots": {
+            "items": {
+              "$ref": "#/components/schemas/CallbackSlot"
+            },
+            "maxItems": 10,
+            "title": "Slots",
+            "type": "array"
+          }
+        },
+        "title": "CallbackDeviceRequest",
+        "type": "object"
+      },
+      "CallbackDeviceView": {
+        "description": "The callback device record (plan section 8) plus the effective destination.",
+        "properties": {
+          "adopted": {
+            "title": "Adopted",
+            "type": "boolean"
+          },
+          "deployed": {
+            "title": "Deployed",
+            "type": "boolean"
+          },
+          "deployed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deployed At"
+          },
+          "device_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Device Id"
+          },
+          "effective_destination": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EffectiveDestination"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "hub_version": {
+            "title": "Hub Version",
+            "type": "string"
+          },
+          "labels": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Labels",
+            "type": "object"
+          },
+          "last_press": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CallbackLastPress"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pending": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CallbackPendingView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "spec": {
+            "additionalProperties": true,
+            "title": "Spec",
+            "type": "object"
+          },
+          "stale": {
+            "title": "Stale",
+            "type": "boolean"
+          },
+          "target": {
+            "$ref": "#/components/schemas/CallbackTargetView"
+          }
+        },
+        "required": [
+          "device_id",
+          "spec",
+          "target",
+          "labels",
+          "hub_version",
+          "deployed_at",
+          "adopted",
+          "stale",
+          "deployed"
+        ],
+        "title": "CallbackDeviceView",
+        "type": "object"
+      },
+      "CallbackLastPress": {
+        "properties": {
+          "received_at": {
+            "title": "Received At",
+            "type": "string"
+          },
+          "seq": {
+            "title": "Seq",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "seq",
+          "received_at"
+        ],
+        "title": "CallbackLastPress",
+        "type": "object"
+      },
+      "CallbackListenerView": {
+        "properties": {
+          "bound": {
+            "title": "Bound",
+            "type": "boolean"
+          },
+          "bound_port": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bound Port"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "next_retry_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Retry At"
+          },
+          "port": {
+            "title": "Port",
+            "type": "integer"
+          },
+          "wanted": {
+            "title": "Wanted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "wanted",
+          "bound",
+          "port",
+          "bound_port",
+          "last_error",
+          "next_retry_at"
+        ],
+        "title": "CallbackListenerView",
+        "type": "object"
+      },
+      "CallbackPendingView": {
+        "properties": {
+          "op": {
+            "title": "Op",
+            "type": "string"
+          },
+          "spec": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spec"
+          },
+          "started_at": {
+            "title": "Started At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "op",
+          "started_at"
+        ],
+        "title": "CallbackPendingView",
+        "type": "object"
+      },
+      "CallbackSlot": {
+        "properties": {
+          "label": {
+            "maxLength": 30,
+            "minLength": 1,
+            "title": "Label",
+            "type": "string"
+          },
+          "long_label": {
+            "anyOf": [
+              {
+                "maxLength": 30,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "default: '<label> Long'",
+            "title": "Long Label"
+          }
+        },
+        "required": [
+          "label"
+        ],
+        "title": "CallbackSlot",
+        "type": "object"
+      },
+      "CallbackTargetView": {
+        "properties": {
+          "action_id": {
+            "title": "Action Id",
+            "type": "string"
+          },
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "port": {
+            "title": "Port",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "host",
+          "port",
+          "action_id"
+        ],
+        "title": "CallbackTargetView",
+        "type": "object"
+      },
       "CatalogReady": {
         "description": "The connect-time initial sync completed (True) or the session dropped (False).",
         "properties": {
@@ -414,6 +730,25 @@
           "name"
         ],
         "title": "DeviceRenameRequest",
+        "type": "object"
+      },
+      "EffectiveDestination": {
+        "description": "What a deploy would bake into the records right now (settings, else the routed local IP).",
+        "properties": {
+          "host": {
+            "title": "Host",
+            "type": "string"
+          },
+          "port": {
+            "title": "Port",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "host",
+          "port"
+        ],
+        "title": "EffectiveDestination",
         "type": "object"
       },
       "EntityIdentity": {
@@ -1145,6 +1480,65 @@
         "title": "LearnRequest",
         "type": "object"
       },
+      "ListenerState": {
+        "properties": {
+          "bound": {
+            "title": "Bound",
+            "type": "boolean"
+          },
+          "bound_port": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bound Port"
+          },
+          "last_error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Error"
+          },
+          "next_retry_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Retry At"
+          },
+          "port": {
+            "title": "Port",
+            "type": "integer"
+          },
+          "wanted": {
+            "title": "Wanted",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "wanted",
+          "bound",
+          "port",
+          "bound_port",
+          "last_error",
+          "next_retry_at"
+        ],
+        "title": "ListenerState",
+        "type": "object"
+      },
       "Macro": {
         "description": "An activity macro; send with ``send(activity_id, command_id)``.",
         "properties": {
@@ -1328,6 +1722,122 @@
           "hex"
         ],
         "title": "PayloadView",
+        "type": "object"
+      },
+      "PressPage": {
+        "description": "``GET /hubs/{id}/presses``: the ring, oldest first when ``after`` is given.\n\n``expired`` means presses newer than ``after`` were already evicted\nfrom the ring; the client missed some and must accept the gap.\n``instance_id`` changes on every server restart, and so does the\nsequence; on a new instance start from the current ``hello``.",
+        "properties": {
+          "expired": {
+            "title": "Expired",
+            "type": "boolean"
+          },
+          "instance_id": {
+            "title": "Instance Id",
+            "type": "string"
+          },
+          "last_seq": {
+            "title": "Last Seq",
+            "type": "integer"
+          },
+          "presses": {
+            "items": {
+              "$ref": "#/components/schemas/PressView"
+            },
+            "title": "Presses",
+            "type": "array"
+          }
+        },
+        "required": [
+          "instance_id",
+          "last_seq",
+          "expired",
+          "presses"
+        ],
+        "title": "PressPage",
+        "type": "object"
+      },
+      "PressView": {
+        "properties": {
+          "command_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Command Id"
+          },
+          "device_id": {
+            "title": "Device Id",
+            "type": "integer"
+          },
+          "hub_id": {
+            "title": "Hub Id",
+            "type": "string"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "press_type": {
+            "title": "Press Type",
+            "type": "string"
+          },
+          "received_at": {
+            "title": "Received At",
+            "type": "string"
+          },
+          "resolution": {
+            "title": "Resolution",
+            "type": "string"
+          },
+          "seq": {
+            "title": "Seq",
+            "type": "integer"
+          },
+          "slot": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "transport": {
+            "title": "Transport",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "hub_id",
+          "device_id",
+          "command_id",
+          "slot",
+          "label",
+          "press_type",
+          "resolution",
+          "transport",
+          "source",
+          "received_at"
+        ],
+        "title": "PressView",
         "type": "object"
       },
       "Problem": {
@@ -1585,6 +2095,16 @@
             ],
             "title": "Base Url"
           },
+          "callback_listener": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ListenerState"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "features": {
             "items": {
               "type": "string"
@@ -1595,6 +2115,11 @@
           "hubs": {
             "title": "Hubs",
             "type": "integer"
+          },
+          "instance_id": {
+            "default": "",
+            "title": "Instance Id",
+            "type": "string"
           },
           "library_version": {
             "title": "Library Version",
@@ -1938,6 +2463,11 @@
             "title": "Hubs",
             "type": "array"
           },
+          "instance_id": {
+            "default": "",
+            "title": "Instance Id",
+            "type": "string"
+          },
           "server_version": {
             "title": "Server Version",
             "type": "string"
@@ -2021,6 +2551,97 @@
         "title": "WsJobEvent",
         "type": "object"
       },
+      "WsPress": {
+        "description": "A button press the hub delivered to the callback listener.\n\n``seq`` is the server-instance press sequence shared with\n``GET /hubs/{id}/presses`` (de-duplicate across the two channels by\nit; resume with ``?after=``). ``resolution`` says how the press was\nmatched to the callback device: ``deployed`` (label from the record),\n``stale`` (the record is flagged stale), ``unknown_slot`` (outside the\nrecord), ``unknown_device`` (no record for that device id).",
+        "properties": {
+          "command_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Command Id"
+          },
+          "device_id": {
+            "title": "Device Id",
+            "type": "integer"
+          },
+          "hub_id": {
+            "title": "Hub Id",
+            "type": "string"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "press_type": {
+            "title": "Press Type",
+            "type": "string"
+          },
+          "received_at": {
+            "title": "Received At",
+            "type": "string"
+          },
+          "resolution": {
+            "title": "Resolution",
+            "type": "string"
+          },
+          "seq": {
+            "title": "Seq",
+            "type": "integer"
+          },
+          "slot": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "transport": {
+            "title": "Transport",
+            "type": "string"
+          },
+          "type": {
+            "const": "press",
+            "default": "press",
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "seq",
+          "hub_id",
+          "device_id",
+          "command_id",
+          "slot",
+          "label",
+          "press_type",
+          "resolution",
+          "transport",
+          "source",
+          "received_at"
+        ],
+        "title": "WsPress",
+        "type": "object"
+      },
       "WsServerEvent": {
         "properties": {
           "hub_id": {
@@ -2048,7 +2669,7 @@
     }
   },
   "info": {
-    "description": "REST + WebSocket over the sofabaton-x library for Sofabaton X1 / X1S / X2 hubs. LAN service; no authentication in v1.\n\nWebSocket: `/api/v1/events` (optional `?hub_id=` filter, repeatable) streams WsHello once, then WsHubEvent / WsServerEvent / WsJobEvent / WsDropped messages (see components).",
+    "description": "REST + WebSocket over the sofabaton-x library for Sofabaton X1 / X1S / X2 hubs. LAN service; no authentication in v1.\n\nWebSocket: `/api/v1/events` (optional `?hub_id=` filter, repeatable) streams WsHello once, then WsHubEvent / WsServerEvent / WsJobEvent / WsPress / WsDropped messages (see components).",
     "title": "sofabaton-x-server",
     "version": "0.2.0"
   },
@@ -4295,6 +4916,372 @@
         "summary": "Read a hub_bundle from the hub as a job (full and restorable by default; minutes)",
         "tags": [
           "payload"
+        ]
+      }
+    },
+    "/api/v1/hubs/{hub_id}/callback-device": {
+      "delete": {
+        "operationId": "removeCallbackDevice",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "remove even when activities still reference the device",
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "remove even when activities still reference the device",
+              "title": "Force",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Remove the callback device from the hub and forget it (a job)",
+        "tags": [
+          "callbacks"
+        ]
+      },
+      "get": {
+        "operationId": "getCallbackDevice",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CallbackDeviceView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "The hub's callback device record",
+        "tags": [
+          "callbacks"
+        ]
+      },
+      "post": {
+        "operationId": "deployCallbackDevice",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallbackDeviceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Deploy the callback device (a job); the result is the record",
+        "tags": [
+          "callbacks"
+        ]
+      },
+      "put": {
+        "operationId": "updateCallbackDevice",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CallbackDeviceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Edit the callback device in place (a job); declined drift fails the job",
+        "tags": [
+          "callbacks"
+        ]
+      }
+    },
+    "/api/v1/hubs/{hub_id}/callback-device/redeploy": {
+      "post": {
+        "operationId": "redeployCallbackDevice",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Deploy a stale callback device again from its stored spec (a job)",
+        "tags": [
+          "callbacks"
         ]
       }
     },
@@ -6847,6 +7834,89 @@
         ]
       }
     },
+    "/api/v1/hubs/{hub_id}/presses": {
+      "get": {
+        "operationId": "listPresses",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "return presses with seq greater than this, oldest first",
+            "in": "query",
+            "name": "after",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "return presses with seq greater than this, oldest first",
+              "title": "After"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PressPage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Recent button presses (the catch-up view of the press stream)",
+        "tags": [
+          "callbacks"
+        ]
+      }
+    },
     "/api/v1/hubs/{hub_id}/restore": {
       "post": {
         "operationId": "restoreHub",
@@ -7339,6 +8409,48 @@
           }
         },
         "summary": "Identify the server",
+        "tags": [
+          "server"
+        ]
+      }
+    },
+    "/api/v1/server/callback-listener": {
+      "get": {
+        "operationId": "getCallbackListener",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CallbackListenerView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "State of the callback listener",
+        "tags": [
+          "server"
+        ]
+      }
+    },
+    "/api/v1/server/callback-listener/retry": {
+      "post": {
+        "operationId": "retryCallbackListener",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CallbackListenerView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Try to bind the callback listener now",
         "tags": [
           "server"
         ]

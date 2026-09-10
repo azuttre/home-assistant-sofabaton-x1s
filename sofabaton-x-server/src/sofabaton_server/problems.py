@@ -38,6 +38,8 @@ from sofabaton import (
     IrLearnError,
     SnapshotIncompleteError,
     SnapshotOutdatedError,
+    WifiUpdateDeclined,
+    WifiUpdateFailed,
 )
 
 from .models import Problem
@@ -136,6 +138,17 @@ def problem_for(err: BaseException, hub_id: str) -> Optional[ApiProblem]:
         return ApiProblem(503, "hub_not_connected", "Hub is not connected", detail=str(err), hub_id=hub_id, mode="disconnected")
     if isinstance(err, FetchTimeoutError):
         return ApiProblem(504, "hub_timeout", "The hub did not reply in time", detail=str(err), hub_id=hub_id)
+    if isinstance(err, WifiUpdateDeclined):
+        detail = str(err)
+        if err.command_ids:
+            detail = f"{err.reason}: command ids {list(err.command_ids)}"
+        elif err.detail:
+            detail = f"{err.reason}: {err.detail}"
+        return ApiProblem(409, "callback_update_declined", "The callback device could not be updated in place",
+                          detail=detail, hub_id=hub_id)
+    if isinstance(err, WifiUpdateFailed):
+        return ApiProblem(502, "callback_update_failed", "The hub rejected an in-place update step",
+                          detail=f"failed at {err.failed_at} after {err.completed_steps} step(s)", hub_id=hub_id)
     if isinstance(err, HubRejectedError):
         return ApiProblem(502, "hub_rejected", "The hub refused the write", detail=str(err), hub_id=hub_id)
     if isinstance(err, SnapshotOutdatedError):

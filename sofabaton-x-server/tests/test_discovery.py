@@ -53,7 +53,7 @@ def test_browser_feeds_the_table_and_events_and_own_proxies_are_dropped(tmp_path
     with client:
         browser = FakeBrowser.instances[-1]
         assert browser.running and browser.include_proxies is True
-        assert client.get(f"{API_PREFIX}/server").json()["features"] == ["discovery"]
+        assert client.get(f"{API_PREFIX}/server").json()["features"] == ["discovery", "callbacks"]
 
         with client.websocket_connect(f"{API_PREFIX}/events") as ws:
             ws.receive_json()                                           # hello

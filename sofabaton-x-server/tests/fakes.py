@@ -36,6 +36,9 @@ from sofabaton import (
 )
 
 
+CRLF = chr(13) + chr(10)
+
+
 class FakeProxy:
     def __init__(self, config: HubConfig) -> None:
         self.config = config
@@ -79,6 +82,16 @@ class FakeProxy:
         self.restores: list = []
         self.restore_failure: Optional[dict] = None
         self.restore_gate: Optional[asyncio.Event] = None
+        # Managed wifi devices (callbacks plan): the deploys and updates
+        # asked for, injected errors, and the extra device rows the
+        # snapshot shows for them (block fields, command labels).
+        self.local_ip = "192.168.1.10"
+        self.wifi_deploys: list[dict] = []
+        self.wifi_updates: list[dict] = []
+        self.wifi_deploy_error: Optional[BaseException] = None
+        self.wifi_update_error: Optional[BaseException] = None
+        self.device_blocks: dict[int, dict] = {}
+        self.device_commands: dict[int, list] = {}
         self.activities_data = [
             Activity(activity_id=101, name="Watch TV", active=False, needs_confirm=False),
             Activity(activity_id=102, name="Music", active=False, needs_confirm=False),
@@ -196,6 +209,10 @@ class FakeProxy:
             payload["commands"] = [{"command_id": 1, "name": "Power"}, {"command_id": 2, "name": "Mute"}]
             payload["key_sort"] = None
             payload["input_record"] = None
+            if entity_id in self.device_blocks:
+                payload["device"].update(self.device_blocks[entity_id])
+            if entity_id in self.device_commands:
+                payload["commands"] = [dict(row) for row in self.device_commands[entity_id]]
         else:
             payload["device"]["entity_type"] = "activity"
             payload["favorite_slots"] = [{"button_id": 1, "device_id": 1, "command_id": 1}]
@@ -323,7 +340,81 @@ class FakeProxy:
         from sofabaton import DeviceRemoved
         await self._intent("remove_device", device_id)
         self.devices_data = [d for d in self.devices_data if d.device_id != device_id]
+        self.device_blocks.pop(device_id, None)
+        self.device_commands.pop(device_id, None)
+        self._emit_snapshot_changed(device_ids=(device_id,))
         return DeviceRemoved(device_id=device_id, confirmed_activity_ids=(), impacted_activity_ids=(101,))
+
+    # -- managed wifi devices (callbacks plan) -----------------------------------
+
+    def local_address(self) -> str:
+        return self.local_ip
+
+    def _action_id(self) -> str:
+        from sofabaton_server.models import mac_key
+        return mac_key(self.mac) if self.mac else self.config.host
+
+    def _emit_snapshot_changed(self, *, device_ids=(), activity_ids=()) -> None:
+        import asyncio as _asyncio
+        try:
+            loop = _asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        async def _later():
+            snap = await self.snapshot()
+            self.emit("snapshot_changed", SnapshotChanged(snapshot_id=snap.snapshot_id, engine_generation=self._seq,
+                                                          device_ids=tuple(device_ids), activity_ids=tuple(activity_ids)))
+
+        if loop is not None:
+            loop.create_task(_later())
+
+    def place_wifi_device(self, device_id: int, spec, *, host: str, port: int, brand: str = "m3tac0de") -> None:
+        """Make the snapshot show a managed wifi device with our callback records
+        (what adoption and the identity check look at)."""
+
+        from sofabaton import Device, IrPayload
+        from sofabaton.wifi_device import labels_from_spec
+        normalized = spec.normalized()
+        if all(d.device_id != device_id for d in self.devices_data):
+            self.devices_data.append(Device(device_id=device_id, name=normalized.name, brand=brand, device_class="wifi_ip",
+                                            device_class_code=0x1C, power_state=None, idle_behavior=None))
+        self.fetched.add(device_id)
+        self.device_blocks[device_id] = {"brand": brand, "device_class": "wifi_ip", "name": normalized.name}
+        labels = labels_from_spec(normalized)
+        self.device_commands[device_id] = [{"command_id": cid, "name": label} for cid, label in sorted(labels.items())]
+        path = f"/launch/{self._action_id()}/{device_id}/0/short"
+        text = f"POST {path} HTTP/1.1" + CRLF + f"Host:{host}:{port}" + CRLF + "Content-Type:application/x-www-form-urlencoded" + CRLF + CRLF
+        self.payloads[(device_id, 1)] = IrPayload.from_bytes(text.encode("ascii"))
+
+    async def deploy_wifi_device(self, spec, *, host, port):
+        from sofabaton import WifiDeployment, WifiTarget
+        from sofabaton.wifi_device import labels_from_spec
+        await self._intent("deploy_wifi_device", spec.normalized().name, host, port)
+        if self.wifi_deploy_error is not None:
+            raise self.wifi_deploy_error
+        normalized = spec.normalized()
+        new_id = max([d.device_id for d in self.devices_data] + [0]) + 1
+        self.wifi_deploys.append({"device_id": new_id, "spec": normalized, "host": host, "port": port})
+        self.place_wifi_device(new_id, normalized, host=host, port=port)
+        self._emit_snapshot_changed(device_ids=(new_id,))
+        return WifiDeployment(device_id=new_id, spec=normalized, target=WifiTarget(host, port, self._action_id()),
+                              labels=labels_from_spec(normalized), hub_version=self.model)
+
+    async def update_wifi_device(self, deployment, spec, *, progress=None):
+        from sofabaton import WifiDeployment
+        from sofabaton.wifi_device import labels_from_spec
+        await self._intent("update_wifi_device", deployment.device_id, spec.normalized().name)
+        if self.wifi_update_error is not None:
+            raise self.wifi_update_error
+        normalized = spec.normalized()
+        self.wifi_updates.append({"device_id": deployment.device_id, "spec": normalized, "deployment": deployment})
+        labels = labels_from_spec(normalized)
+        self.device_commands[deployment.device_id] = [{"command_id": cid, "name": label} for cid, label in sorted(labels.items())]
+        self.device_blocks.setdefault(deployment.device_id, {})["name"] = normalized.name
+        self._emit_snapshot_changed(device_ids=(deployment.device_id,))
+        return WifiDeployment(device_id=deployment.device_id, spec=normalized, target=deployment.target,
+                              labels=labels, hub_version=self.model)
 
     async def remove_activity(self, activity_id):
         await self._intent("remove_activity", activity_id)
@@ -434,10 +525,13 @@ class Factory:
     def __init__(self) -> None:
         self.built: dict[str, list[FakeProxy]] = {}
         self.start_error: Optional[BaseException] = None   # injected into new proxies
+        self.on_build = None                                # callable(proxy): shape a proxy before the app starts it
 
     def __call__(self, config: HubConfig) -> FakeProxy:
         proxy = FakeProxy(config)
         proxy.start_error = self.start_error
+        if self.on_build is not None:
+            self.on_build(proxy)
         self.built.setdefault(config.host, []).append(proxy)
         return proxy
 

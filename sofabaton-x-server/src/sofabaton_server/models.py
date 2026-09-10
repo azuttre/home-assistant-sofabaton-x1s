@@ -42,24 +42,32 @@ class HubRecord:
     enabled: bool = True
     added_at: str = field(default_factory=now_iso)
     last_seen: Optional[str] = None
+    # The callback device record (callbacks plan, section 8), owned by
+    # the callback service; stored verbatim as ``callback_device``.
+    callback_device: Optional[dict[str, Any]] = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "hub_id": self.hub_id,
             "config": self.config.to_dict(),
             "enabled": self.enabled,
             "added_at": self.added_at,
             "last_seen": self.last_seen,
         }
+        if self.callback_device is not None:
+            data["callback_device"] = dict(self.callback_device)
+        return data
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "HubRecord":
+        callback = data.get("callback_device")
         return cls(
             hub_id=str(data["hub_id"]),
             config=HubConfig.from_dict(data["config"]),
             enabled=bool(data.get("enabled", True)),
             added_at=str(data.get("added_at") or now_iso()),
             last_seen=data.get("last_seen"),
+            callback_device=dict(callback) if isinstance(callback, dict) else None,
         )
 
 

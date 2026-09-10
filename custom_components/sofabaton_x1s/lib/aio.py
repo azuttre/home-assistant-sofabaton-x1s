@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import inspect
+import logging
 from typing import Any, AsyncIterator, Callable, Iterable, Optional, Sequence
 
 from .config import HubConfig
@@ -34,9 +35,22 @@ from .errors import (
     SnapshotIncompleteError,
     SnapshotOutdatedError,
     StateDocumentError,
+    WifiUpdateDeclined,
+    WifiUpdateFailed,
 )
 from .hub_listener import release_hub_from_listener
-from .hub_versions import HVER_BY_HUB_VERSION
+from .hub_versions import HUB_VERSION_X1, HVER_BY_HUB_VERSION
+from .commands import hub_command_label
+from .wifi_inplace_plan import baseline_snapshot_from_bundle, build_wifi_inplace_plan
+from .wifi_device import (
+    X1_CALLBACK_PORT,
+    WifiDeployment,
+    WifiDeviceSpec,
+    WifiTarget,
+    command_defs_from_spec,
+    labels_from_spec,
+    snapshot_from_spec,
+)
 from .devices import parse_device_record
 from .device_class_profiles import supported_create_classes
 from .models import (
@@ -74,6 +88,8 @@ __all__ = [
     "AsyncHubBrowser",
     "async_discover_hubs",
 ]
+
+_LOG = logging.getLogger("x1proxy.facade")
 
 # Default deadline for an awaited read that has to fetch from the hub.
 DEFAULT_FETCH_TIMEOUT = 10.0
@@ -1452,6 +1468,207 @@ class AsyncXProxy:
             raise ValueError(f"{act_lo} is not an activity id (activities start at 101)")
         result = await self._write(f"remove_activity({act_lo})", self._proxy.delete_device, act_lo)
         await self._rebase_after_write(result, activity_ids=(act_lo,), force=True)
+
+    # -- managed wifi devices (callbacks plan, C0b / C0c) ---------------------
+
+    def local_address(self) -> str:
+        """The local IPv4 address OS routing picks toward the hub.
+
+        What the proxy advertises to the hub and the default callback
+        target for :meth:`deploy_wifi_device`. Inside a container on a
+        bridge network this is the container's own address, which the
+        hub cannot reach; a consumer there passes its host's address
+        instead. A pure routing-table lookup, no hub traffic.
+        """
+
+        return str(self._proxy.get_routed_local_ip())
+
+    async def deploy_wifi_device(
+        self, spec: WifiDeviceSpec, *, host: str, port: int
+    ) -> WifiDeployment:
+        """Create a managed Wifi Device whose commands call ``host:port``.
+
+        Every slot of ``spec`` (defaults included) becomes a short and a
+        long press record whose callback path is
+        ``launch/<action_id>/<device_id>/<slot index>/<short|long>``; the
+        hub's action id (its MAC) comes back in the deployment's target.
+        On the X1 the Roku replay always calls port 8060 (anything else is
+        a ``ValueError`` before the hub is touched) and the power and
+        input hooks are ignored, since that firmware fires one power and
+        one input callback per transition regardless. Returns the
+        :class:`WifiDeployment` the consumer must keep for
+        :meth:`update_wifi_device`.
+        """
+
+        normalized = spec.normalized()
+        target = WifiTarget(host=host, port=port)
+        hub_version = str(getattr(self._proxy, "hub_version", "") or "")
+        if hub_version == HUB_VERSION_X1 and target.port != X1_CALLBACK_PORT:
+            raise ValueError(
+                f"an X1 hub always calls back on port {X1_CALLBACK_PORT}; got {target.port}"
+            )
+        if hub_version == HUB_VERSION_X1 and (
+            normalized.power_on_slot is not None
+            or normalized.power_off_slot is not None
+            or normalized.input_slots
+        ):
+            _LOG.info(
+                "deploy_wifi_device: power/input hooks are ignored on an X1 "
+                "(one power and one input callback per transition regardless)"
+            )
+        shape = snapshot_from_spec(normalized, device_id=0, hub_version=hub_version, target_host=target.host)
+        result = await self._write(
+            f"deploy_wifi_device({normalized.name!r})",
+            self._proxy.create_wifi_device,
+            device_name=normalized.name,
+            commands=command_defs_from_spec(normalized),
+            request_port=target.port,
+            brand_name=normalized.brand,
+            power_on_command_id=shape.power_on_command_id,
+            power_off_command_id=shape.power_off_command_id,
+            input_command_ids=list(shape.input_command_ids) or None,
+            send_remote_sync=True,
+            ip_address=target.host,
+        )
+        device_id = int(result.get("device_id") or 0) & 0xFF
+        action_id = str(await self.run(self._proxy._stable_hub_action_id) or "")
+        await self._rebase_after_write(result, device_ids=(device_id,), force=True)
+        return WifiDeployment(
+            device_id=device_id,
+            spec=normalized,
+            target=WifiTarget(host=target.host, port=target.port, action_id=action_id),
+            labels=labels_from_spec(normalized),
+            hub_version=hub_version,
+        )
+
+    async def update_wifi_device(
+        self,
+        deployment: WifiDeployment,
+        spec: WifiDeviceSpec,
+        *,
+        progress: Optional[Callable] = None,
+    ) -> WifiDeployment:
+        """Edit a deployed managed Wifi Device in place to match ``spec``.
+
+        Reads the device and every activity back, then plans the diff
+        with the in-place planner scoped by ``deployment`` (only what the
+        deployment created is ever cleaned up; favorites, bindings and
+        memberships the consumer made with the generic intents survive).
+        The callback target never changes here: it is what
+        ``deployment.target`` says, and a rename on an X1 rewrites the
+        head with exactly that address.
+
+        Before any write the live records must still be the deployment's:
+        a record whose label equals the deployed one is fine, one that
+        already equals the desired one is a resumed interrupted update,
+        one that equals neither raises :class:`WifiUpdateDeclined`
+        (``reason="drift"``), as does a missing record (``"missing"``),
+        an unreadable or different device (``"device"``) or a diff the
+        planner refuses (``"planner"``). A write the hub rejects raises
+        :class:`WifiUpdateFailed`; the records already rewritten keep
+        their new labels and the next update resumes. Returns the new
+        :class:`WifiDeployment`.
+        """
+
+        normalized = spec.normalized()
+        dev_lo = int(deployment.device_id) & 0xFF
+        if not dev_lo:
+            raise ValueError("the deployment has no device id")
+        what = f"update_wifi_device({dev_lo})"
+        self._raise_if_cannot_fetch(what)
+        hub_version = str(getattr(self._proxy, "hub_version", "") or deployment.hub_version or "")
+
+        def project(label: str) -> str:
+            try:
+                return hub_command_label(label, hub_version)
+            except ValueError:
+                return str(label or "").strip()
+
+        # Baseline: the device's structural backup plus every activity
+        # (membership is only discoverable by reading them), as the HA
+        # in-place path does. The device read also warms the command
+        # metadata the rename executor clones codes from.
+        activity_ids = sorted(int(a.activity_id) & 0xFF for a in await self.activities())
+
+        def _read_baseline() -> tuple[Any, list[dict]]:
+            device_entry = self._proxy.backup_device(dev_lo, include_blobs=False)
+            entries: list[dict] = []
+            for act_id in activity_ids:
+                payload = self._proxy.backup_activity(act_id)
+                if isinstance(payload, dict):
+                    entries.append(payload)
+            return device_entry, entries
+
+        device_entry, activity_entries = await self.run(_read_baseline)
+        if not isinstance(device_entry, dict) or len(activity_entries) < len(activity_ids):
+            raise WifiUpdateDeclined(
+                "device", detail=f"device {dev_lo} or its activities could not be read from the hub"
+            )
+        baseline = baseline_snapshot_from_bundle(device_entry, activity_entries)
+        if baseline.device_id != dev_lo:
+            raise WifiUpdateDeclined("device", detail=f"device {dev_lo} is not on the hub")
+
+        desired = snapshot_from_spec(
+            normalized, device_id=dev_lo, hub_version=hub_version, target_host=deployment.target.host
+        )
+        deployed = snapshot_from_spec(
+            deployment.spec, device_id=dev_lo, hub_version=hub_version, target_host=deployment.target.host
+        )
+        expected: dict[int, str] = {int(cid): str(label) for cid, label in deployment.labels.items()} or {
+            cid: slot.label for cid, slot in deployed.slots.items()
+        }
+
+        missing = sorted(cid for cid in expected if cid not in baseline.slots)
+        if missing:
+            raise WifiUpdateDeclined("missing", command_ids=missing)
+        drift: list[int] = []
+        resumed: list[int] = []
+        for cid, live_slot in baseline.slots.items():
+            live = project(live_slot.label)
+            expected_label = expected.get(cid)
+            if expected_label is not None and project(expected_label) == live:
+                continue
+            desired_slot = desired.slots.get(cid)
+            if desired_slot is not None and project(desired_slot.label) == live:
+                resumed.append(cid)
+                continue
+            drift.append(cid)
+        if drift:
+            raise WifiUpdateDeclined("drift", command_ids=sorted(drift))
+        if resumed:
+            _LOG.info("%s: resuming an interrupted update (command ids %s)", what, sorted(resumed))
+
+        plan = build_wifi_inplace_plan(baseline, desired, deployed=deployed, label_key=project)
+        if plan.is_fallback:
+            raise WifiUpdateDeclined("planner", detail=plan.fallback_reason)
+
+        updated = WifiDeployment(
+            device_id=dev_lo,
+            spec=normalized,
+            target=deployment.target,
+            labels=labels_from_spec(normalized),
+            hub_version=hub_version,
+        )
+        if not plan.steps:
+            return updated
+
+        result = await self.run(
+            self._proxy.run_wifi_inplace_plan, plan, progress_callback=self._engine_progress(progress)
+        )
+        touched = tuple(sorted({
+            int(step.payload.get("activity_id")) & 0xFF
+            for step in plan.steps
+            if step.payload.get("activity_id") is not None
+        }))
+        await self._rebase_after_write(result, device_ids=(dev_lo,), activity_ids=touched, force=True)
+        if not isinstance(result, dict) or result.get("status") != "success":
+            data = result if isinstance(result, dict) else {}
+            raise WifiUpdateFailed(
+                str(data.get("failed_at") or "unknown"),
+                completed_steps=int(data.get("completed_steps") or 0),
+                message=str(data.get("message") or "") or None,
+            )
+        return updated
 
     async def _check_order(self, kind: str, ordered_ids: Sequence[int]) -> tuple[int, ...]:
         ids = tuple(int(i) & 0xFF for i in ordered_ids)

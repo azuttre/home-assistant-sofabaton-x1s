@@ -133,10 +133,22 @@ from .errors import (  # noqa: F401
     SnapshotOutdatedError,
     StateDocumentError,
     HubRejectedError,
+    WifiUpdateDeclined,
+    WifiUpdateFailed,
     IrLearnError,
 )
-from .payloads import IrPayload  # noqa: F401
+from .payloads import IrPayload, NetworkCommand  # noqa: F401
 from . import edits  # noqa: F401
+
+# Managed wifi device value types (deploy / update through the facade).
+from .wifi_device import (  # noqa: F401
+    WIFI_SLOT_COUNT,
+    WifiDeployment,
+    WifiDeviceSpec,
+    WifiSlotSpec,
+    WifiTarget,
+    snapshot_from_spec,
+)
 
 # Asyncio facade over the threaded core.
 from .aio import AsyncHubBrowser, AsyncXProxy, async_discover_hubs  # noqa: F401
@@ -222,6 +234,8 @@ _CURATED = [
     "StateDocumentError",
     "HubRejectedError",
     "IrLearnError",
+    "WifiUpdateDeclined",
+    "WifiUpdateFailed",
     # snapshot and writes (phase 3)
     "HubSnapshot",
     "SnapshotEntity",
@@ -230,7 +244,15 @@ _CURATED = [
     "DeviceRemoved",
     "RestoreResult",
     "IrPayload",
+    "NetworkCommand",
     "edits",
+    # managed wifi device value types
+    "WIFI_SLOT_COUNT",
+    "WifiDeployment",
+    "WifiDeviceSpec",
+    "WifiSlotSpec",
+    "WifiTarget",
+    "snapshot_from_spec",
     # hub configuration record
     "ConfigSource",
     "HubConfig",

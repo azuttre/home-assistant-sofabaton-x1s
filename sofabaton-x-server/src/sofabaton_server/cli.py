@@ -46,6 +46,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--tls-cert", type=Path, help="certificate file (bring your own TLS; a reverse proxy is the usual way)")
     ap.add_argument("--tls-key", type=Path, help="private key file for --tls-cert")
+    ap.add_argument(
+        "--callback-host",
+        help="IPv4 address the hubs call back on for callback devices (default: the routed local IP per hub; "
+             "set the host's LAN address inside a container on a bridge network)",
+    )
+    ap.add_argument("--callback-port", type=int, help="port the callback listener binds (default 8060; the X1 can call no other)")
     ap.add_argument("--log-level", choices=("debug", "info", "warning", "error"), help="log level (default info)")
     ap.add_argument("--print-settings", action="store_true", help="print the effective settings as JSON and exit")
     return ap
@@ -63,6 +69,8 @@ def settings_from_args(args: argparse.Namespace) -> Settings:
         "tls_cert": args.tls_cert,
         "tls_key": args.tls_key,
         "log_level": args.log_level,
+        "callback_host": args.callback_host,
+        "callback_port": args.callback_port,
     }
     return load_settings(cli=cli)
 

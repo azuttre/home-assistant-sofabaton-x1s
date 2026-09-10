@@ -19,8 +19,24 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Optional, Sequence
 
-from .payloads import IrPayload
-from .protocol_const import BUTTONNAME_BY_CODE
+from .payloads import IrPayload, NetworkCommand
+from .protocol_const import (
+    BUTTONNAME_BY_CODE,
+    DEVICE_CLASS_WIFI_HUE,
+    DEVICE_CLASS_WIFI_IP,
+    DEVICE_CLASS_WIFI_MQTT,
+    DEVICE_CLASS_WIFI_ROKU,
+    DEVICE_CLASS_WIFI_SONOS,
+    normalize_device_class,
+)
+
+_NETWORK_DEVICE_CLASSES = frozenset({
+    DEVICE_CLASS_WIFI_IP,
+    DEVICE_CLASS_WIFI_ROKU,
+    DEVICE_CLASS_WIFI_HUE,
+    DEVICE_CLASS_WIFI_SONOS,
+    DEVICE_CLASS_WIFI_MQTT,
+})
 
 __all__ = [
     "rename_activity",
@@ -242,22 +258,55 @@ def set_idle_behavior(bundle: dict[str, Any], device_id: int, mode: int) -> dict
     return edited
 
 
+def _check_payload_class(device: dict[str, Any], payload: "IrPayload | NetworkCommand") -> None:
+    """A payload only goes on a device of its class: IR payloads on IR
+    devices, a network command on a device of exactly that network class.
+    The hub would store a mismatched record and replay garbage."""
+
+    block = device.get("device") or {}
+    device_class = normalize_device_class(block.get("device_class"))
+    if isinstance(payload, NetworkCommand):
+        if device_class != payload.device_class:
+            raise ValueError(
+                f"a {payload.device_class} command cannot go on a "
+                f"{device_class or 'device of unknown class'} device"
+            )
+        return
+    # An IR payload is refused only on a device known to be a network
+    # class; bundles from tests and older captures carry looser class
+    # words ("tv") that are not evidence of a mismatch.
+    if device_class in _NETWORK_DEVICE_CLASSES:
+        raise ValueError(f"an IR payload cannot go on a {device_class} device")
+
+
 def set_command_payload(
-    bundle: dict[str, Any], device_id: int, command_id: int, payload: IrPayload
+    bundle: dict[str, Any], device_id: int, command_id: int, payload: "IrPayload | NetworkCommand"
 ) -> dict[str, Any]:
     """Replace the stored payload of an existing command (an in-place overwrite).
 
     The command's label, library type and button code are preserved by the
-    engine; only the bytes change. A ``sync_device`` on ``device_id``
-    writes it.
+    engine; only the bytes change. ``payload`` is an :class:`IrPayload` on
+    an IR device or a :class:`NetworkCommand` of the device's class (the
+    executor re-encodes its structured form through the canonical writer).
+    A ``sync_device`` on ``device_id`` writes it.
     """
 
     edited, device = _edit(bundle, "device", device_id)
+    _check_payload_class(device, payload)
     want = int(command_id) & 0xFF
     for row in device.get("commands") or []:
         if int(row.get("command_id", -1)) & 0xFF != want:
             continue
         previous = row.get("restore_data") if isinstance(row.get("restore_data"), dict) else {}
+        if isinstance(payload, NetworkCommand):
+            row["restore_data"] = {
+                "transport": "hub_code_record",
+                "library_type": int(previous.get("library_type", payload.library_type)) & 0xFF,
+                "button_code": int(previous.get("button_code", 0)) & 0xFFFFFFFFFFFF,
+                "data_hex": payload.blob.hex(),
+                "decoded": payload.decoded,
+            }
+            return edited
         row["restore_data"] = {
             "transport": "hub_code_record",
             "library_type": int(previous.get("library_type", 0x0D)) & 0xFF,
@@ -270,17 +319,20 @@ def set_command_payload(
 
 
 def add_command(
-    bundle: dict[str, Any], device_id: int, payload: IrPayload, name: str,
+    bundle: dict[str, Any], device_id: int, payload: "IrPayload | NetworkCommand", name: str,
     *, command_id: Optional[int] = None,
 ) -> tuple[dict[str, Any], int]:
     """Add a command with ``payload`` to a device; returns ``(edited, command_id)``.
 
-    Without ``command_id`` the next free slot is taken. A ``sync_device``
-    on ``device_id`` persists the record (the planner recognises the
-    ``restore_data.new`` marker).
+    ``payload`` is an :class:`IrPayload` on an IR device or a
+    :class:`NetworkCommand` of the device's class. Without ``command_id``
+    the next free slot is taken. A ``sync_device`` on ``device_id``
+    persists the record (the planner recognises the ``restore_data.new``
+    marker).
     """
 
     edited, device = _edit(bundle, "device", device_id)
+    _check_payload_class(device, payload)
     rows = device.setdefault("commands", [])
     used = {int(r.get("command_id", 0)) & 0xFF for r in rows}
     if command_id is None:
