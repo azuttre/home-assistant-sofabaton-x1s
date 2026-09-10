@@ -407,37 +407,68 @@ class RestoreResult:
     """Outcome of :meth:`AsyncXProxy.restore`.
 
     ``failed_at`` is ``(kind, source_id)`` of the entity whose restore
-    failed; entities restored before it stay on the hub (no rollback).
+    failed, or ``("proxy", None)`` when the hub could not be written at
+    all; entities restored before it stay on the hub (no rollback).
     ``device_id_map`` maps the bundle's device ids to the ids the hub
-    assigned.
+    assigned. ``restored_devices`` / ``restored_activities`` are counts;
+    the engine's per-entity records are ``restored`` (kept as the engine
+    returned them).
     """
 
     status: Literal["success", "failed"]
-    failed_at: Optional[tuple[str, int]]
+    failed_at: Optional[tuple[str, Optional[int]]]
     device_id_map: dict[int, int]
     restored_devices: int
     restored_activities: int
     snapshot_id: Optional[str]
+    restored: dict[str, list[dict[str, Any]]] = field(default_factory=dict, compare=False)
 
     @property
     def ok(self) -> bool:
         return self.status == "success"
 
+    @property
+    def wrote_nothing(self) -> bool:
+        """True when no entity was restored (the failure came first)."""
+
+        return not self.ok and self.restored_devices == 0 and self.restored_activities == 0
+
     @classmethod
     def from_engine(cls, result: Any, *, snapshot_id: Optional[str]) -> "RestoreResult":
+        # The engine reports ``restored_devices`` / ``restored_activities``
+        # as LISTS of per-entity result records; older callers counted them.
         data = result if isinstance(result, dict) else {}
         failed_at = data.get("failed_at")
-        parsed_failed: Optional[tuple[str, int]] = None
+        parsed_failed: Optional[tuple[str, Optional[int]]] = None
         if isinstance(failed_at, (list, tuple)) and len(failed_at) == 2:
-            parsed_failed = (str(failed_at[0]), int(failed_at[1]))
+            entity = failed_at[1]
+            parsed_failed = (str(failed_at[0]), None if entity is None else int(entity))
         id_map = data.get("device_id_map") or {}
+
+        def _records(value: Any) -> list[dict[str, Any]]:
+            if isinstance(value, list):
+                return [r for r in value if isinstance(r, dict)]
+            return []
+
+        def _count(value: Any) -> int:
+            if isinstance(value, list):
+                return len(value)
+            try:
+                return int(value or 0)
+            except (TypeError, ValueError):
+                return 0
+
         return cls(
             status="success" if data.get("status") == "success" else "failed",
             failed_at=parsed_failed,
             device_id_map={int(k): int(v) for k, v in id_map.items()} if isinstance(id_map, dict) else {},
-            restored_devices=int(data.get("restored_devices") or 0),
-            restored_activities=int(data.get("restored_activities") or 0),
+            restored_devices=_count(data.get("restored_devices")),
+            restored_activities=_count(data.get("restored_activities")),
             snapshot_id=snapshot_id,
+            restored={
+                "devices": _records(data.get("restored_devices")),
+                "activities": _records(data.get("restored_activities")),
+            },
         )
 
     def to_dict(self) -> dict[str, Any]:

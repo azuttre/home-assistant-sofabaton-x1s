@@ -1663,6 +1663,84 @@ class RestoreMixin:
             self._log.exception("[RESTORE] restore_activity failed")
             raise
 
+    def _restore_bundle_preflight(
+        self, payload: Any
+    ) -> tuple[list[Any], list[Any]]:
+        """Every check ``restore_hub_bundle`` makes before its first write.
+
+        Shape, schema version and payload profile of the bundle, the
+        per-device schema, class and writer capabilities that
+        ``restore_device`` would refuse, and the activity dependency order
+        (a reference cycle cannot be restored). Raises ``ValueError`` with
+        the reason; touches nothing. Returns the device payloads and the
+        activities in restore order.
+        """
+
+        if not isinstance(payload, dict):
+            raise ValueError("restore_hub_bundle payload must be a dict")
+        if payload.get("kind") != "hub_bundle":
+            raise ValueError(
+                "restore_hub_bundle expects kind == 'hub_bundle'"
+            )
+        if int(payload.get("schema_version", 0)) != HUB_BUNDLE_SCHEMA_VERSION:
+            raise ValueError(
+                "restore_hub_bundle payload schema_version must be "
+                f"{HUB_BUNDLE_SCHEMA_VERSION} "
+                f"(got {payload.get('schema_version')!r})"
+            )
+        # Bundles without a payload_profile predate the marker and are full
+        # backups by definition; an explicitly structural bundle carries no
+        # command payloads and must never be replayed onto a hub.
+        profile = str(payload.get("payload_profile") or PAYLOAD_PROFILE_FULL)
+        if profile != PAYLOAD_PROFILE_FULL:
+            raise ValueError(
+                f"restore_hub_bundle payload_profile is {profile!r}: "
+                "structural cache bundles carry no command payloads and "
+                "cannot be restored -- export a full backup instead"
+            )
+        devices = list(payload.get("devices") or [])
+        for device_payload in devices:
+            if not isinstance(device_payload, dict):
+                continue
+            if device_payload.get("kind") != "device_backup":
+                raise ValueError("restore payload kind must be 'device_backup'")
+            if int(device_payload.get("schema_version", 0)) != DEVICE_BACKUP_SCHEMA_VERSION:
+                raise ValueError(
+                    "restore_device payload schema_version must be "
+                    f"{DEVICE_BACKUP_SCHEMA_VERSION} (got "
+                    f"{device_payload.get('schema_version')!r})"
+                )
+            device_block = device_payload.get("device")
+            if not isinstance(device_block, dict):
+                raise ValueError("restore payload must include a 'device' block")
+            self._validate_restore_capabilities(
+                hub_version=self.hub_version,
+                device_class=self._restore_device_class(device_block),
+                payload=device_payload,
+            )
+        # Cross-activity references (chain steps) need the target's
+        # hub-assigned id before the referencing activity is written, so
+        # restore in dependency order. Cycles cannot be ordered: fail the
+        # whole bundle up front with the offending ids.
+        activities = self._sort_bundle_activities_for_restore(
+            list(payload.get("activities") or [])
+        )
+        return devices, activities
+
+    def preflight_restore_bundle(self, payload: Any) -> dict[str, int]:
+        """Check a ``hub_bundle`` the way a restore would, without writing.
+
+        The facade runs this before ``erase()`` on a replace restore, so a
+        bundle the restore would refuse can never cost the hub its
+        configuration. Raises ``ValueError``; returns the entity counts.
+        """
+
+        devices, activities = self._restore_bundle_preflight(payload)
+        return {
+            "devices": sum(1 for d in devices if isinstance(d, dict)),
+            "activities": sum(1 for a in activities if isinstance(a, dict)),
+        }
+
     def restore_hub_bundle(
         self,
         payload: dict[str, Any],
@@ -1699,42 +1777,12 @@ class RestoreMixin:
             if callable(progress_callback):
                 progress_callback(**progress_payload)
 
-        if not isinstance(payload, dict):
-            raise ValueError("restore_hub_bundle payload must be a dict")
-        if payload.get("kind") != "hub_bundle":
-            raise ValueError(
-                "restore_hub_bundle expects kind == 'hub_bundle'"
-            )
-        if int(payload.get("schema_version", 0)) != HUB_BUNDLE_SCHEMA_VERSION:
-            raise ValueError(
-                "restore_hub_bundle payload schema_version must be "
-                f"{HUB_BUNDLE_SCHEMA_VERSION} "
-                f"(got {payload.get('schema_version')!r})"
-            )
-        # Bundles without a payload_profile predate the marker and are full
-        # backups by definition; an explicitly structural bundle carries no
-        # command payloads and must never be replayed onto a hub.
-        profile = str(payload.get("payload_profile") or PAYLOAD_PROFILE_FULL)
-        if profile != PAYLOAD_PROFILE_FULL:
-            raise ValueError(
-                f"restore_hub_bundle payload_profile is {profile!r}: "
-                "structural cache bundles carry no command payloads and "
-                "cannot be restored -- export a full backup instead"
-            )
+        devices, activities = self._restore_bundle_preflight(payload)
         if not self.can_issue_commands():
             self._log.info(
                 "[RESTORE] restore_hub_bundle ignored: proxy client is connected"
             )
             return {"status": "failed", "failed_at": ["proxy", None]}
-
-        devices = list(payload.get("devices") or [])
-        # Cross-activity references (chain steps) need the target's
-        # hub-assigned id before the referencing activity is written, so
-        # restore in dependency order. Cycles cannot be ordered — fail
-        # the whole bundle up front with the offending ids.
-        activities = self._sort_bundle_activities_for_restore(
-            list(payload.get("activities") or [])
-        )
         total_steps = int(progress_total_steps or (progress_offset + len(devices) + len(activities)))
         completed_steps = int(progress_offset)
 

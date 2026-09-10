@@ -74,6 +74,8 @@ class FakeProxy:
         self.learn_cancels = 0
         self.backups: list = []
         self.restores: list = []
+        self.restore_failure: Optional[dict] = None
+        self.restore_gate: Optional[asyncio.Event] = None
         self.activities_data = [
             Activity(activity_id=101, name="Watch TV", active=False, needs_confirm=False),
             Activity(activity_id=102, name="Music", active=False, needs_confirm=False),
@@ -366,8 +368,15 @@ class FakeProxy:
         if self.refuse:
             raise HubBusyError("an app client holds the hub")
         self.restores.append({"bundle": bundle, "replace": replace})
-        return RestoreResult(status="success", failed_at=None, device_id_map={1: 9}, restored_devices=1,
-                             restored_activities=0, snapshot_id=(await self.snapshot()).snapshot_id)
+        if self.restore_gate is not None:
+            await self.restore_gate.wait()
+        if self.restore_failure is not None:
+            return RestoreResult.from_engine(self.restore_failure, snapshot_id=(await self.snapshot()).snapshot_id)
+        # The engine's real shape: lists of per-entity records.
+        return RestoreResult.from_engine(
+            {"status": "success", "device_id_map": {"1": 9},
+             "restored_devices": [{"source_device_id": 1, "device_id": 9}], "restored_activities": []},
+            snapshot_id=(await self.snapshot()).snapshot_id)
 
     async def erase(self, *, timeout=120.0):
         await self._intent("erase")

@@ -184,16 +184,31 @@ class JobRunner:
         job.task.cancel()
         return job.view
 
-    async def shutdown(self) -> None:
-        """Cancel whatever is running (server stop)."""
+    async def shutdown(self, *, drain_timeout: float = 900.0) -> None:
+        """Server stop: cancel cancellable jobs, DRAIN the others.
+
+        A restore or a sync marked not cancellable keeps writing in its
+        executor thread whatever happens to the task, so cancelling it
+        would only let the lifespan stop the proxy underneath it (review
+        of 635ecfe, finding 3). Such jobs are awaited, up to
+        ``drain_timeout`` seconds each, before the hubs go down.
+        """
 
         for job in list(self._jobs.values()):
-            if job.task is not None and not job.task.done():
+            if job.task is None or job.task.done():
+                continue
+            if job.view.cancellable:
                 job.task.cancel()
-                try:
-                    await job.task
-                except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                    pass
+            else:
+                log.info("shutdown: waiting for job %s (%s) on hub %s to finish",
+                         job.view.job_id, job.view.kind, job.view.hub_id)
+            try:
+                await asyncio.wait_for(asyncio.shield(job.task), drain_timeout)
+            except asyncio.TimeoutError:
+                log.warning("shutdown: job %s (%s) did not finish within %.0fs; giving up on it",
+                            job.view.job_id, job.view.kind, drain_timeout)
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
 
     def _forget_old(self, hub_id: str) -> None:
         ids = self._by_hub.get(hub_id)

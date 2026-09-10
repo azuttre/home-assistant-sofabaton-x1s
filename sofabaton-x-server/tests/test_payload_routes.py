@@ -165,3 +165,52 @@ def test_backup_restore_and_erase_jobs(tmp_path: Path) -> None:
         for path in ("/backup", "/erase", "/learn"):
             r = client.post(f"{H}{path}")
             assert r.status_code == 409 and r.json()["type"] == "hub_busy", path
+
+
+def test_failed_restore_is_a_failed_job_with_the_result(tmp_path: Path) -> None:
+    # Review of 635ecfe, finding 5: a valid-but-failed RestoreResult used to
+    # complete the job with error=null.
+    client, factory = _rig(tmp_path)
+    with client:
+        client.post(HUBS, json={"host": HOST})
+        proxy = factory.latest(HOST)
+        proxy.restore_failure = {"status": "failed", "failed_at": ["device", 3], "device_id_map": {},
+                                 "restored_devices": [], "restored_activities": []}
+        r = client.post(f"{H}/restore", json={"bundle": {"kind": "hub_bundle"}})
+        job = _wait(client, r.json()["job_id"])
+        assert job["status"] == "failed"
+        assert job["error"]["type"] == "restore_failed" and job["error"]["status"] == 409
+        assert job["result"]["failed_at"] == ["device", 3] and job["result"]["restored_devices"] == 0
+
+        proxy.restore_failure = {"status": "failed", "failed_at": ["activity", 101], "device_id_map": {"1": 9},
+                                 "restored_devices": [{"source_device_id": 1, "device_id": 9}], "restored_activities": []}
+        r = client.post(f"{H}/restore", json={"bundle": {"kind": "hub_bundle"}})
+        job = _wait(client, r.json()["job_id"])
+        assert job["error"]["status"] == 502 and "1 device(s)" in job["error"]["detail"]
+        assert job["result"]["device_id_map"] == {"1": 9} and job["result"]["restored_devices"] == 1
+
+        proxy.restore_failure = {"status": "failed", "failed_at": ["proxy", None]}
+        r = client.post(f"{H}/restore", json={"bundle": {"kind": "hub_bundle"}})
+        job = _wait(client, r.json()["job_id"])
+        assert job["error"]["status"] == 409 and job["result"]["failed_at"] == ["proxy", None]
+
+
+def test_disable_and_remove_are_refused_while_a_job_holds_the_hub(tmp_path: Path) -> None:
+    # Review of 635ecfe, finding 3: disable used to release the proxy under
+    # a running (non-cancellable) restore.
+    client, factory = _rig(tmp_path)
+    with client:
+        client.post(HUBS, json={"host": HOST})
+        proxy = factory.latest(HOST)
+        proxy.restore_gate = client.portal.call(asyncio.Event)
+        r = client.post(f"{H}/restore", json={"bundle": {"kind": "hub_bundle"}})
+        job_id = r.json()["job_id"]
+        _wait(client, job_id, status=("running",))
+        r = client.post(f"{H}/disable")
+        assert r.status_code == 409 and r.json()["type"] == "hub_job_running"
+        r = client.delete(f"{H}")
+        assert r.status_code == 409 and r.json()["type"] == "hub_job_running"
+        assert proxy.stops == [] and client.get(f"{H}/jobs/{job_id}").json()["status"] == "running"
+        client.portal.call(proxy.restore_gate.set)
+        assert _wait(client, job_id)["status"] == "done"
+        assert client.post(f"{H}/disable").status_code == 200

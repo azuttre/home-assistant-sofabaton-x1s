@@ -273,17 +273,25 @@ class FakeProxy:
         return {"kind": "hub_bundle", "payload_profile": "full_backup" if include_blobs else "structural",
                 "devices": [], "activities": []}
 
+    def preflight_restore_bundle(self, payload):
+        self.write_calls.append(("preflight", payload.get("tag")))
+        if payload.get("schema_version", 1) != 1:
+            raise ValueError("bad schema")
+        return {"devices": 1, "activities": 1}
+
     def restore_hub_bundle(self, payload, *, progress_callback=None, **kwargs):
         self.write_calls.append(("restore", payload.get("tag")))
         if progress_callback is not None:
             progress_callback(status="running", phase="device", message="Restoring…",
                               completed_steps=0, total_steps=2)
         if self.reject:
+            # The engine's shape: lists of per-entity records, not counts.
             return {"status": "failed", "failed_at": ["device", 3], "device_id_map": {"3": 9},
-                    "restored_devices": 0, "restored_activities": 0}
+                    "restored_devices": [], "restored_activities": []}
         self._ready["devices"] = {**self._catalog("device"), 9: {"name": "Restored"}}
         return {"status": "success", "device_id_map": {"3": 9},
-                "restored_devices": 1, "restored_activities": 1}
+                "restored_devices": [{"source_device_id": 3, "device_id": 9}],
+                "restored_activities": [{"source_activity_id": 101, "activity_id": 101}]}
 
     def request_ir_command_dump(self, device_id, command_id=None, *, timeout=10.0):
         self.write_calls.append(("dump", device_id, command_id))
@@ -2079,14 +2087,25 @@ def test_backup_and_restore_typed_results_and_replace() -> None:
         assert isinstance(result, models.RestoreResult) and result.ok
         assert result.device_id_map == {3: 9} and result.restored_devices == 1
         assert result.snapshot_id == (await proxy.snapshot()).snapshot_id
-        # replace=True erased first, then restored.
+        # replace=True: preflight, THEN erase, then restore.
         kinds = [c[0] for c in fake.write_calls]
-        assert kinds == ["backup", "erase", "restore"]
+        assert kinds == ["backup", "preflight", "erase", "restore"]
+        assert result.restored["devices"][0]["device_id"] == 9
+        # A bundle the restore would refuse never reaches the erase.
+        fake.write_calls.clear()
+        try:
+            await proxy.restore({"kind": "hub_bundle", "tag": "bad", "schema_version": 999}, replace=True)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("an invalid bundle must be refused")
+        assert [c[0] for c in fake.write_calls] == ["preflight"]
 
         fake.reject = True
         failed = await proxy.restore({"kind": "hub_bundle", "tag": "b"})
-        assert not failed.ok and failed.failed_at == ("device", 3)
+        assert not failed.ok and failed.failed_at == ("device", 3) and failed.wrote_nothing
         assert failed.to_dict()["failed_at"] == ["device", 3]
+        assert models.RestoreResult.from_engine({"status": "failed", "failed_at": ["proxy", None]}, snapshot_id=None).failed_at == ("proxy", None)
 
     asyncio.run(main())
 
@@ -2183,5 +2202,52 @@ def test_sync_progress_is_typed_write_progress_with_entity() -> None:
         assert [p.phase for p in seen] == ["stale_check", "writing"]
         assert seen[1].step_kind == "device_rename" and seen[1].entity_id == 5
         assert not result.ok and not result.wrote_nothing and result.completed_steps == 1
+
+    asyncio.run(main())
+
+
+def test_refresh_cancel_drains_the_in_flight_read_before_releasing_the_hub() -> None:
+    # Review of 635ecfe, finding 4: a cancelled refresh used to release the
+    # lock (and the job) while the engine thread was still reading.
+    async def main():
+        started, release, completed = threading.Event(), threading.Event(), threading.Event()
+
+        class Slow(FakeProxy):
+            def backup_device(self, device_id, **kwargs):
+                if device_id == 5:
+                    started.set()
+                    assert release.wait(10)
+                    completed.set()
+                return super().backup_device(device_id, **kwargs)
+
+        fake = Slow()
+        fake._ready["devices"] = {5: {"name": "TV"}, 7: {"name": "Amp"}}
+        fake._ready["activities"] = {}
+        proxy = _wrap(fake)
+
+        async def catalog(**kwargs):
+            return []
+
+        proxy.devices = proxy.activities = catalog     # skip the catalog bursts
+        task = asyncio.ensure_future(proxy.refresh())
+        assert await asyncio.get_running_loop().run_in_executor(None, started.wait, 2)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        # Still draining: the lock is held, the task is not done, nothing else runs.
+        assert proxy._refresh_lock.locked() and not task.done() and not completed.is_set()
+        second = asyncio.ensure_future(proxy.refresh(device_id=7))
+        await asyncio.sleep(0.05)
+        assert not second.done()
+        release.set()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        assert completed.is_set()                      # the read landed before the task ended
+        # The loop stopped between entities: device 7 was read by the SECOND
+        # refresh only, which took the lock the moment the first released it.
+        await asyncio.wait_for(second, 2)
+        assert not proxy._refresh_lock.locked()
+        assert [c[1] for c in fake.backup_calls] == [5, 7]
 
     asyncio.run(main())

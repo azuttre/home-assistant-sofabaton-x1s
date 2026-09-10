@@ -29,7 +29,7 @@ from sofabaton import AsyncXProxy, IrPayload
 from . import API_PREFIX
 from .jobs import JobView
 from .models import Problem
-from .problems import ApiProblem, hub_errors
+from .problems import ApiProblem, RestoreFailed, hub_errors
 from .routes_edit import IF_MATCH, _proxy, _require_control, _row_edit, _check_if_match
 from .routes_hub_data import Accepted
 from .routes_snapshot import header_of, start_job
@@ -232,6 +232,8 @@ async def restore_hub(request: Request, hub_id: str, body: RestoreRequest,
 
     async def run(progress) -> dict[str, Any]:
         result = await proxy.restore(body.bundle, replace=body.replace, progress=progress)
+        if not result.ok:
+            raise RestoreFailed(result)
         return result.to_dict()
 
     return start_job(request, hub_id, "restore", run, cancellable=False)

@@ -58,6 +58,21 @@ class SyncFailed(RuntimeError):
         self.job_result = result.to_dict()
 
 
+class RestoreFailed(RuntimeError):
+    """A restore ran and the engine reported a failure (``RestoreResult.status == "failed"``).
+
+    502 when entities were restored before the failure (the hub holds a
+    partial restore; the rebased snapshot shows it), 409 when nothing
+    was written. The ``RestoreResult`` rides on the job as its ``result``.
+    """
+
+    def __init__(self, result) -> None:
+        where = result.failed_at
+        super().__init__(f"restore failed at {where[0] if where else 'unknown'} {where[1] if where else ''}".rstrip())
+        self.result = result
+        self.job_result = result.to_dict()
+
+
 class ApiProblem(Exception):
     def __init__(
         self,
@@ -129,6 +144,15 @@ def problem_for(err: BaseException, hub_id: str) -> Optional[ApiProblem]:
         return ApiProblem(409, "entity_not_editable", "The entity was never read in full", detail=str(err), hub_id=hub_id)
     if isinstance(err, IrLearnError):
         return ApiProblem(409, "ir_learn_failed", "No IR code was captured", detail=str(err), hub_id=hub_id)
+    if isinstance(err, RestoreFailed):
+        status = 409 if err.result.wrote_nothing else 502
+        where = err.result.failed_at
+        detail = (f"failed at {where[0]} {where[1]}" if where and where[1] is not None
+                  else f"failed at {where[0]}" if where else "failed")
+        return ApiProblem(status, "restore_failed", "The restore did not complete",
+                          detail=f"{detail}; {err.result.restored_devices} device(s) and "
+                                 f"{err.result.restored_activities} activity(ies) were restored first",
+                          hub_id=hub_id)
     if isinstance(err, SyncFailed):
         status = 409 if err.result.wrote_nothing else 502
         return ApiProblem(status, "sync_failed", "The hub did not take the edit",

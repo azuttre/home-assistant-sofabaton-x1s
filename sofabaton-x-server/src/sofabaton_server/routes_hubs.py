@@ -16,6 +16,22 @@ def manager_of(request: Request) -> HubManager:
     return request.app.state.hub_manager
 
 
+def _refuse_while_job_runs(request: Request, hub_id: str) -> None:
+    """A disable or remove must not pull the proxy from under a running
+    job (a restore keeps writing in its executor thread; review of
+    635ecfe, finding 3). Cancel or wait for the job first."""
+
+    runner = getattr(request.app.state, "job_runner", None)
+    active = runner.active(hub_id) if runner is not None else None
+    if active is not None and active.status in ("queued", "running"):
+        raise ApiProblem(
+            409, "hub_job_running", "A job holds the hub",
+            detail=f"job {active.job_id} ({active.kind}) is {active.status}; "
+                   f"{'cancel it or ' if active.cancellable else ''}wait for it to finish",
+            hub_id=hub_id,
+        )
+
+
 @router.get("", operation_id="listHubs", response_model=list[HubView], summary="List configured hubs")
 async def list_hubs(request: Request) -> list[HubView]:
     return await manager_of(request).views()
@@ -56,8 +72,9 @@ async def get_hub(request: Request, hub_id: str) -> HubView:
 
 
 @router.delete("/{hub_id}", operation_id="removeHub", status_code=status.HTTP_204_NO_CONTENT,
-               summary="Forget a hub (stops and releases it first)", responses={404: {"model": Problem}})
+               summary="Forget a hub (stops and releases it first)", responses={404: {"model": Problem}, 409: {"model": Problem}})
 async def remove_hub(request: Request, hub_id: str) -> Response:
+    _refuse_while_job_runs(request, hub_id)
     try:
         await manager_of(request).remove(hub_id)
     except HubNotFound:
@@ -80,8 +97,9 @@ async def enable_hub(request: Request, hub_id: str) -> HubView:
 
 @router.post("/{hub_id}/disable", operation_id="disableHub", response_model=HubView,
              summary="Disconnect a hub but keep its configuration",
-             responses={404: {"model": Problem}})
+             responses={404: {"model": Problem}, 409: {"model": Problem}})
 async def disable_hub(request: Request, hub_id: str) -> HubView:
+    _refuse_while_job_runs(request, hub_id)
     manager = manager_of(request)
     try:
         await manager.disable(hub_id)

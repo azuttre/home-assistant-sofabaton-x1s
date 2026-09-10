@@ -705,3 +705,69 @@ def test_key_sort_timeout_on_a_network_device_records_an_empty_row() -> None:
     assert export._key_sort_row_or_fallback(1, None, None) is None          # class unknown: no guess
     row = {"device_id": 1, "msg_hex": "01 ff"}
     assert export._key_sort_row_or_fallback(1, "wifi_sonos", row) is row    # a reply always wins
+
+
+# ---------------------------------------------------------------------------
+# restore: preflight before erase, and the engine's real result shape
+# (review of 635ecfe, findings 1 and 2)
+# ---------------------------------------------------------------------------
+
+
+def _full_bundle(**extra) -> dict:
+    export = importlib.import_module(f"{_pkg.__name__}.backup_export")
+    return {
+        "kind": "hub_bundle", "schema_version": export.HUB_BUNDLE_SCHEMA_VERSION,
+        "payload_profile": "full_backup",
+        "devices": [{"kind": "device_backup", "schema_version": export.DEVICE_BACKUP_SCHEMA_VERSION,
+                     "device": {"device_id": 5, "name": "TV", "device_class": "ir"}, "commands": []}],
+        "activities": [],
+        **extra,
+    }
+
+
+def test_restore_preflight_rejects_a_bad_bundle_before_any_write(monkeypatch) -> None:
+    async def main():
+        engine = _engine()
+        _hub_link(engine, True)
+        writes = []
+        monkeypatch.setattr(engine, "erase_configuration", lambda **kw: writes.append("erase") or True)
+        monkeypatch.setattr(engine, "restore_device", lambda payload, **kw: writes.append("restore_device") or {"status": "success", "device_id": 9})
+        monkeypatch.setattr(engine, "resync_remote", lambda *a, **kw: True)
+        proxy = aio.AsyncXProxy.wrap(engine)
+        bad = [
+            _full_bundle(schema_version=999),
+            _full_bundle(payload_profile="structural"),
+            {**_full_bundle(), "devices": [{"kind": "device_backup", "schema_version": 999, "device": {"device_id": 5}}]},
+            {**_full_bundle(), "devices": [{"kind": "device_backup", "schema_version": 1, "device": {"device_id": 5, "device_class": "no_such_class"}}]},
+        ]
+        for bundle in bad:
+            try:
+                await proxy.restore(bundle, replace=True)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(f"must refuse {bundle}")
+        assert writes == []                              # never erased, never restored
+        assert _pending_local_bytes(engine) == 0
+
+    asyncio.run(main())
+
+
+def test_restore_adapts_the_engine_result_shape(monkeypatch) -> None:
+    async def main():
+        engine = _engine()
+        _hub_link(engine, True)
+        monkeypatch.setattr(engine, "restore_device", lambda payload, **kw: {"status": "success", "device_id": 9, "restored_commands": 0})
+        monkeypatch.setattr(engine, "resync_remote", lambda *a, **kw: True)
+        proxy = aio.AsyncXProxy.wrap(engine)
+        result = await proxy.restore(_full_bundle())      # the REAL restore_hub_bundle
+        assert result.ok and result.restored_devices == 1 and result.restored_activities == 0
+        assert result.device_id_map == {5: 9} and result.restored["devices"][0]["device_id"] == 9
+        assert result.to_dict()["restored_devices"] == 1
+
+        # A first-entity failure keeps the counts honest and is not a success.
+        monkeypatch.setattr(engine, "restore_device", lambda payload, **kw: None)
+        failed = await proxy.restore(_full_bundle())
+        assert not failed.ok and failed.failed_at == ("device", 5) and failed.wrote_nothing
+
+    asyncio.run(main())

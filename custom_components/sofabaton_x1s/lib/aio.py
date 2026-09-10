@@ -355,6 +355,7 @@ class AsyncXProxy:
             "erase_configuration",
             "backup_hub_bundle",
             "restore_hub_bundle",
+            "preflight_restore_bundle",
             "request_ir_command_dump",
             "play_ir_blob",
             "ir_learn_command",
@@ -1553,6 +1554,10 @@ class AsyncXProxy:
         if not isinstance(bundle, dict) or bundle.get("kind") != "hub_bundle":
             raise ValueError("restore() takes a hub_bundle document")
         self._raise_if_cannot_fetch("restore")
+        # Every check the restore would fail on runs BEFORE the erase, so a
+        # bad bundle can never cost the hub its configuration (review of
+        # 635ecfe, finding 1). Raises ValueError; nothing is written.
+        await self.run(self._proxy.preflight_restore_bundle, bundle)
         if replace:
             await self.erase()
         async with self._refresh_lock:
@@ -1754,7 +1759,7 @@ class AsyncXProxy:
             self._raise_if_cannot_fetch(f"{kind}:{ent_lo}")
             report(phase=kind, message=f"Refreshing {kind} {ent_lo}…",
                    completed_steps=0, total_steps=1, **{f"current_{kind}_id": ent_lo})
-            payload = await self._read_entity_detail(kind, ent_lo, timeout)
+            payload = await self._read_entity_detail_draining(kind, ent_lo, timeout)
             report(phase="finalizing", message=f"Refreshed {kind} {ent_lo}.",
                    completed_steps=1, total_steps=1, **{f"current_{kind}_id": ent_lo})
         if payload is None:
@@ -1789,9 +1794,19 @@ class AsyncXProxy:
                     report(phase=kind, message=f"Refreshing {kind} {ent_lo}…",
                            completed_steps=done, total_steps=total,
                            **{f"current_{kind}_id": ent_lo})
-                    payload = await self._read_entity_detail(
-                        kind, ent_lo, timeout, refresh_catalog=False
-                    )
+                    try:
+                        payload = await self._read_entity_detail_draining(
+                            kind, ent_lo, timeout, refresh_catalog=False
+                        )
+                    except asyncio.CancelledError:
+                        # The entity in flight has landed; publish what the
+                        # hub gave us before stopping between entities.
+                        snap = await asyncio.shield(self.snapshot(_announce=False))
+                        self._announce_snapshot(
+                            snap, tuple(device_ids[: done + 1]) if kind == "device" else tuple(device_ids),
+                            () if kind == "device" else tuple(activity_ids[: done - len(device_ids) + 1]),
+                        )
+                        raise
                     if payload is None:
                         self._log_unknown_entity(kind, ent_lo)
                     done += 1
@@ -1800,6 +1815,32 @@ class AsyncXProxy:
         snap = await self.snapshot(_announce=False)
         self._announce_snapshot(snap, tuple(device_ids), tuple(activity_ids))
         return snap
+
+    async def _read_entity_detail_draining(
+        self, kind: str, ent_lo: int, timeout: float, *, refresh_catalog: bool = True
+    ) -> Any:
+        """One entity read that a cancellation cannot abandon mid-flight.
+
+        The read runs in the executor; cancelling the awaiting task does
+        not stop that thread. Without this, a cancelled refresh released
+        ``_refresh_lock`` (and the server freed the hub) while the engine
+        was still issuing requests and changing the cache (review of
+        635ecfe, finding 4). The read is shielded; on cancellation the
+        caller waits for it to land, then re-raises, so the lock is held
+        until the hub is quiet and the loop stops before the next entity.
+        """
+
+        read = asyncio.ensure_future(
+            self._read_entity_detail(kind, ent_lo, timeout, refresh_catalog=refresh_catalog)
+        )
+        try:
+            return await asyncio.shield(read)
+        except asyncio.CancelledError:
+            try:
+                await read
+            except BaseException:  # noqa: BLE001  (the read's own failure is not ours to report)
+                pass
+            raise
 
     async def _read_entity_detail(
         self, kind: str, ent_lo: int, timeout: float, *, refresh_catalog: bool = True
