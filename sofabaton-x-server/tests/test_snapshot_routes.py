@@ -50,7 +50,7 @@ def test_snapshot_document_and_etag(tmp_path: Path) -> None:
         r = client.get(f"{HUBS}/{HOST}/snapshot")
         assert r.status_code == 200
         doc = r.json()
-        assert r.headers["ETag"] == f'"{doc["snapshot_id"]}"' and len(doc["snapshot_id"]) == 64
+        assert r.headers["ETag"].startswith(f'"{doc["snapshot_id"]}.') and len(doc["snapshot_id"]) == 64
         assert doc["complete"] is False and doc["payload_profile"] == "structural"
         assert [d["device"]["device_id"] for d in doc["devices"]] == [1, 2]
         assert doc["devices"][0]["editable"] is True and doc["devices"][1]["editable"] is False
@@ -179,3 +179,76 @@ def test_refresh_refused_up_front_and_failed_job_carries_a_problem(tmp_path: Pat
 
         r = client.post(f"{HUBS}/{HOST}/snapshot/refresh", json={"device_id": 1, "activity_id": 101})
         assert r.status_code == 422 and r.json()["type"] == "invalid_request"
+
+
+def test_repeated_cancel_does_not_cut_into_the_drain(tmp_path: Path) -> None:
+    # Review of ce9f205, P2: DELETE twice while the refresh finishes its
+    # in-flight entity is accepted and cancels nothing a second time.
+    client, factory = _rig(tmp_path)
+    with client:
+        client.post(HUBS, json={"host": HOST})
+        proxy = factory.latest(HOST)
+        proxy.refresh_gate = client.portal.call(asyncio.Event)
+        proxy.drain_gate = client.portal.call(asyncio.Event)
+        job_id = client.post(f"{HUBS}/{HOST}/snapshot/refresh").json()["job_id"]
+        _wait_job(client, HOST, job_id, status=("running",))
+
+        assert client.delete(f"{HUBS}/{HOST}/jobs/{job_id}").status_code == 200
+        again = client.delete(f"{HUBS}/{HOST}/jobs/{job_id}")
+        assert again.status_code == 200 and again.json()["status"] == "running"
+        assert proxy.cancellations == 1
+        assert client.get(f"{HUBS}/{HOST}/jobs/{job_id}").json()["status"] == "running"
+
+        client.portal.call(proxy.drain_gate.set)
+        done = _wait_job(client, HOST, job_id)
+        assert done["status"] == "cancelled" and proxy.cancellations == 1
+        assert client.delete(f"{HUBS}/{HOST}/jobs/{job_id}").json()["type"] == "job_not_cancellable"
+
+
+def test_etag_changes_with_provenance_but_the_revision_does_not(tmp_path: Path) -> None:
+    # Review of ce9f205, P3: a client polling with If-None-Match kept its
+    # old provenance (fetch stamps, completeness) after a refresh whose
+    # content came back identical.
+    client, factory = _rig(tmp_path)
+    with client:
+        client.post(HUBS, json={"host": HOST})
+        proxy = factory.latest(HOST)
+        proxy.fetched = {1, 2}
+        r = client.get(f"{HUBS}/{HOST}/snapshot")
+        doc, etag = r.json(), r.headers["ETag"]
+        assert doc["devices"][0]["fetched_at"] is None
+        assert client.get(f"{HUBS}/{HOST}/snapshot", headers={"If-None-Match": etag}).status_code == 304
+
+        proxy.fetched_at = {1: "2026-09-10T10:00:00Z"}         # a re-read landed; content unchanged
+        r2 = client.get(f"{HUBS}/{HOST}/snapshot", headers={"If-None-Match": etag})
+        assert r2.status_code == 200
+        doc2, etag2 = r2.json(), r2.headers["ETag"]
+        assert doc2["snapshot_id"] == doc["snapshot_id"] and etag2 != etag
+        assert doc2["devices"][0]["fetched_at"] == "2026-09-10T10:00:00Z"
+        assert client.get(f"{HUBS}/{HOST}/snapshot", headers={"If-None-Match": etag2}).status_code == 304
+        # A weak validator and a list of validators are understood too.
+        assert client.get(f"{HUBS}/{HOST}/snapshot", headers={"If-None-Match": f'"x", W/{etag2}'}).status_code == 304
+
+        # Another entity's stamp moving is a new representation as well.
+        proxy.fetched_at = {1: "2026-09-10T10:00:00Z", 2: "2026-09-10T10:01:00Z"}
+        r3 = client.get(f"{HUBS}/{HOST}/snapshot", headers={"If-None-Match": etag2})
+        assert r3.status_code == 200 and r3.headers["ETag"] not in (etag, etag2)
+
+def test_if_match_takes_the_revision_or_the_etag(tmp_path: Path) -> None:
+    # Edits compare the content revision only: the quoted snapshot_id (the
+    # documented form) and the full ETag both match; provenance is ignored.
+    from sofabaton_server.routes_snapshot import _matches
+
+    client, factory = _rig(tmp_path)
+    with client:
+        client.post(HUBS, json={"host": HOST})
+        proxy = factory.latest(HOST)
+        proxy.fetched = {1, 2}
+        r = client.get(f"{HUBS}/{HOST}/snapshot")
+        sid, etag = r.json()["snapshot_id"], r.headers["ETag"]
+        assert _matches(f'"{sid}"', sid) and _matches(etag, sid) and _matches(f'W/{etag}', sid)
+        assert _matches(f'"other", {etag}', sid) and _matches("*", sid)
+        assert not _matches('"stale"', sid) and not _matches(None, sid) and not _matches(f'"{sid[:-1]}x"', sid)
+        proxy.fetched_at = {1: "2026-09-10T10:00:00Z"}
+        r2 = client.get(f"{HUBS}/{HOST}/snapshot")
+        assert r2.headers["ETag"] != etag and _matches(etag, r2.json()["snapshot_id"])

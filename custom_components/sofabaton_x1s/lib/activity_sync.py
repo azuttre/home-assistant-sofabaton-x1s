@@ -519,7 +519,7 @@ def _assert_in_scope(baseline: Mapping[str, Any], edited: Mapping[str, Any], act
 # config — two captures of the same hub state must produce equal signatures.
 _DEVICE_SYNC_MUTABLE_KEYS = frozenset({"macros", "button_bindings", "input_record"})
 _DEVICE_SYNC_VOLATILE_KEYS = frozenset(
-    {"captured_at", "fetched_at", "complete", "payload_profile", "key_sort", "stale_risk", "editable"}
+    {"captured_at", "fetched_at", "complete", "payload_profile", "key_sort", "editable"}
 )
 
 

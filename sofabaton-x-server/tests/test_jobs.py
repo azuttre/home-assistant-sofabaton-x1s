@@ -63,3 +63,36 @@ def test_shutdown_gives_up_on_a_stuck_job_after_the_drain_timeout() -> None:
         assert job.status == "done"
 
     asyncio.run(main())
+
+
+def test_cancel_is_idempotent_while_the_job_drains() -> None:
+    # Review of ce9f205, P2: a second cancel must not cut into the drain.
+    async def main():
+        runner = JobRunner(problem_for=problem_body)
+        drained = asyncio.Event()
+        cancels, hooks = [], []
+
+        async def refresh(progress):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancels.append(1)
+                await asyncio.shield(drained.wait())   # unshielded against a 2nd cancel on purpose
+                raise
+
+        async def on_cancel():
+            hooks.append(1)
+
+        job = runner.start("hub", "refresh", refresh, cancellable=True, on_cancel=on_cancel)
+        await asyncio.sleep(0.01)
+        first = await runner.cancel("hub", job.job_id)
+        await asyncio.sleep(0.01)
+        second = await runner.cancel("hub", job.job_id)
+        await asyncio.sleep(0.01)
+        assert first is second and job.status == "running"    # still draining, reported honestly
+        assert cancels == [1] and hooks == [1]                  # the task was cancelled once
+        drained.set()
+        await asyncio.sleep(0.01)
+        assert job.status == "cancelled" and runner.active("hub") is None
+
+    asyncio.run(main())

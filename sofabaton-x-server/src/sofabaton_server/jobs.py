@@ -75,6 +75,7 @@ class _Job:
     view: JobView
     task: Optional[asyncio.Task] = None
     on_cancel: Optional[Callable[[], Awaitable[Any]]] = None
+    cancel_requested: bool = False
 
 
 class JobRunner:
@@ -176,6 +177,14 @@ class JobRunner:
             raise JobNotFound(job_id)
         if job.view.status not in ACTIVE or not job.view.cancellable or job.task is None:
             raise JobNotCancellable(job_id)
+        if job.cancel_requested:
+            # Already cancelling: the job is draining its in-flight work
+            # (a refresh finishes the entity being read before it releases
+            # the hub). Cancelling the task again would cut into that
+            # drain (review of ce9f205, P2); the request is honoured
+            # already, so report the state and change nothing.
+            return job.view
+        job.cancel_requested = True
         if job.on_cancel is not None:
             try:
                 await job.on_cancel()

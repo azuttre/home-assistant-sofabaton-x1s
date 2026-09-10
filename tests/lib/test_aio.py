@@ -65,7 +65,6 @@ class FakeProxy:
             self.activity_names: dict[int, str] = {}
             # Snapshot provenance mirrors (phase 3 W0).
             self.detail_fetched_at: dict[str, dict[int, str]] = {"device": {}, "activity": {}}
-            self.detail_stale_risk: dict[str, set[int]] = {"device": set(), "activity": set()}
             self.generation = 0
 
         def get_activity_favorite_labels(self, act_lo):
@@ -150,7 +149,6 @@ class FakeProxy:
         stamp = self.state.detail_fetched_at[kind].get(ent)
         if stamp:
             payload["fetched_at"] = stamp
-        payload["stale_risk"] = ent in self.state.detail_stale_risk[kind]
         payload["editable"] = payload["complete"]
         return payload
 
@@ -175,7 +173,6 @@ class FakeProxy:
             return None
         self.detail[kind][ent] = list(self.pending_detail[kind].get(ent, []))
         self.state.detail_fetched_at[kind][ent] = f"stamp-{len(self.backup_calls)}"
-        self.state.detail_stale_risk[kind].discard(ent)
         self.bump_cache_generation()
         return self._entity_payload(kind, ent)
 
@@ -187,14 +184,6 @@ class FakeProxy:
     def backup_activity(self, activity_id, *, wait_timeout=10.0, refresh_catalog=True):
         return self._backup("activity", activity_id & 0xFF, refresh_catalog)
 
-    def mark_detail_stale_risk(self, kind=None, ent_id=None) -> None:
-        kinds = ("device", "activity") if kind is None else (kind,)
-        for k in kinds:
-            if ent_id is None:
-                self.state.detail_stale_risk[k].update(self.state.detail_fetched_at[k])
-            else:
-                self.state.detail_stale_risk[k].add(ent_id & 0xFF)
-        self.bump_cache_generation()
 
     def export_cache_state(self) -> dict:
         import copy
@@ -202,7 +191,6 @@ class FakeProxy:
             "catalog": copy.deepcopy(self._ready),
             "detail": copy.deepcopy(self.detail),
             "detail_fetched_at": copy.deepcopy(self.state.detail_fetched_at),
-            "detail_stale_risk": {k: sorted(v) for k, v in self.state.detail_stale_risk.items()},
             "generation": self.state.generation,
         }
 
@@ -322,7 +310,6 @@ class FakeProxy:
         self._ready = copy.deepcopy(payload["catalog"])
         self.detail = copy.deepcopy(payload["detail"])
         self.state.detail_fetched_at = copy.deepcopy(payload["detail_fetched_at"])
-        self.state.detail_stale_risk = {k: set(v) for k, v in payload["detail_stale_risk"].items()}
         self.state.generation = max(self.state.generation, int(payload["generation"]))
         self.bump_cache_generation()
 
@@ -355,8 +342,6 @@ class FakeProxy:
             cb()
 
     def set_connected(self, *, hub: bool, client: bool = False) -> None:
-        if self.transport.is_client_connected and not client:
-            self.mark_detail_stale_risk()  # the engine's W1 transition flag
         self.transport.is_hub_connected = hub
         self.transport.is_client_connected = client
         self.can_issue = hub and not client
@@ -1610,9 +1595,9 @@ def test_snapshot_projects_without_fetch_and_reports_incomplete() -> None:
         assert [e.entity_id for e in snap.devices] == [5, 7]
         assert [e.entity_id for e in snap.activities] == [101]
         tv, amp = snap.devices
-        assert tv.complete and tv.editable and tv.fetched_at and not tv.stale_risk
+        assert tv.complete and tv.editable and tv.fetched_at
         assert not amp.complete and not amp.editable and amp.fetched_at is None
-        assert snap.complete is False and snap.stale_risk is False
+        assert snap.complete is False
         assert snap.entity("device", 7) is amp and snap.entity("activity", 1) is None
         doc = snap.to_dict()
         assert doc["snapshot_id"] == snap.snapshot_id and len(snap.snapshot_id) == 64
@@ -1630,12 +1615,10 @@ def test_snapshot_id_is_content_only() -> None:
         fake = _catalog_fake(fetched_devices=(5, 7), fetched_activities=(101,))
         proxy = _wrap(fake)
         base = (await proxy.snapshot()).snapshot_id
-        # Provenance never moves the id: a new fetch stamp, a stale flag.
+        # Provenance never moves the id: a new fetch stamp.
         fake.state.detail_fetched_at["device"][5] = "later"
-        fake.mark_detail_stale_risk()
         again = await proxy.snapshot()
-        assert again.snapshot_id == base and again.stale_risk is True
-        assert again.entity("device", 5).stale_risk is True
+        assert again.snapshot_id == base and again.entity("device", 5).fetched_at == "later"
         # Content does: a binding appears on a device.
         fake.detail["device"][7] = [{"button_id": 9}]
         assert (await proxy.snapshot()).snapshot_id != base
@@ -1781,10 +1764,9 @@ def test_refresh_cancel_stops_between_entities() -> None:
     asyncio.run(main())
 
 
-def test_export_import_state_round_trip_keeps_id_and_flags() -> None:
+def test_export_import_state_round_trip_keeps_id_and_stamps() -> None:
     async def main():
         source = _catalog_fake(fetched_devices=(5, 7), fetched_activities=(101,))
-        source.mark_detail_stale_risk("device", 7)
         src = _wrap(source)
         origin = await src.snapshot()
         doc = await src.export_state()
@@ -1804,7 +1786,7 @@ def test_export_import_state_round_trip_keeps_id_and_flags() -> None:
         assert event.kind == "snapshot_changed" and event.payload.device_ids == ()
         restored = await dst.snapshot()
         assert restored.snapshot_id == origin.snapshot_id
-        assert restored.complete and restored.entity("device", 7).stale_risk
+        assert restored.complete and restored.entity("device", 7).fetched_at == origin.entity("device", 7).fetched_at
         assert restored.engine_generation > origin.engine_generation
         assert target.fetch_calls == [] and target.backup_calls == []
 
@@ -1882,12 +1864,15 @@ def test_sync_guards_snapshot_id_and_editable_baseline_then_rebases() -> None:
     asyncio.run(main())
 
 
-def test_app_session_end_flags_cache_and_announces_without_fetch() -> None:
+def test_app_session_end_is_an_app_state_event_and_leaves_the_cache_alone() -> None:
+    # The hub can be edited outside this library at any time and never
+    # says so; an app session through the proxy is merely one visible
+    # occasion. It is reported as app_state, not as a snapshot change or a
+    # freshness verdict (stale_risk was removed 2026-09-10).
     async def main():
         fake = _catalog_fake(fetched_devices=(5, 7), fetched_activities=(101,))
         proxy = _wrap(fake)
         before = await proxy.snapshot()
-        assert before.stale_risk is False
 
         async def session():
             await asyncio.sleep(0.01)
@@ -1896,20 +1881,27 @@ def test_app_session_end_flags_cache_and_announces_without_fetch() -> None:
             fake.set_connected(hub=True, client=False)  # app leaves
 
         asyncio.ensure_future(session())
-        events = await _collect_until(proxy, "snapshot_changed")
-        kinds = [e.kind for e in events]
-        assert kinds.count("snapshot_changed") == 1 and "app_state" in kinds
-        changed = events[-1]
-        assert changed.payload.stale_risk is True
-        assert changed.payload.device_ids == () and changed.payload.activity_ids == ()
-        # Content did not move: same id, only provenance changed.
-        assert changed.payload.snapshot_id == before.snapshot_id
+        agen = proxy.events()
+        seen = []
+        try:
+            while not any(e.kind == "app_state" and e.payload.connected is False for e in seen):
+                seen.append(await asyncio.wait_for(agen.__anext__(), 2))
+            await asyncio.sleep(0.05)                    # anything queued behind it
+            while True:
+                try:
+                    seen.append(await asyncio.wait_for(agen.__anext__(), 0.05))
+                except asyncio.TimeoutError:
+                    break
+        finally:
+            await agen.aclose()
+        assert [e.payload.connected for e in seen if e.kind == "app_state"] == [True, False]
+        assert not any(e.kind == "snapshot_changed" for e in seen)
         after = await proxy.snapshot()
-        assert after.stale_risk and all(e.stale_risk for e in after.devices + after.activities)
+        assert after.snapshot_id == before.snapshot_id and after.engine_generation == before.engine_generation
         assert after.complete and after.entity("device", 5).editable  # detail kept
         assert fake.fetch_calls == [] and fake.backup_calls == []
 
-        # A refresh of one entity clears its flag and announces again.
+        # A refresh of one entity re-stamps it and announces.
         async def fire():
             await asyncio.sleep(0.01)
             await proxy.refresh(device_id=5)
@@ -1918,7 +1910,8 @@ def test_app_session_end_flags_cache_and_announces_without_fetch() -> None:
         (event,) = await _collect(proxy, 1)
         assert event.kind == "snapshot_changed" and event.payload.device_ids == (5,)
         latest = await proxy.snapshot()
-        assert not latest.entity("device", 5).stale_risk and latest.entity("device", 7).stale_risk
+        assert [c[1] for c in fake.backup_calls] == [5]    # only device 5 was re-read
+        assert latest.entity("device", 7).fetched_at == before.entity("device", 7).fetched_at
 
     asyncio.run(main())
 
@@ -2249,5 +2242,46 @@ def test_refresh_cancel_drains_the_in_flight_read_before_releasing_the_hub() -> 
         await asyncio.wait_for(second, 2)
         assert not proxy._refresh_lock.locked()
         assert [c[1] for c in fake.backup_calls] == [5, 7]
+
+    asyncio.run(main())
+
+
+def test_refresh_second_cancel_keeps_draining_the_in_flight_read() -> None:
+    # Review of ce9f205, P2: a second cancellation during the drain used to
+    # reach the read task, abandon the engine thread and release the lock.
+    async def main():
+        started, release, completed = threading.Event(), threading.Event(), threading.Event()
+
+        class Slow(FakeProxy):
+            def backup_device(self, device_id, **kwargs):
+                if device_id == 5:
+                    started.set()
+                    assert release.wait(10)
+                    completed.set()
+                return super().backup_device(device_id, **kwargs)
+
+        fake = Slow()
+        fake._ready["devices"] = {5: {"name": "TV"}, 7: {"name": "Amp"}}
+        fake._ready["activities"] = {}
+        proxy = _wrap(fake)
+
+        async def catalog(**kwargs):
+            return []
+
+        proxy.devices = proxy.activities = catalog
+        task = asyncio.ensure_future(proxy.refresh())
+        assert await asyncio.get_running_loop().run_in_executor(None, started.wait, 2)
+        for _ in range(3):                             # an impatient client
+            task.cancel()
+            await asyncio.sleep(0.05)
+            assert proxy._refresh_lock.locked() and not task.done() and not completed.is_set()
+        release.set()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        assert completed.is_set()                      # the read landed before the task ended
+        assert not proxy._refresh_lock.locked()
+        assert [c[1] for c in fake.backup_calls] == [5]   # stopped between entities
 
     asyncio.run(main())

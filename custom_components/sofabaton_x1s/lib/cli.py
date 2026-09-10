@@ -499,14 +499,12 @@ class AsyncShell:
             return
         print(
             f"snapshot {snap.snapshot_id[:12]}  complete={snap.complete}  "
-            f"stale_risk={snap.stale_risk}  generation={snap.engine_generation}"
+            f"generation={snap.engine_generation}"
         )
         for entity in snap.devices + snap.activities:
             flags = []
             if not entity.complete:
                 flags.append("incomplete")
-            if entity.stale_risk:
-                flags.append("stale?")
             print(
                 f"  {entity.kind:8} {entity.entity_id:4}  {entity.name or '?':30} "
                 f"{' '.join(flags) or 'editable'}"

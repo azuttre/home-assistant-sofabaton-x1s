@@ -59,6 +59,9 @@ class FakeProxy:
         self.imported: Optional[dict] = None
         self.refresh_calls: list[dict] = []
         self.refresh_gate: Optional[asyncio.Event] = None   # a refresh waits here per entity when set
+        self.drain_gate: Optional[asyncio.Event] = None     # a cancelled refresh drains here when set
+        self.fetched_at: dict[int, str] = {}                # per-entity fetch stamps (None when absent)
+        self.cancellations = 0                              # CancelledErrors the refresh received
         self.exports = 0
         self.syncs: list[dict] = []
         self.sync_failure: Optional[dict] = None          # an engine result dict a sync returns instead
@@ -185,7 +188,8 @@ class FakeProxy:
 
     def _entity(self, kind: str, entity_id: int, name: str) -> dict:
         fetched = entity_id in self.fetched
-        payload = {"kind": f"{kind}_backup", "complete": fetched, "editable": fetched, "stale_risk": False,
+        payload = {"kind": f"{kind}_backup", "complete": fetched, "editable": fetched,
+                   "fetched_at": self.fetched_at.get(entity_id),
                    "device": {"device_id": entity_id, "name": name}, "button_bindings": [], "macros": []}
         if kind == "device":
             payload["device"].update({"brand": "Acme", "device_class": "tv", "idle_behavior": 0})
@@ -203,7 +207,7 @@ class FakeProxy:
         def _row(kind, entity_id, name):
             edited = self.edited_entities.get((kind, entity_id))
             if edited is not None:
-                return {**edited, "complete": True, "editable": True, "stale_risk": False}
+                return {**edited, "complete": True, "editable": True}
             return self._entity(kind, entity_id, name)
 
         return {
@@ -222,12 +226,14 @@ class FakeProxy:
         bundle = self._bundle()
         entities = {
             "device": [SnapshotEntity(kind="device", entity_id=d.device_id, name=d.name, complete=d.device_id in self.fetched,
-                                      editable=d.device_id in self.fetched, stale_risk=False, fetched_at=None) for d in self.devices_data],
+                                      editable=d.device_id in self.fetched,
+                                      fetched_at=self.fetched_at.get(d.device_id)) for d in self.devices_data],
             "activity": [SnapshotEntity(kind="activity", entity_id=a.activity_id, name=a.name, complete=a.activity_id in self.fetched,
-                                        editable=a.activity_id in self.fetched, stale_risk=False, fetched_at=None) for a in self.activities_data],
+                                        editable=a.activity_id in self.fetched,
+                                        fetched_at=self.fetched_at.get(a.activity_id)) for a in self.activities_data],
         }
         return HubSnapshot(snapshot_id=snapshot_content_id(bundle), captured_at=bundle["captured_at"],
-                           engine_generation=self._seq, complete=bundle["complete"], stale_risk=False,
+                           engine_generation=self._seq, complete=bundle["complete"],
                            hub=bundle["hub"], devices=entities["device"], activities=entities["activity"], bundle=bundle)
 
     async def refresh(self, *, device_id=None, activity_id=None, progress=None, timeout=10.0):
@@ -241,12 +247,23 @@ class FakeProxy:
                 progress(WriteProgress(phase="device" if entity_id < 101 else "activity", message=f"Refreshing {entity_id}",
                                        completed_steps=index, total_steps=len(targets), entity_kind=None, entity_id=entity_id))
             if self.refresh_gate is not None:
-                await self.refresh_gate.wait()
+                try:
+                    await self.refresh_gate.wait()
+                except asyncio.CancelledError:
+                    # Like the library: the in-flight read lands before the
+                    # cancellation is honoured, however often it is repeated.
+                    self.cancellations += 1
+                    while self.drain_gate is not None and not self.drain_gate.is_set():
+                        try:
+                            await asyncio.shield(self.drain_gate.wait())
+                        except asyncio.CancelledError:
+                            self.cancellations += 1
+                    raise
             self.fetched.add(entity_id)
         snap = await self.snapshot()
         self.emit("snapshot_changed", SnapshotChanged(snapshot_id=snap.snapshot_id, engine_generation=self._seq,
                                                       device_ids=tuple(t for t in targets if t < 101),
-                                                      activity_ids=tuple(t for t in targets if t >= 101), stale_risk=False))
+                                                      activity_ids=tuple(t for t in targets if t >= 101)))
         return snap
 
     # -- writes (phase 3 W3) ---------------------------------------------------
@@ -276,7 +293,7 @@ class FakeProxy:
         snap = await self.snapshot()
         self.emit("snapshot_changed", SnapshotChanged(snapshot_id=snap.snapshot_id, engine_generation=self._seq,
                                                       device_ids=(entity_id,) if kind == "device" else (),
-                                                      activity_ids=(entity_id,) if kind == "activity" else (), stale_risk=False))
+                                                      activity_ids=(entity_id,) if kind == "activity" else ()))
         return SyncResult(status="success", failed_at=None, message=None, completed_steps=1, total_steps=1,
                           counters={}, snapshot_id=snap.snapshot_id)
 

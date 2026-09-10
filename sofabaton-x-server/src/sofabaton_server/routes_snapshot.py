@@ -11,6 +11,8 @@ bursts, the whole hub takes minutes and is meant as a user action.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from typing import Any, Optional
 
@@ -48,8 +50,9 @@ class EntityIdentity(BaseModel):
 class SnapshotEntityPayload(BaseModel):
     """One device or activity in the snapshot: provenance typed, tables open.
 
-    ``complete`` / ``editable`` / ``stale_risk`` / ``fetched_at`` are the
-    library's per-entity provenance; ``commands``, ``button_bindings``,
+    ``complete`` / ``editable`` / ``fetched_at`` are the library's
+    per-entity provenance (facts about the server's copy, never about
+    the hub); ``commands``, ``button_bindings``,
     ``macros``, ``favorite_slots`` and the other tables follow the
     library's ``hub_bundle`` shape and are passed through as they are.
     """
@@ -60,7 +63,6 @@ class SnapshotEntityPayload(BaseModel):
     device: EntityIdentity
     complete: bool = False
     editable: bool = False
-    stale_risk: bool = False
     fetched_at: Optional[str] = None
 
 
@@ -77,7 +79,6 @@ class SnapshotDocument(BaseModel):
     captured_at: str
     engine_generation: int
     complete: bool
-    stale_risk: bool
     payload_profile: str
     hub: dict[str, Any] = Field(default_factory=dict)
     devices: list[SnapshotEntityPayload] = Field(default_factory=list)
@@ -90,7 +91,6 @@ class SnapshotHeader(BaseModel):
     snapshot_id: str
     engine_generation: int
     complete: bool
-    stale_risk: bool
 
 
 class RefreshRequest(BaseModel):
@@ -120,26 +120,63 @@ def _proxy(request: Request, hub_id: str) -> AsyncXProxy:
         raise hub_disabled(hub_id) from None
 
 
-def _etag(snapshot_id: str) -> str:
-    return f'"{snapshot_id}"'
+def _etag(snap: HubSnapshot) -> str:
+    """The snapshot document's response validator.
+
+    ``snapshot_id`` hashes configuration content only, so it is the edit
+    revision (``If-Match``) and stays put when provenance moves. The
+    representation also carries provenance (``fetched_at``, ``complete``,
+    ``editable`` per entity), which a refresh changes without touching
+    content; a validator equal to the revision returned 304 to a client
+    whose copy had the old provenance (review of ce9f205, P3). The ETag
+    is therefore the revision plus a digest of the provenance vector.
+    """
+
+    provenance = json.dumps(
+        [snap.complete]
+        + [[e.kind, e.entity_id, e.complete, e.editable, e.fetched_at]
+           for e in (*snap.devices, *snap.activities)],
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(provenance.encode("utf-8")).hexdigest()[:12]
+    return f'"{snap.snapshot_id}.{digest}"'
 
 
-def _matches(header: Optional[str], snapshot_id: str) -> bool:
-    if not header:
-        return False
-    for token in header.split(","):
+def _tokens(header: Optional[str]) -> list[str]:
+    tokens = []
+    for token in (header or "").split(","):
         token = token.strip()
         if token.startswith("W/"):
             token = token[2:]
-        if token == "*" or token.strip('"') == snapshot_id:
+        if token:
+            tokens.append(token)
+    return tokens
+
+
+def _matches(header: Optional[str], snapshot_id: str) -> bool:
+    """``If-Match`` against the content revision.
+
+    The documented form is the quoted ``snapshot_id``; the snapshot ETag
+    (revision plus provenance digest) is accepted too, since its revision
+    part is what an edit is made on.
+    """
+
+    for token in _tokens(header):
+        if token == "*" or token.strip('"').split(".", 1)[0] == snapshot_id:
             return True
     return False
+
+
+def _etag_matches(header: Optional[str], etag: str) -> bool:
+    """``If-None-Match`` against the full validator, provenance included."""
+
+    return any(token == "*" or token == etag for token in _tokens(header))
 
 
 def header_of(snap: HubSnapshot) -> dict[str, Any]:
     return SnapshotHeader(
         snapshot_id=snap.snapshot_id, engine_generation=snap.engine_generation,
-        complete=snap.complete, stale_risk=snap.stale_risk,
+        complete=snap.complete,
     ).model_dump()
 
 
@@ -166,10 +203,11 @@ async def get_snapshot(
 ) -> Any:
     proxy = _proxy(request, hub_id)
     snap = await proxy.snapshot()
-    if _matches(if_none_match, snap.snapshot_id):
-        return Response(status_code=304, headers={"ETag": _etag(snap.snapshot_id)})
-    response.headers["ETag"] = _etag(snap.snapshot_id)
-    return JSONResponse(content=snap.to_dict(), headers={"ETag": _etag(snap.snapshot_id)})
+    etag = _etag(snap)
+    if _etag_matches(if_none_match, etag):
+        return Response(status_code=304, headers={"ETag": etag})
+    response.headers["ETag"] = etag
+    return JSONResponse(content=snap.to_dict(), headers={"ETag": etag})
 
 
 @router.post("/snapshot/refresh", operation_id="refreshSnapshot", response_model=JobView, status_code=202,

@@ -418,7 +418,7 @@ def test_snapshot_on_cold_engine_sends_nothing_and_is_incomplete() -> None:
         assert _pending_local_bytes(engine) == 0
         assert snap.devices == [] and snap.activities == []
         # No catalog has been read: the empty projection is not "complete".
-        assert snap.complete is False and snap.stale_risk is False
+        assert snap.complete is False
         assert snap.bundle["payload_profile"] == "structural"
 
         _seed_catalog(engine)
@@ -429,36 +429,38 @@ def test_snapshot_on_cold_engine_sends_nothing_and_is_incomplete() -> None:
         tv = snap.entity("device", 5)
         assert tv.name == "TV" and not tv.complete and not tv.editable
         assert snap.bundle["devices"][0]["editable"] is False
-        assert snap.bundle["devices"][0]["stale_risk"] is False
+        assert "stale_risk" not in snap.bundle["devices"][0]
 
     asyncio.run(main())
 
 
-def test_state_document_round_trip_keeps_id_generation_and_stale_flags() -> None:
+def test_state_document_round_trip_keeps_id_generation_and_stamps() -> None:
     async def main():
         engine = _engine()
         _seed_catalog(engine)
-        # Pretend the activity was fetched, then an app session ran.
+        # Pretend the activity was fetched.
         engine._note_detail_fetched("activity", 101)
-        engine.mark_detail_stale_risk()
         proxy = aio.AsyncXProxy.wrap(engine)
         origin = await proxy.snapshot()
-        assert origin.entity("activity", 101).stale_risk is True
-        assert origin.entity("device", 5).stale_risk is False  # never fetched: nothing to flag
+        assert origin.entity("activity", 101).fetched_at
+        assert origin.entity("device", 5).fetched_at is None  # never fetched
         doc = await proxy.export_state()
-        assert doc["state"]["detail_stale_risk"] == {"device": [], "activity": [101]}
+        assert "detail_stale_risk" not in doc["state"]
+        assert doc["state"]["detail_fetched_at"]["activity"] == {"101": origin.entity("activity", 101).fetched_at}
 
         fresh = _engine()
         other = aio.AsyncXProxy.wrap(fresh)
         restored = await other.import_state(doc)
         assert restored.snapshot_id == origin.snapshot_id
-        assert restored.entity("activity", 101).stale_risk is True
+        assert restored.entity("activity", 101).fetched_at == origin.entity("activity", 101).fetched_at
         assert restored.engine_generation > origin.engine_generation
         assert _pending_local_bytes(fresh) == 0
 
-        # A re-fetch stamp clears the flag; a cache clear bumps the generation.
-        fresh._note_detail_fetched("activity", 101)
-        assert (await other.snapshot()).stale_risk is False
+        # A document from before 2026-09-10 carries a stale-flag table: ignored.
+        legacy = {**doc, "state": {**doc["state"], "detail_stale_risk": {"device": [], "activity": [101]}}}
+        assert (await aio.AsyncXProxy.wrap(_engine()).import_state(legacy)).snapshot_id == origin.snapshot_id
+
+        # A cache clear bumps the generation.
         before = fresh.state.generation
         fresh.clear_cached_entity_detail(101, kind="activity")
         assert fresh.state.generation > before
@@ -492,29 +494,28 @@ def test_sync_refuses_unfetched_baseline_before_the_engine() -> None:
     asyncio.run(main())
 
 
-def test_app_session_end_flags_only_fetched_entities_once() -> None:
+def test_app_session_end_leaves_the_engine_cache_alone() -> None:
+    # stale_risk removed 2026-09-10: an app session is not evidence the
+    # cache is fresh or stale, so the engine records nothing about it.
     engine = _engine()
     _seed_catalog(engine)
     engine._note_detail_fetched("activity", 101)
     before = engine.state.generation
     engine._notify_client_state(True)
-    assert engine.state.detail_stale_risk == {"device": set(), "activity": set()}
     engine._notify_client_state(False)
-    assert engine.state.detail_stale_risk == {"device": set(), "activity": {101}}
-    assert engine.state.generation > before
-    # A repeated disconnect notification (no session in between) is a no-op.
-    marked = engine.state.generation
-    engine._notify_client_state(False)
-    assert engine.state.generation == marked
-
+    assert engine.state.generation == before
+    assert not hasattr(engine.state, "detail_stale_risk")
 
 def test_app_session_end_reaches_facade_consumers_from_the_engine_thread() -> None:
+    # An app session ending on the engine thread is delivered as app_state
+    # only; the snapshot does not move (stale_risk removed 2026-09-10).
     async def main():
         engine = _engine()
         _seed_catalog(engine)
         engine._note_detail_fetched("activity", 101)
+        _hub_link(engine, True)
         proxy = aio.AsyncXProxy.wrap(engine)
-        await proxy.snapshot()
+        before = await proxy.snapshot()
 
         async def session():
             await asyncio.sleep(0.01)
@@ -528,13 +529,19 @@ def test_app_session_end_reaches_facade_consumers_from_the_engine_thread() -> No
         agen = proxy.events()
         seen = []
         try:
-            while not any(e.kind == "snapshot_changed" for e in seen):
+            while not any(e.kind == "app_state" and e.payload.connected is False for e in seen):
                 seen.append(await asyncio.wait_for(agen.__anext__(), 2))
+            while True:
+                try:
+                    seen.append(await asyncio.wait_for(agen.__anext__(), 0.05))
+                except asyncio.TimeoutError:
+                    break
         finally:
             await agen.aclose()
-        changed = next(e for e in seen if e.kind == "snapshot_changed")
-        assert changed.payload.stale_risk is True
-        assert (await proxy.snapshot()).entity("activity", 101).stale_risk is True
+        assert not any(e.kind == "snapshot_changed" for e in seen)
+        after = await proxy.snapshot()
+        assert after.snapshot_id == before.snapshot_id and after.engine_generation == before.engine_generation
+        assert after.entity("activity", 101).fetched_at == before.entity("activity", 101).fetched_at
         assert _pending_local_bytes(engine) == 0
 
     asyncio.run(main())
@@ -725,6 +732,17 @@ def _full_bundle(**extra) -> dict:
     }
 
 
+def _activity(**extra) -> dict:
+    export = importlib.import_module(f"{_pkg.__name__}.backup_export")
+    return {
+        "kind": "activity_backup", "schema_version": export.ACTIVITY_BACKUP_SCHEMA_VERSION,
+        "device": {"entity_type": "activity", "device_id": 0x65, "name": "Watch TV"},
+        "button_bindings": [], "favorite_slots": [],
+        "macros": [{"button_id": 0xC6, "steps": [{"device_id": 5, "command_id": 1}]}],
+        **extra,
+    }
+
+
 def test_restore_preflight_rejects_a_bad_bundle_before_any_write(monkeypatch) -> None:
     async def main():
         engine = _engine()
@@ -739,6 +757,12 @@ def test_restore_preflight_rejects_a_bad_bundle_before_any_write(monkeypatch) ->
             _full_bundle(payload_profile="structural"),
             {**_full_bundle(), "devices": [{"kind": "device_backup", "schema_version": 999, "device": {"device_id": 5}}]},
             {**_full_bundle(), "devices": [{"kind": "device_backup", "schema_version": 1, "device": {"device_id": 5, "device_class": "no_such_class"}}]},
+            # Activities are checked too (review of ce9f205, P1): schema,
+            # marker, and references outside the bundle.
+            _full_bundle(activities=[_activity(schema_version=999)]),
+            _full_bundle(activities=[_activity(device={"device_id": 0x65, "name": "A"})]),
+            _full_bundle(activities=[_activity(macros=[{"button_id": 0xC6, "steps": [{"device_id": 0x20, "command_id": 1}]}])]),
+            _full_bundle(activities=[_activity(macros=[{"button_id": 0xC6, "steps": [{"device_id": 0x70, "command_id": 1}]}])]),
         ]
         for bundle in bad:
             try:

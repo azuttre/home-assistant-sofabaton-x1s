@@ -1418,3 +1418,86 @@ def test_async_restore_backup_merge_mode_skips_erase_even_with_activities() -> N
     assert result["status"] == "success"
     hub._proxy.erase_configuration.assert_not_called()
     hub._proxy.restore_hub_bundle.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Preflight covers activities (review of ce9f205, P1)
+# ---------------------------------------------------------------------------
+
+
+def _bundle_with_activity(activity: dict[str, Any], *, devices=None) -> dict[str, Any]:
+    return {
+        "kind": "hub_bundle",
+        "schema_version": 5,
+        "devices": list(devices if devices is not None else [_device_payload(source_device_id=7)]),
+        "activities": [activity],
+    }
+
+
+@pytest.mark.parametrize(
+    ("mutate", "match"),
+    [
+        (lambda a: a.update(schema_version=999), "schema_version must be"),
+        (lambda a: a.update(kind="device_backup"), "kind == 'activity_backup'"),
+        (lambda a: a.__setitem__("device", "not a dict"), "'device' block"),
+        (lambda a: a["device"].pop("entity_type"), "entity_type='activity'"),
+        # A macro step on a device that is not in the bundle can never resolve.
+        (lambda a: a["macros"][0]["steps"].append({"device_id": 0x20, "command_id": 1}),
+         "missing the following source device ids"),
+        # A power-off step chaining to an activity that is not in the bundle.
+        (lambda a: a["macros"][0]["steps"].append({"device_id": 0x70, "command_id": 1}),
+         "references other activities"),
+    ],
+    ids=["schema", "kind", "device_block", "entity_type", "device_ref", "activity_ref"],
+)
+def test_preflight_rejects_bad_activities_before_any_write(monkeypatch, mutate, match) -> None:
+    """Every activity check restore_activity makes runs in the preflight.
+
+    Before this, an activity the restore would refuse passed the preflight
+    and failed only after a replacing restore had erased the hub.
+    """
+
+    proxy = _proxy(monkeypatch)
+    writes: list[str] = []
+    monkeypatch.setattr(proxy, "restore_device", lambda **kw: writes.append("device") or {"status": "success", "device_id": 0x17})
+    monkeypatch.setattr(proxy, "restore_activity", lambda **kw: writes.append("activity") or {"status": "success", "activity_id": 0x66})
+    activity = _activity_payload(source_activity_id=0x65, macro_steps=[{"device_id": 7, "command_id": 1}])
+    mutate(activity)
+    bundle = _bundle_with_activity(activity)
+
+    with pytest.raises(ValueError, match=match):
+        proxy.preflight_restore_bundle(bundle)
+    with pytest.raises(ValueError, match=match):
+        proxy.restore_hub_bundle(bundle)
+    assert writes == []
+
+
+def test_preflight_resolves_activity_references_against_the_bundle(monkeypatch) -> None:
+    """References to bundle devices and to other bundle activities are fine,
+    whatever the bundle order; a device with source id 0 is skipped by the
+    restore and so does not count as a reference target."""
+
+    proxy = _proxy(monkeypatch)
+    chained = _activity_payload(source_activity_id=0x66, macro_steps=[{"device_id": 7, "command_id": 1}])
+    # 0x65 chains to 0x66, listed first: the preflight checks coverage, the
+    # sort handles order.
+    caller = _activity_payload(source_activity_id=0x65, macro_steps=[{"device_id": 0x66, "command_id": 1}])
+    bundle = _bundle_with_activity(caller)
+    bundle["activities"].append(chained)
+    assert proxy.preflight_restore_bundle(bundle) == {"devices": 1, "activities": 2}
+
+    zero = _bundle_with_activity(chained, devices=[_device_payload(source_device_id=0)])
+    with pytest.raises(ValueError, match="missing the following source device ids"):
+        proxy.preflight_restore_bundle(zero)
+
+
+def test_restore_activity_still_validates_standalone(monkeypatch) -> None:
+    """The extracted checks keep guarding the standalone entry point."""
+
+    proxy = _proxy(monkeypatch)
+    activity = _activity_payload(source_activity_id=0x65, macro_steps=[{"device_id": 7, "command_id": 1}])
+    with pytest.raises(ValueError, match="missing the following source device ids"):
+        proxy.restore_activity(payload=activity, device_id_map={})
+    chained = _activity_payload(source_activity_id=0x65, macro_steps=[{"device_id": 0x66, "command_id": 1}])
+    with pytest.raises(ValueError, match="references other activities"):
+        proxy.restore_activity(payload=chained, device_id_map={}, activity_id_map={})

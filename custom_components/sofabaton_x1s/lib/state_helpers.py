@@ -118,14 +118,6 @@ class ActivityCache:
             "device": {},
             "activity": {},
         }
-        # Entities whose cached detail may be stale: flagged by the engine
-        # when a vendor-app session ends (the app may have edited anything
-        # through the proxy) and cleared when the entity is re-fetched.
-        # Detail is kept; the flag is provenance for the consumer.
-        self.detail_stale_risk: dict[str, set[int]] = {
-            "device": set(),
-            "activity": set(),
-        }
         # Bumped on every burst end, every cache clear and every import so
         # a consumer can tell the cache moved without hashing it.
         self.generation: int = 0

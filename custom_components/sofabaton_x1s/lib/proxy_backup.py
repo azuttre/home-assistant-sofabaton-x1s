@@ -68,52 +68,15 @@ class CacheBackupMixin:
         self.state.generation += 1
         return self.state.generation
 
-    def mark_detail_stale_risk(
-        self, kind: str | None = None, ent_id: int | None = None
-    ) -> None:
-        """Flag cached per-entity detail as possibly stale.
-
-        With no arguments every fetched device and activity is flagged
-        (the app-session case: the vendor app may have edited anything).
-        Detail is kept; the flag surfaces in the snapshot projection as
-        ``stale_risk`` and clears when the entity is re-fetched.
-        """
-
-        stale = self.state.detail_stale_risk
-        if kind is None:
-            for each_kind in ("device", "activity"):
-                stale[each_kind].update(self.state.detail_fetched_at[each_kind])
-        elif ent_id is not None:
-            stale[kind].add(int(ent_id) & 0xFF)
-        else:
-            stale[kind].update(self.state.detail_fetched_at[kind])
-        self.bump_cache_generation()
-
-    def _note_app_link(self, connected: bool) -> None:
-        """Called before the client link flag flips (phase 3 plan, W1).
-
-        A session that just ended (connected went True -> False) may have
-        edited anything through the proxy, and the hub tells us nothing
-        about it: flag every fetched entity as ``stale_risk``. Detail is
-        kept and nothing is fetched; a refresh clears the flags. Called
-        from the transport's client-state path, so it must not touch the
-        transport.
-        """
-
-        if bool(getattr(self, "_client_connected", False)) and not connected:
-            self.mark_detail_stale_risk()
-
     def _note_detail_fetched(self, kind: str, ent_lo: int) -> None:
-        """Stamp a backup-grade fetch of one entity and clear its stale flag."""
+        """Stamp a backup-grade fetch of one entity."""
 
         self.state.detail_fetched_at[kind][ent_lo] = now_iso()
-        self.state.detail_stale_risk[kind].discard(ent_lo)
 
     def _forget_detail(self, kind: str, ent_lo: int) -> None:
-        """Drop the fetch stamp and stale flag of one entity."""
+        """Drop the fetch stamp of one entity."""
 
         self.state.detail_fetched_at[kind].pop(ent_lo, None)
-        self.state.detail_stale_risk[kind].discard(ent_lo)
 
     def export_cache_state(self) -> dict[str, Any]:
         def _device_for_export(v: dict[str, Any]) -> dict[str, Any]:
@@ -180,12 +143,8 @@ class CacheBackupMixin:
                 kind: {str(ent_id): stamp for ent_id, stamp in stamps.items()}
                 for kind, stamps in self.state.detail_fetched_at.items()
             },
-            # Snapshot provenance (phase 3 plan, W0): entities flagged
-            # since their fetch, and the cache generation so a consumer
-            # importing this document continues the count.
-            "detail_stale_risk": {
-                kind: sorted(ids) for kind, ids in self.state.detail_stale_risk.items()
-            },
+            # The cache generation, so a consumer importing this document
+            # continues the count (phase 3 plan, W0).
             "generation": int(self.state.generation),
             "ip_devices": {str(k): dict(v) for k, v in self.state.ip_devices.items()},
             "ip_buttons": {
@@ -419,17 +378,6 @@ class CacheBackupMixin:
                 if parsed:
                     self.state.activity_favorites_order[int(key) & 0xFF] = parsed
 
-        self.state.detail_stale_risk = {"device": set(), "activity": set()}
-        detail_stale_risk = data.get("detail_stale_risk", {})
-        if isinstance(detail_stale_risk, dict):
-            for kind in ("device", "activity"):
-                ids = detail_stale_risk.get(kind, [])
-                if isinstance(ids, list):
-                    self.state.detail_stale_risk[kind] = {
-                        int(ent_id) & 0xFF
-                        for ent_id in ids
-                        if isinstance(ent_id, (int, float))
-                    }
 
         generation = data.get("generation")
         if isinstance(generation, int) and generation > self.state.generation:
@@ -692,8 +640,6 @@ class CacheBackupMixin:
         self.state.device_input_records.clear()
         self.state.detail_fetched_at["device"].clear()
         self.state.detail_fetched_at["activity"].clear()
-        self.state.detail_stale_risk["device"].clear()
-        self.state.detail_stale_risk["activity"].clear()
         self.state.buttons.clear()
         if hasattr(self.state, "button_details"):
             self.state.button_details.clear()

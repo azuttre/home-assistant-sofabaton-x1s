@@ -1782,7 +1782,6 @@ class X1Proxy(FrameDecodeMixin, IrBlobMixin, CatalogMixin, ExchangeMixin, AckWai
                 self._log.exception("hub state listener failed")
 
     def _notify_client_state(self, connected: bool) -> None:
-        self._note_app_link(connected)  # W1: an ended app session flags the cache
         self._client_connected = connected
         for cb in self._client_state_listeners:
             try:

@@ -201,12 +201,12 @@ class Favorite:
 # I/O, plus a typed header. ``snapshot_id`` is a content hash: the same
 # configuration hashes the same across restarts and across an
 # ``export_state`` / ``import_state`` round trip, while provenance
-# (capture times, stale flags) is excluded so it never moves the id.
+# (capture times) is excluded so it never moves the id.
 
 # Bundle-level keys that are capture bookkeeping, not configuration.
 _SNAPSHOT_VOLATILE_BUNDLE_KEYS = frozenset({"captured_at", "_progress_total_steps"})
 # Entity-level keys that are provenance, not configuration.
-_SNAPSHOT_VOLATILE_ENTITY_KEYS = frozenset({"captured_at", "fetched_at", "stale_risk", "editable"})
+_SNAPSHOT_VOLATILE_ENTITY_KEYS = frozenset({"captured_at", "fetched_at", "editable"})
 
 
 def snapshot_content_id(bundle: dict[str, Any]) -> str:
@@ -232,9 +232,13 @@ class SnapshotEntity:
 
     ``complete``: the last structural fetch captured every table.
     ``editable``: a sync may take this entity as its baseline (complete).
-    ``stale_risk``: flagged since its fetch, typically because a vendor-app
-    session ran; the detail is kept and a refresh clears the flag.
     ``fetched_at``: ISO time of the last structural fetch, None if never.
+
+    These describe the library's copy, never the hub: the hub can be
+    edited outside this library at any time and does not say so. The
+    cache is a last-known copy whose age ``fetched_at`` gives; whether it
+    is still current is for the consumer to decide, and only a refresh
+    brings it up to date.
     """
 
     kind: Literal["device", "activity"]
@@ -242,7 +246,6 @@ class SnapshotEntity:
     name: Optional[str]
     complete: bool
     editable: bool
-    stale_risk: bool
     fetched_at: Optional[str]
 
     def to_dict(self) -> dict[str, Any]:
@@ -263,7 +266,6 @@ class HubSnapshot:
     captured_at: str
     engine_generation: int
     complete: bool
-    stale_risk: bool
     hub: dict[str, Any]
     devices: list[SnapshotEntity]
     activities: list[SnapshotEntity]
@@ -280,7 +282,6 @@ class HubSnapshot:
         out = dict(self.bundle)
         out["snapshot_id"] = self.snapshot_id
         out["engine_generation"] = self.engine_generation
-        out["stale_risk"] = self.stale_risk
         return out
 
 
@@ -533,19 +534,17 @@ class CatalogReady:
 @dataclass(frozen=True)
 class SnapshotChanged:
     """The snapshot projection moved: a refresh landed, a write was rebased,
-    or an app session flagged the cache.
+    or the cache was imported.
 
     ``device_ids`` / ``activity_ids`` name the entities the emitting
     operation touched (empty when the whole cache is meant, as after an
-    import or an app-session flag). ``stale_risk`` mirrors the snapshot
-    header after the change.
+    import).
     """
 
     snapshot_id: str
     engine_generation: int
     device_ids: tuple[int, ...]
     activity_ids: tuple[int, ...]
-    stale_risk: bool
 
 
 EventPayload = Optional[

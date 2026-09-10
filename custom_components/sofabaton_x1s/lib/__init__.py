@@ -6,9 +6,10 @@ Submodule internals (``opcode_handlers``, frame parsing, wire schemas,
 the ``proxy_*`` mixins, ...) remain importable but are NOT a stable
 surface and may change between minor releases.
 
-The library raises stdlib exceptions (``ValueError`` for unclassifiable
-or malformed input, ``RuntimeError``/``TimeoutError`` for transport and
-ack failures) rather than custom exception types.
+The facade exports typed exceptions derived from ``ValueError``,
+``RuntimeError`` and ``TimeoutError`` for input, state and transport
+failures. Sync and restore also report unsuccessful outcomes in their
+result objects; callers should inspect ``result.ok``.
 
 In-tree, this package doubles as ``custom_components.sofabaton_x1s.lib``
 for the Home Assistant integration; the wheel build remaps it to the

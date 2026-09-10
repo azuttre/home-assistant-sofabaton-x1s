@@ -170,7 +170,6 @@ def _snapshot_entity(kind: str, payload: dict) -> SnapshotEntity:
         name=str(name) if name is not None else None,
         complete=bool(payload.get("complete")),
         editable=bool(payload.get("editable", payload.get("complete"))),
-        stale_risk=bool(payload.get("stale_risk")),
         fetched_at=payload.get("fetched_at"),
     )
 
@@ -493,7 +492,6 @@ class AsyncXProxy:
         self._last_snapshot_id: Optional[str] = None
         # W1: an ended app session flags the cache (engine side); tell
         # the event consumers so they can offer a refresh.
-        self._proxy.on_client_state_change(self._on_app_link_for_snapshot)
 
     # -- escape hatches ----------------------------------------------------
 
@@ -1663,28 +1661,11 @@ class AsyncXProxy:
             captured_at=str(bundle.get("captured_at") or _now_iso()),
             engine_generation=generation,
             complete=complete,
-            stale_risk=any(e.stale_risk for e in devices + activities),
             hub=dict(bundle.get("hub") or {}),
             devices=devices,
             activities=activities,
             bundle=bundle,
         )
-
-    def _on_app_link_for_snapshot(self, connected: bool) -> None:
-        # Engine thread, possibly inside the transport's locks: only hop.
-        if not connected:
-            self._loop.call_soon_threadsafe(self._schedule_app_session_announce)
-
-    def _schedule_app_session_announce(self) -> None:
-        # Nobody has looked at the snapshot and nobody listens: skip the
-        # projection (the engine flags are set regardless).
-        if self._last_snapshot_id is None and not self._event_queues:
-            return
-        self._loop.create_task(self._announce_app_session_end())
-
-    async def _announce_app_session_end(self) -> None:
-        snap = await self.snapshot(_announce=False)
-        self._announce_snapshot(snap)
 
     def _announce_snapshot(
         self,
@@ -1701,7 +1682,6 @@ class AsyncXProxy:
                 engine_generation=snap.engine_generation,
                 device_ids=tuple(device_ids),
                 activity_ids=tuple(activity_ids),
-                stale_risk=snap.stale_risk,
             ),
         )
 
@@ -1828,6 +1808,12 @@ class AsyncXProxy:
         635ecfe, finding 4). The read is shielded; on cancellation the
         caller waits for it to land, then re-raises, so the lock is held
         until the hub is quiet and the loop stops before the next entity.
+
+        The drain itself is shielded too: a second cancellation while it
+        waits (an impatient client sending DELETE twice) used to reach the
+        read task, abandon the executor thread mid-read and release the
+        lock anyway (review of ce9f205, P2). Repeated cancellations are
+        absorbed until the read has landed, then one is re-raised.
         """
 
         read = asyncio.ensure_future(
@@ -1836,10 +1822,13 @@ class AsyncXProxy:
         try:
             return await asyncio.shield(read)
         except asyncio.CancelledError:
-            try:
-                await read
-            except BaseException:  # noqa: BLE001  (the read's own failure is not ours to report)
-                pass
+            while not read.done():
+                try:
+                    await asyncio.shield(read)
+                except asyncio.CancelledError:
+                    continue
+                except BaseException:  # noqa: BLE001  (the read's own failure is not ours to report)
+                    break
             raise
 
     async def _read_entity_detail(
@@ -2279,7 +2268,6 @@ ENGINE_ONLY: dict[str, str] = {
     ),
     **_reasons(_R_F2, ("request_banner_info",)),
     **_reasons(_R_F6, ("wipe_all_cached_state",)),
-    **_reasons(_R_P3_INTERNAL, ("mark_detail_stale_risk",)),
     **_reasons(
         _R_INTERNAL_READ,
         (

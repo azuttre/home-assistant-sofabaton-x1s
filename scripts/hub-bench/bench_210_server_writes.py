@@ -24,7 +24,7 @@ hubs and exercises the phase 3 surface end to end on each of them:
      when --destructive is given);
   7. app session: with --app-session the bench pauses so the vendor app
      can be attached and detached; the stream must show
-     snapshot_changed with stale_risk true and the snapshot flag it;
+     app_state connected=false arrives and the snapshot does not move;
   8. --destructive only: backup (full), erase, restore(replace), compare
      the snapshot entity names before and after.
 
@@ -464,14 +464,17 @@ def main() -> None:
         if args.app_session:
             since = len(REPORT["ws"])
             input("\nAttach the Sofabaton app to the hub, then detach it, then press Enter... ")
-            flagged = ws_since(since, hub_id=hub, kind="snapshot_changed")
+            # stale_risk removed 2026-09-10: an app session is reported as
+            # app_state only; the snapshot must not move.
             doc15, _ = snapshot(http, hub)
-            step("app_session", snapshot_changed=[e["payload"]["stale_risk"] for e in flagged], stale_risk=doc15["stale_risk"],
-                 app_state=[e["payload"] for e in ws_since(since, hub_id=hub, kind="app_state")])
-            expect(doc15["stale_risk"], "after an app session the snapshot must be flagged stale_risk")
+            app_states = [e["payload"] for e in ws_since(since, hub_id=hub, kind="app_state")]
+            step("app_session", app_state=app_states, snapshot_changed=len(ws_since(since, hub_id=hub, kind="snapshot_changed")),
+                 snapshot_id=doc15["snapshot_id"])
+            expect(any(p.get("connected") is False for p in app_states), "the app session end must arrive as app_state connected=false")
+            expect("stale_risk" not in doc15, "the snapshot must not carry a freshness verdict")
             job = job_done(http, hub, http.post(f"/hubs/{hub}/snapshot/refresh", json={"activity_id": act_id}), "refresh after app session")
             doc16, _ = snapshot(http, hub)
-            step("app_session_refresh", ok=bool(job), entity_stale=entity(doc16, "activity", act_id)["stale_risk"])
+            step("app_session_refresh", ok=bool(job), fetched_at=entity(doc16, "activity", act_id)["fetched_at"])
 
         # -- 8. destructive: backup, erase, restore ----------------------------------------
         if args.destructive:

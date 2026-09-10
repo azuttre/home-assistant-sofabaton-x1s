@@ -266,7 +266,6 @@ class EditFakeProxy(FakeProxy):
         super().__init__(**kw)
         self.state.generation = 0
         self.state.detail_fetched_at = {"device": {5: "t"}, "activity": {101: "t"}}
-        self.state.detail_stale_risk = {"device": set(), "activity": set()}
         self.synced: list = []
         self.hub_name = "Living Room"
 
@@ -278,10 +277,10 @@ class EditFakeProxy(FakeProxy):
         return {
             "kind": "hub_bundle", "captured_at": "t", "complete": True,
             "payload_profile": "structural", "hub": {"name": self.hub_name},
-            "devices": [{"kind": "device_backup", "complete": True, "editable": True, "stale_risk": False,
+            "devices": [{"kind": "device_backup", "complete": True, "editable": True,
                          "device": {"device_id": 5, "name": "TV", "brand": "Sony"},
                          "commands": [{"command_id": 1, "name": "Power"}], "button_bindings": [], "macros": []}],
-            "activities": [{"kind": "activity_backup", "complete": True, "editable": True, "stale_risk": False,
+            "activities": [{"kind": "activity_backup", "complete": True, "editable": True,
                             "device": {"device_id": 101, "name": "Watch TV", "entity_type": "activity"},
                             "button_bindings": [], "favorite_slots": [], "macros": []}],
         }

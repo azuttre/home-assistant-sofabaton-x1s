@@ -424,13 +424,11 @@ class BackupExportMixin:
     def _annotate_projection(self, payload: dict[str, Any], kind: str, ent_lo: int) -> None:
         """Add the snapshot provenance fields to a projected entity payload.
 
-        ``stale_risk``: flagged since its last fetch (an app session ran).
         ``editable``: a sync may take this payload as its baseline; only a
         complete capture qualifies, because the engine's stale preflight
         skips an incomplete one (phase 3 plan, decision 8).
         """
 
-        payload["stale_risk"] = ent_lo in self.state.detail_stale_risk[kind]
         payload["editable"] = bool(payload.get("complete"))
 
     # ------------------------------------------------------------------

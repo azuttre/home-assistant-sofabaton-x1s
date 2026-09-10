@@ -59,7 +59,7 @@ _WRITE_ERRORS = {
     404: {"model": Problem}, 409: {"model": Problem}, 412: {"model": Problem},
     422: {"model": Problem}, 428: {"model": Problem}, 503: {"model": Problem},
 }
-_SNAPSHOT_PROVENANCE = ("complete", "editable", "stale_risk", "fetched_at", "captured_at", "payload_profile", "kind")
+_SNAPSHOT_PROVENANCE = ("complete", "editable", "fetched_at", "captured_at", "payload_profile", "kind")
 
 
 # -- bodies ----------------------------------------------------------------------
@@ -171,7 +171,7 @@ def _check_if_match(if_match: Optional[str], snap: HubSnapshot, hub_id: str, *, 
     if not if_match:
         if required:
             raise ApiProblem(428, "if_match_required", "If-Match is required",
-                             detail="send the snapshot ETag the edit was made on", hub_id=hub_id)
+                             detail="send the quoted snapshot_id the edit was made on", hub_id=hub_id)
         return
     if not _matches(if_match, snap.snapshot_id):
         raise ApiProblem(412, "snapshot_outdated", "The snapshot moved",
@@ -292,7 +292,8 @@ async def _intent_job(request: Request, hub_id: str, if_match: Optional[str], jo
     return start_job(request, hub_id, job_kind, run, cancellable=False)
 
 
-IF_MATCH = Header(None, alias="If-Match", description="the snapshot ETag the edit was made on")
+IF_MATCH = Header(None, alias="If-Match",
+                  description="the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)")
 
 
 # -- S10: whole-entity intents (display order) ----------------------------------------

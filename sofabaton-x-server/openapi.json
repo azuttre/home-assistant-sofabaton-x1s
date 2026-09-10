@@ -1626,7 +1626,7 @@
         "type": "object"
       },
       "SnapshotChanged": {
-        "description": "The snapshot projection moved: a refresh landed, a write was rebased,\nor an app session flagged the cache.\n\n``device_ids`` / ``activity_ids`` name the entities the emitting\noperation touched (empty when the whole cache is meant, as after an\nimport or an app-session flag). ``stale_risk`` mirrors the snapshot\nheader after the change.",
+        "description": "The snapshot projection moved: a refresh landed, a write was rebased,\nor the cache was imported.\n\n``device_ids`` / ``activity_ids`` name the entities the emitting\noperation touched (empty when the whole cache is meant, as after an\nimport).",
         "properties": {
           "activity_ids": {
             "items": {
@@ -1649,18 +1649,13 @@
           "snapshot_id": {
             "title": "Snapshot Id",
             "type": "string"
-          },
-          "stale_risk": {
-            "title": "Stale Risk",
-            "type": "boolean"
           }
         },
         "required": [
           "snapshot_id",
           "engine_generation",
           "device_ids",
-          "activity_ids",
-          "stale_risk"
+          "activity_ids"
         ],
         "title": "SnapshotChanged",
         "type": "object"
@@ -1707,10 +1702,6 @@
           "snapshot_id": {
             "title": "Snapshot Id",
             "type": "string"
-          },
-          "stale_risk": {
-            "title": "Stale Risk",
-            "type": "boolean"
           }
         },
         "required": [
@@ -1718,7 +1709,6 @@
           "captured_at",
           "engine_generation",
           "complete",
-          "stale_risk",
           "payload_profile"
         ],
         "title": "SnapshotDocument",
@@ -1726,7 +1716,7 @@
       },
       "SnapshotEntityPayload": {
         "additionalProperties": true,
-        "description": "One device or activity in the snapshot: provenance typed, tables open.\n\n``complete`` / ``editable`` / ``stale_risk`` / ``fetched_at`` are the\nlibrary's per-entity provenance; ``commands``, ``button_bindings``,\n``macros``, ``favorite_slots`` and the other tables follow the\nlibrary's ``hub_bundle`` shape and are passed through as they are.",
+        "description": "One device or activity in the snapshot: provenance typed, tables open.\n\n``complete`` / ``editable`` / ``fetched_at`` are the library's\nper-entity provenance (facts about the server's copy, never about\nthe hub); ``commands``, ``button_bindings``,\n``macros``, ``favorite_slots`` and the other tables follow the\nlibrary's ``hub_bundle`` shape and are passed through as they are.",
         "properties": {
           "complete": {
             "default": false,
@@ -1755,11 +1745,6 @@
           "kind": {
             "title": "Kind",
             "type": "string"
-          },
-          "stale_risk": {
-            "default": false,
-            "title": "Stale Risk",
-            "type": "boolean"
           }
         },
         "required": [
@@ -2433,7 +2418,7 @@
             }
           },
           {
-            "description": "the snapshot ETag the edit was made on",
+            "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -2446,7 +2431,7 @@
                   "type": "null"
                 }
               ],
-              "description": "the snapshot ETag the edit was made on",
+              "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
               "title": "If-Match"
             }
           }
@@ -2553,7 +2538,7 @@
             }
           },
           {
-            "description": "the snapshot ETag the edit was made on",
+            "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -2566,7 +2551,7 @@
                   "type": "null"
                 }
               ],
-              "description": "the snapshot ETag the edit was made on",
+              "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
               "title": "If-Match"
             }
           }
@@ -2682,7 +2667,7 @@
             }
           },
           {
-            "description": "the snapshot ETag the edit was made on",
+            "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -2695,7 +2680,7 @@
                   "type": "null"
                 }
               ],
-              "description": "the snapshot ETag the edit was made on",
+              "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
               "title": "If-Match"
             }
           }
@@ -2799,7 +2784,7 @@
             }
           },
           {
-            "description": "the snapshot ETag the edit was made on",
+            "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -2812,7 +2797,7 @@
                   "type": "null"
                 }
               ],
-              "description": "the snapshot ETag the edit was made on",
+              "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
               "title": "If-Match"
             }
           }
@@ -2937,7 +2922,7 @@
             }
           },
           {
-            "description": "the snapshot ETag the edit was made on",
+            "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -2950,7 +2935,7 @@
                   "type": "null"
                 }
               ],
-              "description": "the snapshot ETag the edit was made on",
+              "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
               "title": "If-Match"
             }
           }
@@ -3063,7 +3048,7 @@
             }
           },
           {
-            "description": "the snapshot ETag the edit was made on",
+            "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -3076,7 +3061,7 @@
                   "type": "null"
                 }
               ],
-              "description": "the snapshot ETag the edit was made on",
+              "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
               "title": "If-Match"
             }
           }
@@ -3285,7 +3270,7 @@
             }
           },
           {
-            "description": "the snapshot ETag the edit was made on",
+            "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -3298,7 +3283,7 @@
                   "type": "null"
                 }
               ],
-              "description": "the snapshot ETag the edit was made on",
+              "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
               "title": "If-Match"
             }
           }
@@ -3414,7 +3399,7 @@
             }
           },
           {
-            "description": "the snapshot ETag the edit was made on",
+            "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -3427,7 +3412,7 @@
                   "type": "null"
                 }
               ],
-              "description": "the snapshot ETag the edit was made on",
+              "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
               "title": "If-Match"
             }
           }
@@ -3561,7 +3546,7 @@
             }
           },
           {
-            "description": "the snapshot ETag the edit was made on",
+            "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -3574,7 +3559,7 @@
                   "type": "null"
                 }
               ],
-              "description": "the snapshot ETag the edit was made on",
+              "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
               "title": "If-Match"
             }
           }
@@ -3856,7 +3841,7 @@
             }
           },
           {
-            "description": "the snapshot ETag the edit was made on",
+            "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -3869,7 +3854,7 @@
                   "type": "null"
                 }
               ],
-              "description": "the snapshot ETag the edit was made on",
+              "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
               "title": "If-Match"
             }
           }
@@ -4423,7 +4408,7 @@
             }
           },
           {
-            "description": "the snapshot ETag the edit was made on",
+            "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -4436,7 +4421,7 @@
                   "type": "null"
                 }
               ],
-              "description": "the snapshot ETag the edit was made on",
+              "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
               "title": "If-Match"
             }
           }
@@ -4543,7 +4528,7 @@
             }
           },
           {
-            "description": "the snapshot ETag the edit was made on",
+            "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -4556,7 +4541,7 @@
                   "type": "null"
                 }
               ],
-              "description": "the snapshot ETag the edit was made on",
+              "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
               "title": "If-Match"
             }
           }
@@ -4672,7 +4657,7 @@
             }
           },
           {
-            "description": "the snapshot ETag the edit was made on",
+            "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -4685,7 +4670,7 @@
                   "type": "null"
                 }
               ],
-              "description": "the snapshot ETag the edit was made on",
+              "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
               "title": "If-Match"
             }
           }
@@ -4789,7 +4774,7 @@
             }
           },
           {
-            "description": "the snapshot ETag the edit was made on",
+            "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -4802,7 +4787,7 @@
                   "type": "null"
                 }
               ],
-              "description": "the snapshot ETag the edit was made on",
+              "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
               "title": "If-Match"
             }
           }
@@ -5011,7 +4996,7 @@
             }
           },
           {
-            "description": "the snapshot ETag the edit was made on",
+            "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -5024,7 +5009,7 @@
                   "type": "null"
                 }
               ],
-              "description": "the snapshot ETag the edit was made on",
+              "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
               "title": "If-Match"
             }
           }
@@ -5257,7 +5242,7 @@
             }
           },
           {
-            "description": "the snapshot ETag the edit was made on",
+            "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -5270,7 +5255,7 @@
                   "type": "null"
                 }
               ],
-              "description": "the snapshot ETag the edit was made on",
+              "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
               "title": "If-Match"
             }
           }
@@ -5405,7 +5390,7 @@
             }
           },
           {
-            "description": "the snapshot ETag the edit was made on",
+            "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -5418,7 +5403,7 @@
                   "type": "null"
                 }
               ],
-              "description": "the snapshot ETag the edit was made on",
+              "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
               "title": "If-Match"
             }
           }
@@ -5534,7 +5519,7 @@
             }
           },
           {
-            "description": "the snapshot ETag the edit was made on",
+            "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -5547,7 +5532,7 @@
                   "type": "null"
                 }
               ],
-              "description": "the snapshot ETag the edit was made on",
+              "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
               "title": "If-Match"
             }
           }
@@ -5744,7 +5729,7 @@
             }
           },
           {
-            "description": "the snapshot ETag the edit was made on",
+            "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -5757,7 +5742,7 @@
                   "type": "null"
                 }
               ],
-              "description": "the snapshot ETag the edit was made on",
+              "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
               "title": "If-Match"
             }
           }
@@ -6083,7 +6068,7 @@
             }
           },
           {
-            "description": "the snapshot ETag the edit was made on",
+            "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -6096,7 +6081,7 @@
                   "type": "null"
                 }
               ],
-              "description": "the snapshot ETag the edit was made on",
+              "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
               "title": "If-Match"
             }
           }
@@ -6664,7 +6649,7 @@
             }
           },
           {
-            "description": "the snapshot ETag the edit was made on",
+            "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -6677,7 +6662,7 @@
                   "type": "null"
                 }
               ],
-              "description": "the snapshot ETag the edit was made on",
+              "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
               "title": "If-Match"
             }
           }
@@ -6876,7 +6861,7 @@
             }
           },
           {
-            "description": "the snapshot ETag the edit was made on",
+            "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
             "in": "header",
             "name": "If-Match",
             "required": false,
@@ -6889,7 +6874,7 @@
                   "type": "null"
                 }
               ],
-              "description": "the snapshot ETag the edit was made on",
+              "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
               "title": "If-Match"
             }
           }

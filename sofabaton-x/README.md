@@ -1,5 +1,10 @@
 # sofabaton-x — Python Library
 
+> **Breaking changes in the upcoming 0.2.0 release.** This README describes
+> the unreleased API. Existing 0.1.x consumers should read the
+> [changelog and migration guide](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/sofabaton-x/CHANGELOG.md#unreleased--020)
+> before upgrading.
+
 [![PyPI](https://img.shields.io/pypi/v/sofabaton-x)](https://pypi.org/project/sofabaton-x/)
 [![Python versions](https://img.shields.io/pypi/pyversions/sofabaton-x)](https://pypi.org/project/sofabaton-x/)
 [![License: MIT](https://img.shields.io/pypi/l/sofabaton-x)](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/LICENSE)
@@ -42,8 +47,8 @@ the integration is its reference consumer.
   previews.
 - **IR payloads**: play a raw payload once, learn a code from a physical
   remote through the hub's IR receiver, and convert between the hub's
-  stored formats, Pronto hex and raw timings (engine level today; a
-  facade payload surface is planned).
+  stored formats, Pronto hex and raw timings through `IrPayload` and the
+  async facade. Save or replace payloads through the edit helpers and sync.
 
 Deliberately **out of scope**: executing the HTTP or MQTT callbacks that
 network-class devices define (e.g. a Roku-style ECP listener). The
@@ -52,8 +57,17 @@ can build them on top — the Home Assistant integration does exactly that.
 
 ## ◇ Install
 
+For the unreleased API documented here, install from the repository root:
+
 ```
-pip install sofabaton-x
+python -m pip install .
+```
+
+For existing applications using the released 0.1.x API, stay on that series
+until you have migrated:
+
+```
+python -m pip install "sofabaton-x>=0.1,<0.2"
 ```
 
 Python 3.11+. The only dependency is
@@ -81,7 +95,8 @@ async def main():
     proxy.on_activity_change(lambda new, old, name: print(f"activity -> {name}"))
 
     async with proxy:
-        await proxy.wait_until_controllable()      # own the hub (see below)
+        if not await proxy.wait_until_controllable():   # own the hub (see below)
+            raise RuntimeError("Hub did not become controllable")
 
         for act in await proxy.activities():           # list[Activity]
             print(f"activity {act.activity_id}: {act.name}")
@@ -225,7 +240,7 @@ async for event in proxy.events():          # HubEvent(seq, kind, payload)
 | `hub_state` / `app_state` | `ConnectionState`: `connected`                   |
 | `status_changed`        | `StatusChanged`: `mode`, `previous_mode` (derived; fires once per mode flip) |
 | `catalog_ready`         | `CatalogReady`: `ready` (the connect-time initial sync finished, or the session dropped) |
-| `snapshot_changed`      | `SnapshotChanged`: `snapshot_id`, `engine_generation`, `device_ids`, `activity_ids`, `stale_risk` (a refresh landed, a write was rebased, or the cache was imported) |
+| `snapshot_changed`      | `SnapshotChanged`: `snapshot_id`, `engine_generation`, `device_ids`, `activity_ids` (a refresh landed, a write was rebased, or the cache was imported) |
 | `ota`                   | none (the hub goes silent for a few minutes)       |
 
 Each consumer gets its own bounded queue (`maxsize=256` by default). A
@@ -294,23 +309,39 @@ with **no hub traffic**, in every mode, as a `HubSnapshot`:
 
 ```python
 snap = await proxy.snapshot()
-snap.snapshot_id          # content hash: equal when nothing changed, an ETag
+snap.snapshot_id          # configuration content hash, used as the edit revision
 snap.complete             # every entity fetched in full
-snap.stale_risk           # an app session ended since the fetch: it may have edited anything
 for e in snap.devices + snap.activities:
-    print(e.kind, e.entity_id, e.name, e.complete, e.editable, e.stale_risk, e.fetched_at)
+    print(e.kind, e.entity_id, e.name, e.complete, e.editable, e.fetched_at)
 snap.bundle               # the structural hub_bundle dict the sync takes as baseline
 snap.to_dict()            # the bundle with the header merged in (one JSON document)
 ```
 
-The cache fills only when you ask. `refresh()` is the one structural hub
-read: `refresh(device_id=5)` or `refresh(activity_id=101)` re-reads one
+The initial sync fills the catalogs automatically; detailed reads,
+backups and sync reconciliation populate further cache entries.
+`refresh(device_id=5)` or `refresh(activity_id=101)` explicitly re-reads one
 entity (a few bursts); `refresh()` alone re-reads both catalogs once and
-then every device and activity, which takes **minutes** on a real hub, so
+then every device and activity. A whole-hub read can take **minutes**, so
 treat it as a user action, report its `progress` (a `WriteProgress` per
 entity) and expect to cancel it between entities. Nothing in the library
-starts a whole-hub refresh on its own. Each refresh and each write ends
-with a `snapshot_changed` event carrying the new id.
+starts a whole-hub refresh on its own. A refresh publishes
+`snapshot_changed`; configuration writes rebase the snapshot and announce
+changes. Cancellation of a whole-hub refresh finishes the current entity
+before releasing the operation, then publishes the detail read so far.
+
+The content hash excludes provenance such as `fetched_at`: it can change
+without a new `snapshot_id`. Importing saved state preserves its detail
+and completeness; a partial cache remains partial after a restart.
+
+The cache is a last-known copy, and only the user can say whether it is
+still current. The hub can be edited outside this library at any time
+(the vendor app, another client, a restore) and never says so; the
+library deliberately reports no freshness verdict. `fetched_at` is the
+age of each entity's copy, a refresh is the only way to bring it up to
+date, and the sync stale check protects writes by re-reading the target
+entity first. An `app_state` event with `connected=False` means a
+vendor-app session through the proxy just ended: one visible occasion,
+among many invisible ones, on which to offer a refresh.
 
 To keep the cache warm across restarts, persist the state document (the
 library never touches disk):
@@ -371,7 +402,8 @@ a snapshot bundle and returns an edited copy for the sync, so a script
 does not have to know the row shapes. `rename_activity`, `rename_device`,
 `bind_button` (with an optional long press), `clear_button`,
 `add_favorite`, `remove_favorite`, `reorder_favorites`, `rename_command`,
-`set_idle_behavior`:
+`set_idle_behavior`, `set_command_payload`, and `add_command` (which returns
+the edited bundle and an available command id):
 
 ```python
 from sofabaton import ButtonName, edits
@@ -404,6 +436,20 @@ result = await proxy.restore(bundle, replace=False)        # RestoreResult; repl
 await proxy.erase()                                        # everything, final
 ```
 
+These are separate operations, not a script to run in sequence. Whole-entity
+intents use their own validation; the live baseline comparison described
+above belongs to `sync_activity` / `sync_device`.
+
+`backup()` includes command payloads by default. A structural snapshot or
+`backup(include_blobs=False)` cannot be restored. `restore(bundle)` is
+additive: it creates entities with new hub-assigned ids. Use
+`restore(bundle, replace=True)` to validate the bundle before erasing and
+rebuilding the hub; do not call `erase()` separately to implement replace.
+Inspect `RestoreResult.ok`, `failed_at`, `restored_devices`,
+`restored_activities`, `device_id_map` and `snapshot_id`. A partial restore
+is not rolled back; inspect the resulting snapshot before deciding how to
+recover. Retrying an additive restore can create duplicates.
+
 ### IR payloads
 
 `IrPayload` is one command's stored payload. Build it from the formats
@@ -411,23 +457,29 @@ codes circulate in, read it back from the hub, fire it once, or capture it
 from the original remote; saving one as a new command is a row edit:
 
 ```python
-from sofabaton import IrPayload
+from sofabaton import IrPayload, edits
 
-p = IrPayload.from_pronto("0000 006D 0022 0002 ...")
-p = IrPayload.from_raw_timings([9000, 4500, 560, 560, ...], carrier_hz=38000)
-p = IrPayload.from_descriptor("P:NEC1 D:4 S:5 F:21")     # the hub renders the protocol itself
-p = IrPayload.from_hex("00 20 00 00 00 00 94 70 ...")     # a hub body as pasted hex
-p = await proxy.read_payload(device_id=5, command_id=2)   # None when the command has none
-await proxy.play(p)                                       # once, nothing saved
-p = await proxy.learn_ir(timeout=30)                      # point the remote at the hub; IrLearnError otherwise
+# A complete descriptor; choose a code appropriate to your device.
+p = IrPayload.from_descriptor("P:NEC1 D:4 S:5 F:21")
+await proxy.play(p)                     # emits IR once; nothing is saved
 
-snap = await proxy.snapshot()
-edited = copy.deepcopy(snap.bundle)
-device = next(d for d in edited["devices"] if d["device"]["device_id"] == 5)
-device["commands"].append(p.to_command_row(command_id=40, name="Fan high"))
-await proxy.sync_device(baseline=snap.bundle, edited=edited, device_id=5,
-                        snapshot_id=snap.snapshot_id)
+# Or capture from the original remote. Keep the hub idle while learning.
+p = await proxy.learn_ir(timeout=30)    # IrLearnError if no usable capture
+snap = await proxy.refresh(device_id=5)
+edited, command_id = edits.add_command(snap.bundle, 5, p, "Learned key")
+result = await proxy.sync_device(
+    baseline=snap.bundle, edited=edited, device_id=5,
+    snapshot_id=snap.snapshot_id,
+)
+if not result.ok:
+    raise RuntimeError(f"Save failed at {result.failed_at}: {result.message}")
+print("Saved command", command_id)
 ```
+
+`IrPayload.from_pronto(text)`, `from_raw_timings(timings_us, carrier_hz)`
+and `from_hex(text)` accept the other input formats. `read_payload(device_id,
+command_id)` returns `None` when no payload is stored, so check it before
+calling `play()`. `cancel_learn()` ends an active capture wait.
 
 A CLI ships as a console script:
 
@@ -446,10 +498,12 @@ x> rename act 101 Movie night        # snapshot, edit, sync
 x> bind 101 VOL_UP 7 3 7 4           # button -> device 7 command 3, long press command 4
 x> unbind 101 VOL_UP
 x> hubname Den
-x> backup hub.json | restore hub.json erase
+x> backup hub.json                   # save a full bundle
+x> restore hub.json                  # additive restore: creates new entities
+x> restore hub.json erase            # replacing restore: validates, then erases
 ```
 
-The last form is a CLI convenience: `send` (alias `press`) accepts either
+For command sending, the CLI's `send` (alias `press`) accepts either
 a numeric command/button code or a `ButtonName` alias like `POWER_ON`.
 The Python API itself is numeric-only — `send(entity_id, command_id)` —
 with the `ButtonName` constants importable from the package root when
@@ -466,6 +520,16 @@ schema-versioned backup/restore, provisioning a network device from
 scratch via restore, and building an HTTP callback listener on top of the
 library — live in
 [`sofabaton-x/examples/`](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/tree/main/sofabaton-x/examples).
+
+For a complete facade edit workflow, run
+[`examples/edit_activity.py`](examples/edit_activity.py) with a hub address,
+activity id and name. It connects, refreshes that entity, previews the plan
+and, with `--apply`, syncs and checks the result:
+
+```sh
+python sofabaton-x/examples/edit_activity.py --hub 192.168.1.50 --activity 101 --name "Movie night"
+python sofabaton-x/examples/edit_activity.py --hub 192.168.1.50 --activity 101 --name "Movie night" --apply
+```
 
 ## ◇ Protocol & networking docs
 
@@ -493,12 +557,26 @@ wire schemas, the `proxy_*` mixin modules) is internal and may change
 between minor releases. The public surface is async-first by design:
 `AsyncXProxy` is the supported entry point, and the underlying
 synchronous engine (reachable via `AsyncXProxy.sync` when you need the
-raw surface) is internal and not semver-covered. The library raises
-stdlib exceptions (`ValueError` for malformed/unclassifiable input,
-`RuntimeError` / `TimeoutError` for transport and ack failures). The
-facade's three typed errors (`HubBusyError`, `HubNotConnectedError`,
-`FetchTimeoutError`) are subclasses of those, never a separate
-hierarchy. Until 1.0, pin a minor version.
+raw surface) is internal and not semver-covered. Prefer the named facade
+methods in this README; compatibility delegates and direct engine access
+are for advanced consumers. Until 1.0, pin a minor version.
+
+The facade exports these typed exceptions, all subclasses of stdlib
+exceptions. Plain `ValueError` also reports malformed input or unsupported
+operations. Readiness waiters return a boolean; control sends may return
+`False`; sync and restore can return unsuccessful results. Check those
+values as well as catching exceptions.
+
+| exception | base | response |
+| --- | --- | --- |
+| `HubBusyError` | `RuntimeError` | wait until the app releases the hub |
+| `HubNotConnectedError` | `RuntimeError` | wait for reconnection before retrying |
+| `FetchTimeoutError` | `TimeoutError` | a read timed out; retain cached data and retry with backoff |
+| `SnapshotIncompleteError` | `ValueError` | refresh the target entity before editing |
+| `SnapshotOutdatedError` | `ValueError` | obtain a new snapshot and reapply the intended edit |
+| `StateDocumentError` | `ValueError` | discard the unreadable state document and start cold |
+| `HubRejectedError` | `RuntimeError` | inspect hub state before retrying a write; its outcome may be uncertain |
+| `IrLearnError` | `RuntimeError` | inspect `state`; retry capture with the hub idle if appropriate |
 
 ## ◇ Issues & release notes
 
@@ -508,8 +586,9 @@ For standalone library issues, include the command you ran, the terminal
 output or traceback, the package and Python versions, and a small
 reproduction snippet if possible.
 
-Library versions are tagged `sofabaton-x-vX.Y.Z`; release notes live on
-the
+See the [changelog](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/sofabaton-x/CHANGELOG.md)
+for library changes and migration instructions. Library versions are tagged
+`sofabaton-x-vX.Y.Z`; published releases are listed on the
 [GitHub releases page](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/releases).
 
 ## ◇ License
