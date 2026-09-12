@@ -1348,3 +1348,31 @@ def test_status_ack_that_finished_a_burst_is_not_left_consumable(monkeypatch) ->
     monkeypatch.setattr(engine, "note_catalog_status_ack", lambda status: calls.append(status) or True)
     engine.notify_ack(op, b"\x00")
     assert calls == [] and len(engine._ack_queue) == 2
+
+
+# ---------------------------------------------------------------------------
+# diag_parse gates the decoded summaries only, never the protocol
+# ---------------------------------------------------------------------------
+
+# An X1S banner reply as captured on the wire (probe 2026-09-12): the frame
+# the opcode handlers turn into get_banner_info().
+_BANNER_FRAME = bytes.fromhex(
+    "a55a1e02e26a44861b4500022022112005010058312048554220"
+    "62656e63683233304d"
+)
+
+
+@pytest.mark.parametrize("diag_dump, diag_parse", [(False, False), (True, False), (False, True), (True, True)])
+def test_inbound_frames_are_dispatched_whatever_the_diag_flags(diag_dump, diag_parse) -> None:
+    """Handler dispatch used to live under ``if self.diag_parse``, so a
+    diag_parse=False engine never recorded the banner, never saw an ack and
+    never finished a burst (latent since the first commit; a diagnostics-off
+    bench probe found it 2026-09-12)."""
+
+    engine = x1_proxy_mod.X1Proxy("127.0.0.1", hub_version="X1S", proxy_enabled=False,
+                                  diag_dump=diag_dump, diag_parse=diag_parse)
+    assert not engine.get_banner_info()
+    engine._handle_hub_frame(_BANNER_FRAME, 1)
+    info = engine.get_banner_info()
+    assert info.get("model") == "X1S" and str(info.get("mac", "")).upper() == "E26A44861B45", info
+    assert engine.has_banner_identity()

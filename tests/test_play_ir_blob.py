@@ -715,6 +715,9 @@ def test_extract_single_frame_play_blob_unwraps_first_chunk_payload() -> None:
 
 def test_log_frames_logs_descriptive_play_blob_from_app(caplog) -> None:
     proxy = _new_proxy()
+    # The decoded summaries are what diag_parse gates (dispatch never was,
+    # since 2026-09-12); this test is about the summary line.
+    proxy.diag_parse = True
     payload = bytes.fromhex("01 00 01 01 00 01 00 00 00 00 00 00 00 00 00") + SONY12_DESCRIPTOR_BLOB
     opcode = (len(payload) << 8) | 0x0F
     raw = bytes.fromhex("a5 5a") + opcode.to_bytes(2, "big") + payload + b"\x00"

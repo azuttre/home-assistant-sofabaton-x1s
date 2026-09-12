@@ -2208,12 +2208,31 @@ unanswered idle read and a refused delete); an empty-catalog answer is
 now verified once over a non-empty cache; the reference rewriter added
 `device_id: None` to rows that carry no such key; derived binding labels
 counted as a change; and the projection listed entities by id, not by
-the hub's display order. Observed hub behaviour: the X1S answers no
-catalog read for several minutes after a remote-sync trigger; a created
+the hub's display order. Observed hub behaviour: a created
 device takes sort position 0 (first) and a created activity the last
 position; `sort` is renumbered on every create and delete; a rename made
 outside the library is invisible to the stage B check (the preflight
 signature covers bindings, macros and favorites, by design).
+
+Reads during a remote sync are fine (probe 2026-09-12, X1S: after a
+`0x64` trigger, the device and activity catalogs and a full activity
+re-read answered within ~2.5 s every 8 s for a minute; only the read
+issued in the same instant as the trigger got no reply, the usual
+"request arriving mid-burst is dropped" behaviour). Marcel's word that
+the hub never blocks reads while a remote syncs holds. The two probes
+that saw no catalog rows for minutes were explained the same evening and
+the hub was never involved: they constructed the engine with
+`diag_parse=False`, and handler dispatch (the banner, acks, catalog rows)
+lived under that flag inside `_log_frames` since the first commit, so
+such an engine never processed an inbound frame. Nobody real runs that
+way (the integration passes `diag_parse=True`, the server and the benches
+default to it), which is why no bench ever saw it. Fixed the same day:
+dispatch always runs, `diag_parse` gates only the decoded summaries;
+a real-engine test feeds a captured banner frame under all four flag
+combinations, and the four combinations were re-probed on the X1S
+(devices in 0.8 s each). Reconnecting immediately after a session ends
+was also probed (seven back-to-back sessions, all ready within 2 s): no
+lingering-session effect.
 
 The X1 ran the final bench unchanged on its first attempt. Not run: the
 X2 (not offered for this program), the server routes against a live hub
