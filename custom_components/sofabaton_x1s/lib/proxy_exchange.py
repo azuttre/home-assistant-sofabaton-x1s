@@ -30,6 +30,7 @@ import time
 
 from .ack import AckOutcome, SendStepResult
 from .device_create import ACK_OPCODE_STATUS, ACK_STATUS_BYTE_OK
+from .write_batch import REMOTE_SYNC_FAMILY
 from .hub_logging import LogTag
 
 
@@ -139,6 +140,13 @@ class ExchangeMixin:
         fail fast on the first hub-side refusal instead of spinning out
         the per-step timeout.
         """
+
+        # A physical remote-sync step inside a write batch is recorded and
+        # sent once at the batch end (phase 4, H2); answer as acked so the
+        # orchestration that sent it carries on.
+        defer = getattr(self, "_defer_remote_sync", None)
+        if family == REMOTE_SYNC_FAMILY and callable(defer) and defer(step_name):
+            return SendStepResult(AckOutcome.acked, ack_opcode=ack_opcode, ack_payload=b"\x00")
 
         candidates: list[tuple[int, int | None]] = [(ack_opcode, ack_first_byte)]
         candidates.extend((fallback_opcode, None) for fallback_opcode in ack_fallback_opcodes)

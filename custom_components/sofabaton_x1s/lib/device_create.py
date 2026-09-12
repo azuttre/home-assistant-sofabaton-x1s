@@ -284,6 +284,12 @@ def run_create_sequence(
     steps_list = list(steps)
 
     for index, step in enumerate(steps_list):
+        # A terminal remote-sync step inside an engine write batch is
+        # deferred to the batch end (phase 4, H2); ``getattr`` tolerance
+        # for test doubles, as with ``exchange`` below.
+        defer = getattr(proxy, "_defer_remote_sync", None)
+        if step.family == FAMILY_REMOTE_SYNC and callable(defer) and defer(step.label):
+            continue
         # Build the list of (opcode, first_byte) candidates the wait
         # call should accept. We include both the success-first-byte
         # and any rejection-first-bytes so the wait returns as soon as

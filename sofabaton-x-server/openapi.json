@@ -109,6 +109,419 @@
         "title": "ActivityCreateRequest",
         "type": "object"
       },
+      "ApplyItemView": {
+        "properties": {
+          "completed_steps": {
+            "default": 0,
+            "title": "Completed Steps",
+            "type": "integer"
+          },
+          "entity_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entity Id"
+          },
+          "entity_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entity Kind"
+          },
+          "failed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failed At"
+          },
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "placeholder_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder Id"
+          },
+          "preflight": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preflight"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "total_steps": {
+            "default": 0,
+            "title": "Total Steps",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "index",
+          "kind",
+          "label",
+          "status"
+        ],
+        "title": "ApplyItemView",
+        "type": "object"
+      },
+      "ApplySummary": {
+        "description": "One apply record as ``GET /applies`` lists it (documents omitted).",
+        "properties": {
+          "apply_id": {
+            "title": "Apply Id",
+            "type": "string"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "cursor": {
+            "default": 0,
+            "title": "Cursor",
+            "type": "integer"
+          },
+          "failed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failed At"
+          },
+          "hub_id": {
+            "title": "Hub Id",
+            "type": "string"
+          },
+          "id_map": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Id Map",
+            "type": "object"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idempotency Key"
+          },
+          "item_count": {
+            "default": 0,
+            "title": "Item Count",
+            "type": "integer"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "needs_refresh": {
+            "items": {
+              "$ref": "#/components/schemas/EntityRefView"
+            },
+            "title": "Needs Refresh",
+            "type": "array"
+          },
+          "remote_sync": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remote Sync"
+          },
+          "resumable": {
+            "title": "Resumable",
+            "type": "boolean"
+          },
+          "runs": {
+            "default": 0,
+            "title": "Runs",
+            "type": "integer"
+          },
+          "snapshot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot Id"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          },
+          "writes": {
+            "default": 0,
+            "title": "Writes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "apply_id",
+          "hub_id",
+          "status",
+          "resumable",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ApplySummary",
+        "type": "object"
+      },
+      "ApplyView": {
+        "description": "The full record: the summary plus every item and the two documents.",
+        "properties": {
+          "apply_id": {
+            "title": "Apply Id",
+            "type": "string"
+          },
+          "baseline": {
+            "additionalProperties": true,
+            "title": "Baseline",
+            "type": "object"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "cursor": {
+            "default": 0,
+            "title": "Cursor",
+            "type": "integer"
+          },
+          "desired": {
+            "additionalProperties": true,
+            "title": "Desired",
+            "type": "object"
+          },
+          "failed_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failed At"
+          },
+          "hub_id": {
+            "title": "Hub Id",
+            "type": "string"
+          },
+          "id_map": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Id Map",
+            "type": "object"
+          },
+          "idempotency_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Idempotency Key"
+          },
+          "item_count": {
+            "default": 0,
+            "title": "Item Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ApplyItemView"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "job_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Job Id"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "needs_refresh": {
+            "items": {
+              "$ref": "#/components/schemas/EntityRefView"
+            },
+            "title": "Needs Refresh",
+            "type": "array"
+          },
+          "placeholders": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Placeholders",
+            "type": "object"
+          },
+          "remote_sync": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remote Sync"
+          },
+          "resumable": {
+            "title": "Resumable",
+            "type": "boolean"
+          },
+          "runs": {
+            "default": 0,
+            "title": "Runs",
+            "type": "integer"
+          },
+          "snapshot_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Snapshot Id"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          },
+          "writes": {
+            "default": 0,
+            "title": "Writes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "apply_id",
+          "hub_id",
+          "status",
+          "resumable",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ApplyView",
+        "type": "object"
+      },
       "BackupRequest": {
         "properties": {
           "device_ids": {
@@ -793,6 +1206,24 @@
         "title": "EntityPayload",
         "type": "object"
       },
+      "EntityRefView": {
+        "properties": {
+          "entity_id": {
+            "title": "Entity Id",
+            "type": "integer"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "entity_id"
+        ],
+        "title": "EntityRefView",
+        "type": "object"
+      },
       "Favorite": {
         "description": "An activity favorite: a device command; send with ``send(device_id, command_id)``.",
         "properties": {
@@ -1298,6 +1729,136 @@
           "status"
         ],
         "title": "HubStatusView",
+        "type": "object"
+      },
+      "HubSyncItemView": {
+        "description": "One unit of a document write, in run order.",
+        "properties": {
+          "entity_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entity Id"
+          },
+          "entity_kind": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entity Kind"
+          },
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "placeholder_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Placeholder Id"
+          },
+          "provisional": {
+            "default": false,
+            "title": "Provisional",
+            "type": "boolean"
+          },
+          "step_count": {
+            "default": 0,
+            "title": "Step Count",
+            "type": "integer"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/SyncPlanStepView"
+            },
+            "title": "Steps",
+            "type": "array"
+          }
+        },
+        "required": [
+          "index",
+          "kind",
+          "label"
+        ],
+        "title": "HubSyncItemView",
+        "type": "object"
+      },
+      "HubSyncPlanView": {
+        "description": "What ``PUT /snapshot`` would do, in order. Nothing is written.\n\n``live_check`` lists the entities re-read before the first write;\n``provisional_ids`` maps each placeholder to the id the preview\nassumed (the hub assigns the real one). ``notes`` are the things a\nUI may want to confirm first: deletions, payload overwrites,\nmembership changes.",
+        "properties": {
+          "item_count": {
+            "title": "Item Count",
+            "type": "integer"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/HubSyncItemView"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "live_check": {
+            "items": {
+              "$ref": "#/components/schemas/EntityRefView"
+            },
+            "title": "Live Check",
+            "type": "array"
+          },
+          "live_check_count": {
+            "title": "Live Check Count",
+            "type": "integer"
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Notes",
+            "type": "array"
+          },
+          "provisional_ids": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Provisional Ids",
+            "type": "object"
+          },
+          "step_count": {
+            "title": "Step Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "item_count",
+          "step_count",
+          "items",
+          "notes",
+          "live_check",
+          "live_check_count",
+          "provisional_ids"
+        ],
+        "title": "HubSyncPlanView",
         "type": "object"
       },
       "HubView": {
@@ -2239,6 +2800,35 @@
         "title": "SnapshotDocument",
         "type": "object"
       },
+      "SnapshotEditDocument": {
+        "additionalProperties": true,
+        "description": "The edited snapshot document: what ``GET /snapshot`` returned, changed.\n\nHeader fields are ignored (``snapshot_id`` goes in ``If-Match``). A new\ndevice or activity carries a negative ``device.device_id`` of the\nclient's choosing, and every reference to it elsewhere in the document\n(bindings, favorites, macro steps, membership) uses that same negative\nid; the hub assigns the real id and the server maps it. The array\norder of ``devices`` / ``activities`` is the display order. A removed\nentity must be removed from every activity in the same document.",
+        "properties": {
+          "activities": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Activities",
+            "type": "array"
+          },
+          "devices": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Devices",
+            "type": "array"
+          },
+          "hub": {
+            "additionalProperties": true,
+            "title": "Hub",
+            "type": "object"
+          }
+        },
+        "title": "SnapshotEditDocument",
+        "type": "object"
+      },
       "SnapshotEntityPayload": {
         "additionalProperties": true,
         "description": "One device or activity in the snapshot: provenance typed, tables open.\n\n``complete`` / ``editable`` / ``fetched_at`` are the library's\nper-entity provenance (facts about the server's copy, never about\nthe hub); ``commands``, ``button_bindings``,\n``macros``, ``favorite_slots`` and the other tables follow the\nlibrary's ``hub_bundle`` shape and are passed through as they are.",
@@ -2369,6 +2959,35 @@
         "title": "SyncPlanStep",
         "type": "object"
       },
+      "SyncPlanStepView": {
+        "properties": {
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "target_device_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Device Id"
+          }
+        },
+        "required": [
+          "kind",
+          "label"
+        ],
+        "title": "SyncPlanStepView",
+        "type": "object"
+      },
       "WriteProgress": {
         "description": "One progress report from a long-running operation (refresh, sync).\n\n``phase`` is the operation's own phase word (``preparing``, ``device``,\n``activity``, ``stale_check``, ``writing``, ``finalizing`` ...);\n``entity_kind`` / ``entity_id`` name the entity being worked on when\nthere is one; ``step_kind`` is the sync step kind while writing.",
         "properties": {
@@ -2397,6 +3016,28 @@
               }
             ],
             "title": "Entity Kind"
+          },
+          "item_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Item Count"
+          },
+          "item_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Item Index"
           },
           "message": {
             "title": "Message",
@@ -4817,6 +5458,266 @@
         "summary": "The running activity, or null when the hub is idle",
         "tags": [
           "hub"
+        ]
+      }
+    },
+    "/api/v1/hubs/{hub_id}/applies": {
+      "get": {
+        "operationId": "listApplies",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ApplySummary"
+                  },
+                  "title": "Response Listapplies",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "The hub's apply records, newest first (documents omitted)",
+        "tags": [
+          "apply"
+        ]
+      }
+    },
+    "/api/v1/hubs/{hub_id}/applies/{apply_id}": {
+      "delete": {
+        "operationId": "deleteApply",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "apply_id",
+            "required": true,
+            "schema": {
+              "title": "Apply Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Forget an apply record (not while its job runs)",
+        "tags": [
+          "apply"
+        ]
+      },
+      "get": {
+        "operationId": "getApply",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "apply_id",
+            "required": true,
+            "schema": {
+              "title": "Apply Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApplyView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "One apply record in full: items, outcomes, both documents, the id map",
+        "tags": [
+          "apply"
+        ]
+      }
+    },
+    "/api/v1/hubs/{hub_id}/applies/{apply_id}/resume": {
+      "post": {
+        "operationId": "resumeApply",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "apply_id",
+            "required": true,
+            "schema": {
+              "title": "Apply Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Continue a stopped or cancelled apply from the hub's actual state",
+        "tags": [
+          "apply"
         ]
       }
     },
@@ -8239,6 +9140,225 @@
         "summary": "The hub's structural configuration from the cache (no hub traffic)",
         "tags": [
           "snapshot"
+        ]
+      },
+      "put": {
+        "operationId": "applySnapshot",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
+            "in": "header",
+            "name": "If-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "the quoted snapshot_id the edit was made on (the snapshot ETag is accepted too)",
+              "title": "If-Match"
+            }
+          },
+          {
+            "description": "a client-chosen token; the same token with the same document returns the existing apply",
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "a client-chosen token; the same token with the same document returns the existing apply",
+              "title": "Idempotency-Key"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SnapshotEditDocument"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "412": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Precondition Failed"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "428": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Precondition Required"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Write an edited snapshot document to the hub as one cancellable job; If-Match required",
+        "tags": [
+          "apply"
+        ]
+      }
+    },
+    "/api/v1/hubs/{hub_id}/snapshot/plan": {
+      "post": {
+        "operationId": "planSnapshotEdit",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SnapshotEditDocument"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HubSyncPlanView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "summary": "Preview what writing an edited snapshot document would do (nothing is written)",
+        "tags": [
+          "apply"
         ]
       }
     },

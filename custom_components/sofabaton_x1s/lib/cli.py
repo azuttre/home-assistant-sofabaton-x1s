@@ -98,8 +98,8 @@ def _parse_shell_args(rest: str) -> tuple[Optional[str], Dict[str, str], set[str
         if "=" in tok:
             key, value = tok.split("=", 1)
             opts[key.strip().lower()] = value.strip()
-        elif tok.lower() == "erase":
-            flags.add("erase")
+        elif tok.lower() in ("erase", "plan"):
+            flags.add(tok.lower())
         elif path is None:
             path = tok
     return path, opts, flags
@@ -223,6 +223,7 @@ class AsyncShell:
             "backup": self.cmd_backup,
             "restore": self.cmd_restore,
             "snapshot": self.cmd_snapshot,
+            "apply": self.cmd_apply,
             "refresh": self.cmd_refresh,
             "rename": self.cmd_rename,
             "bind": self.cmd_bind,
@@ -493,9 +494,20 @@ class AsyncShell:
     # ``sofabaton.edits`` to its bundle, sync the pair. The snapshot id rides
     # along so an edit made on a stale snapshot is refused before any write.
 
-    async def cmd_snapshot(self, _args: str) -> None:
+    async def cmd_snapshot(self, args: str) -> None:
+        import json
+
+        _path, opts, _flags = _parse_shell_args(args)
         snap = await self._safe("snapshot", self.p.snapshot())
         if snap is None:
+            return
+        out = opts.get("out")
+        if out:
+            # The document a later ``apply`` needs as its baseline.
+            with open(out, "w", encoding="utf-8") as fh:
+                json.dump(snap.to_dict(), fh, indent=2)
+            print(f"wrote {out}: snapshot {snap.snapshot_id[:12]}, "
+                  f"{len(snap.devices)} devices, {len(snap.activities)} activities, complete={snap.complete}")
             return
         print(
             f"snapshot {snap.snapshot_id[:12]}  complete={snap.complete}  "
@@ -509,6 +521,102 @@ class AsyncShell:
                 f"  {entity.kind:8} {entity.entity_id:4}  {entity.name or '?':30} "
                 f"{' '.join(flags) or 'editable'}"
             )
+
+    async def cmd_apply(self, args: str) -> None:
+        """Whole-document write (phase 4): ``apply <edited> baseline=<snapshot> [plan]``
+        or ``apply resume=<record>``. The baseline is the file ``snapshot out=``
+        wrote; the record ``<edited>.apply.json`` is written after every item and
+        is what ``resume=`` takes. A desired file alone is refused: an edited
+        document and a hash of its baseline are not the baseline."""
+
+        import json
+
+        from . import build_hub_sync_plan
+        from .hub_apply import ApplyState
+        from .hub_sync import DocumentError
+
+        path, opts, flags = _parse_shell_args(args)
+        resume = opts.get("resume")
+        if not resume and (not path or not opts.get("baseline")):
+            print("usage: apply <edited.json> baseline=<snapshot.json> [plan]")
+            print("       apply resume=<file.apply.json>")
+            return
+
+        def _load(file: str):
+            try:
+                with open(file, encoding="utf-8") as fh:
+                    return json.load(fh)
+            except (OSError, ValueError) as err:
+                print(f"cannot read {file}: {err}")
+                return None
+
+        def _report(result) -> None:
+            print(f"apply {result.apply_id[:12]}: {result.status}"
+                  + (f" ({result.failed_at}: {result.message})" if result.failed_at else ""))
+            for item in result.items:
+                where = item.entity_id if item.entity_id is not None else item.placeholder_id
+                steps = f" {item.completed_steps}/{item.total_steps}" if item.total_steps else ""
+                print(f"  {item.index:3} {item.kind:18} {where if where is not None else '':>5}  {item.status}{steps}"
+                      + (f"  {item.message}" if item.message and item.status != 'done' else ""))
+            if result.id_map:
+                print("  ids: " + ", ".join(f"{p} -> {v}" for p, v in sorted(result.id_map.items())))
+            print(f"  remote sync: {result.remote_sync}; snapshot {result.snapshot_id[:12] if result.snapshot_id else '?'}"
+                  + ("; resume with: apply resume=<record>" if result.resumable else ""))
+
+        if resume:
+            doc = _load(resume)
+            if doc is None:
+                return
+            try:
+                state = ApplyState.from_dict(doc)
+            except ValueError as err:
+                print(f"{resume}: {err}")
+                return
+            record_path = resume
+            kwargs: Dict[str, Any] = {"state": state}
+        else:
+            desired = _load(path)
+            baseline = _load(opts["baseline"])
+            if desired is None or baseline is None:
+                return
+            if "plan" in flags:
+                try:
+                    plan = build_hub_sync_plan(baseline, desired)
+                except DocumentError as err:
+                    print(f"refused ({err.code}): {err}")
+                    return
+                print(f"{len(plan.items)} item(s), {plan.step_count} step(s), "
+                      f"{len(plan.live_check)} entity re-read(s) before the first write; nothing written")
+                for item in plan.items:
+                    where = item.entity_id if item.entity_id is not None else item.placeholder_id
+                    print(f"  {item.index:3} {item.kind:18} {where if where is not None else '':>5}  {item.label}")
+                    for step in item.steps:
+                        print(f"        - {step.kind}: {step.label}")
+                for note in plan.notes:
+                    print(f"  note: {note}")
+                if plan.provisional_ids:
+                    print("  provisional ids: " + ", ".join(f"{p} -> {v}" for p, v in plan.provisional_ids.items()))
+                return
+            record_path = f"{path}.apply.json"
+            kwargs = {"baseline": baseline, "desired": desired, "snapshot_id": desired.get("snapshot_id")}
+
+        def _save(state) -> None:
+            with open(record_path, "w", encoding="utf-8") as fh:
+                json.dump(state.to_dict(), fh, indent=2)
+
+        try:
+            result = await self.p.sync_hub(
+                progress=lambda p: print(f"  [{p.item_index if p.item_index is not None else '-'}] {p.message}"),
+                on_state=_save, **kwargs,
+            )
+        except DocumentError as err:
+            print(f"refused ({err.code}): {err}")
+            return
+        except (RuntimeError, TimeoutError, ValueError) as err:
+            print(f"[apply] {err}")
+            return
+        _report(result)
+        print(f"record: {record_path}")
 
     async def cmd_refresh(self, args: str) -> None:
         _path, opts, _flags = _parse_shell_args(args)
@@ -638,7 +746,10 @@ class AsyncShell:
         print("  backup [file] [devices=ID,..]  back up the hub (subset = devices only)")
         print("  restore <file> [devices=ID,..] [activities=ID,..] [erase]")
         print("                                 restore a bundle; optionally a subset / erase-first")
-        print("  snapshot                       the cached configuration: every entity + its provenance")
+        print("  snapshot [out=FILE]            the cached configuration: every entity + its provenance")
+        print("  apply <edited.json> baseline=<snapshot.json> [plan]")
+        print("                                 write a whole edited snapshot document (plan = preview only)")
+        print("  apply resume=<file.apply.json> continue a stopped or cancelled apply")
         print("  refresh [dev=ID|act=ID]        re-read one entity, or the whole hub (slow)")
         print("  rename dev|act <id> <name>     rename a device / activity")
         print("  bind <act> <button> <dev> <cmd> [<lp_dev> <lp_cmd>]   bind a button (+ long press)")

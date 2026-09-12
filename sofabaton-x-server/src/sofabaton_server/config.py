@@ -46,6 +46,9 @@ class Settings:
     # (the X1 can call no other).
     callback_host: Optional[str] = None
     callback_port: int = 8060
+    # Finished apply records kept per hub (phase 4 plan, decision 13);
+    # unfinished ones stay until deleted or resumed.
+    apply_keep: int = 20
 
     def __post_init__(self) -> None:
         if isinstance(self.port, bool) or not isinstance(self.port, int) or not (0 < self.port < 65536):
@@ -62,6 +65,8 @@ class Settings:
                 except (ipaddress.AddressValueError, ValueError) as err:
                     raise ValueError(f"callback_host must be a dotted-decimal IPv4 address, got {self.callback_host!r}") from err
             object.__setattr__(self, "callback_host", host or None)
+        if isinstance(self.apply_keep, bool) or not isinstance(self.apply_keep, int) or self.apply_keep < 0:
+            raise ValueError(f"apply_keep must be a non-negative integer, got {self.apply_keep!r}")
         if not isinstance(self.bind, str) or not self.bind.strip():
             raise ValueError("bind must be a non-empty address")
         if (self.tls_cert is None) != (self.tls_key is None):
@@ -104,7 +109,7 @@ _LIST_FIELDS = {"trusted_proxies", "initial_hubs"}
 def _coerce(name: str, value: Any) -> Any:
     if value is None:
         return None
-    if name in ("port", "callback_port"):
+    if name in ("port", "callback_port", "apply_keep"):
         return int(value)
     if name in _LIST_FIELDS:
         if isinstance(value, str):

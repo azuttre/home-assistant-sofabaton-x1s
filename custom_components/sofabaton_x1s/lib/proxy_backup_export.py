@@ -401,7 +401,9 @@ class BackupExportMixin:
                 skip_macros or dev_lo in self._macros_complete,
                 blobs_complete,
                 key_sort_row is not None,
-                idle_behavior is not None,
+                # A device with no idle record on the hub (0x07 to the read)
+                # is complete without the byte: absent is a known value.
+                idle_behavior is not None or dev_lo in getattr(self, "_idle_behavior_absent", ()),
             ]
         )
 

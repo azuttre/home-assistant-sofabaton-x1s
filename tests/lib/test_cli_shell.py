@@ -349,3 +349,134 @@ def test_edit_verbs_refuse_in_observe_mode(capsys):
         await _shell(fake).cmd_rename("act 101 Movie")
     asyncio.run(main())
     assert fake.synced == [] and "[sync]" in capsys.readouterr().out
+
+
+
+# ---------------------------------------------------------------------------
+# phase 4 H4: snapshot out= and apply
+# ---------------------------------------------------------------------------
+
+import copy
+import json
+
+hub_apply = importlib.import_module(f"{_pkg.__name__}.hub_apply")
+hub_sync = importlib.import_module(f"{_pkg.__name__}.hub_sync")
+models = importlib.import_module(f"{_pkg.__name__}.models")
+
+
+def _doc() -> dict:
+    return {
+        "kind": "hub_bundle", "complete": True, "payload_profile": "structural",
+        "hub": {"name": "Den", "version": "X1S"},
+        "devices": [{"kind": "device_backup", "complete": True, "editable": True,
+                     "device": {"device_id": 5, "name": "TV", "device_class": "ir"},
+                     "commands": [{"command_id": 1, "name": "Power"}], "button_bindings": [], "macros": [],
+                     "input_record": None, "key_sort": None}],
+        "activities": [{"kind": "activity_backup", "complete": True, "editable": True,
+                        "device": {"device_id": 101, "name": "Watch", "entity_type": "activity"},
+                        "button_bindings": [], "favorite_slots": [], "favorites_order": [], "macros": []}],
+    }
+
+
+def _fake_snapshot(doc: dict):
+    bundle = copy.deepcopy(doc)
+    return models.HubSnapshot(
+        snapshot_id=models.snapshot_content_id(bundle), captured_at="2026-09-12T00:00:00Z", engine_generation=3,
+        complete=True, hub=bundle["hub"],
+        devices=[models.SnapshotEntity("device", 5, "TV", True, True, None)],
+        activities=[models.SnapshotEntity("activity", 101, "Watch", True, True, None)],
+        bundle=bundle,
+    )
+
+
+def test_snapshot_out_writes_the_document(tmp_path, capsys):
+    out = tmp_path / "D0.json"
+
+    async def fake_snapshot():
+        return _fake_snapshot(_doc())
+
+    async def main():
+        shell = _shell(FakeProxy())
+        shell.p.snapshot = fake_snapshot
+        await shell.cmd_snapshot(f"out={out}")
+
+    asyncio.run(main())
+    written = json.loads(out.read_text(encoding="utf-8"))
+    assert written["snapshot_id"] and written["devices"][0]["device"]["name"] == "TV"
+    assert "wrote" in capsys.readouterr().out
+
+
+def test_apply_plan_previews_without_the_proxy(tmp_path, capsys):
+    base = _doc()
+    desired = copy.deepcopy(base)
+    desired["hub"]["name"] = "Loft"
+    desired["devices"].append({"device": {"device_id": -1, "name": "Projector", "device_class": "ir"},
+                               "commands": [], "button_bindings": [], "macros": []})
+    d0, d1 = tmp_path / "D0.json", tmp_path / "D1.json"
+    d0.write_text(json.dumps(base)); d1.write_text(json.dumps(desired))
+    calls = []
+
+    async def never(**kw):
+        calls.append(kw)
+
+    async def main():
+        shell = _shell(FakeProxy())
+        shell.p.sync_hub = never
+        await shell.cmd_apply(f"{d1} baseline={d0} plan")
+        await shell.cmd_apply(f"{d1}")  # no baseline: usage, nothing runs
+        bad = copy.deepcopy(desired)
+        bad["activities"][0]["button_bindings"].append(
+            {"button_id": 1, "device_id": -9, "command_id": 1, "long_press_device_id": None, "long_press_command_id": None})
+        (tmp_path / "bad.json").write_text(json.dumps(bad))
+        await shell.cmd_apply(f"{tmp_path / 'bad.json'} baseline={d0} plan")
+
+    asyncio.run(main())
+    out = capsys.readouterr().out
+    assert "3 item(s)" in out and "hub_rename" in out and "add_device" in out and "nothing written" in out
+    assert "provisional ids: -1 -> 1" in out
+    assert "usage: apply" in out
+    assert "refused (dangling_reference)" in out
+    assert calls == []
+
+
+def test_apply_runs_sync_hub_and_writes_the_record_then_resumes(tmp_path, capsys):
+    base = _doc()
+    desired = copy.deepcopy(base)
+    desired["hub"]["name"] = "Loft"
+    desired["snapshot_id"] = "abc123"
+    d0, d1 = tmp_path / "D0.json", tmp_path / "D1.json"
+    d0.write_text(json.dumps(base)); d1.write_text(json.dumps(desired))
+    seen = []
+
+    async def fake_sync_hub(**kw):
+        seen.append(kw)
+        state = kw.get("state")
+        if state is None:
+            plan = hub_sync.build_hub_sync_plan(kw["baseline"], kw["desired"])
+            state = hub_apply.ApplyState.new(kw["baseline"], kw["desired"], plan, hub_version="X1S")
+            state.items[0].status = "partial"
+            state.items[0].failed_at, state.items[0].message = "hub", "no ack"
+            state.status, state.failed_at, state.message = "stopped", "item", "item 0 partial: no ack"
+        else:
+            state.items[0].status = "done"
+            state.status = "success"
+            state.remote_sync, state.snapshot_id = "not_needed", "def456"
+        kw["on_state"](state)
+        return hub_apply.HubSyncResult.from_state(state)
+
+    record = tmp_path / "D1.json.apply.json"
+
+    async def main():
+        shell = _shell(FakeProxy())
+        shell.p.sync_hub = fake_sync_hub
+        await shell.cmd_apply(f"{d1} baseline={d0}")
+        assert record.exists()
+        await shell.cmd_apply(f"resume={record}")
+
+    asyncio.run(main())
+    out = capsys.readouterr().out
+    assert seen[0]["baseline"] == base and seen[0]["desired"] == desired and seen[0]["snapshot_id"] == "abc123"
+    assert "stopped (item: item 0 partial: no ack)" in out and "resume with: apply resume=<record>" in out
+    assert isinstance(seen[1]["state"], hub_apply.ApplyState) and seen[1].get("baseline") is None
+    assert "success" in out and "hub_rename" in out
+    assert json.loads(record.read_text(encoding="utf-8"))["status"] == "success"

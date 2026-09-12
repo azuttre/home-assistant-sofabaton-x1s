@@ -1087,3 +1087,264 @@ def test_action_id_prefers_the_banner_mac_over_the_proxy_id() -> None:
     assert engine._stable_hub_action_id() == "e26a44861b45"
     engine.mdns_txt["MAC"] = "00:11:22:33:44:55"
     assert engine._stable_hub_action_id() == "e26a44861b45"           # the banner still wins
+
+
+# ---------------------------------------------------------------------------
+# phase 4 H2: the engine write batch and the strict preflight
+# ---------------------------------------------------------------------------
+
+device_create_mod = importlib.import_module(f"{_pkg.__name__}.device_create")
+protocol_const = importlib.import_module(f"{_pkg.__name__}.protocol_const")
+
+
+def _batch_doc() -> dict:
+    return {
+        "kind": "hub_bundle",
+        "hub": {"name": "Den", "version": "X1S"},
+        "devices": [
+            {"device": {"device_id": 5, "name": "TV", "device_class": "ir"},
+             "commands": [{"command_id": 1, "name": "Power"}], "button_bindings": [], "macros": [],
+             "input_record": None, "key_sort": None, "complete": True},
+        ],
+        "activities": [
+            {"device": {"device_id": 101, "name": "Watch", "entity_type": "activity"},
+             "button_bindings": [], "favorite_slots": [], "favorites_order": [], "macros": [],
+             "complete": True},
+        ],
+    }
+
+
+@pytest.mark.parametrize("hub_version, trigger", [
+    ("X1S", (protocol_const.OP_REMOTE_SYNC, b"")),
+    ("X2", (protocol_const.OP_X2_REMOTE_SYNC_ALL, b"\xff\xff\xff")),
+])
+def test_write_batch_coalesces_every_remote_sync_path_into_one_trigger(monkeypatch, hub_version, trigger) -> None:
+    engine = _engine(hub_version)
+    _hub_link(engine, True)
+    enqueued: list = []
+    monkeypatch.setattr(engine, "enqueue_cmd", lambda opcode, payload=b"", **kw: enqueued.append((opcode, payload)) or True)
+    frames: list = []
+    monkeypatch.setattr(engine, "_send_family_frame", lambda family, payload: frames.append((family, payload)))
+
+    engine.begin_write_batch()
+    assert engine.write_batch_open
+    # 1. resync_remote itself (create_device, restore).
+    assert engine.resync_remote() is True
+    # 2. the inline 0x64 step the reorder writes send through execute_exchange.
+    step = engine.execute_exchange(step_name="device-sort-remote-sync", family=0x64, payload=b"",
+                                   ack_opcode=0x0103, ack_first_byte=0x00)
+    assert step.ok
+    # 3. a create sequence's terminal step.
+    seq = device_create_mod.run_create_sequence(engine, [device_create_mod.build_remote_sync_step()])
+    assert seq.success
+    assert enqueued == [] and frames == [], "a batch must send no trigger while open"
+
+    summary = engine.end_write_batch()
+    assert not engine.write_batch_open
+    assert summary["remote_sync"] == "sent" and summary["remote_sync_requests"] == 3
+    assert summary["origins"][:2] == ["resync_remote", "device-sort-remote-sync"]
+    assert enqueued == [trigger] and frames == []
+
+
+def test_write_batch_without_requests_sends_nothing_and_reports_not_needed(monkeypatch) -> None:
+    engine = _engine()
+    _hub_link(engine, True)
+    enqueued: list = []
+    monkeypatch.setattr(engine, "enqueue_cmd", lambda *a, **kw: enqueued.append(a) or True)
+    engine.begin_write_batch()
+    assert engine.end_write_batch() == {"remote_sync": "not_needed", "remote_sync_requests": 0, "origins": []}
+    assert enqueued == []
+
+
+def test_write_batch_reports_a_failed_trigger_and_can_drop_it(monkeypatch) -> None:
+    engine = _engine()
+    # Hub not writable: the coalesced trigger cannot be enqueued.
+    engine.begin_write_batch()
+    engine.resync_remote()
+    assert engine.end_write_batch()["remote_sync"] == "failed"
+    # send_remote_sync=False drops the pending requests without sending.
+    enqueued: list = []
+    monkeypatch.setattr(engine, "enqueue_cmd", lambda *a, **kw: enqueued.append(a) or True)
+    engine.begin_write_batch()
+    engine.resync_remote()
+    summary = engine.end_write_batch(send_remote_sync=False)
+    assert summary["remote_sync"] == "not_needed" and summary["remote_sync_requests"] == 1
+    assert enqueued == []
+
+
+def test_write_batch_is_exclusive_and_outside_it_the_trigger_goes_out(monkeypatch) -> None:
+    engine = _engine()
+    _hub_link(engine, True)
+    enqueued: list = []
+    monkeypatch.setattr(engine, "enqueue_cmd", lambda opcode, payload=b"", **kw: enqueued.append(opcode) or True)
+    with pytest.raises(RuntimeError):
+        engine.end_write_batch()
+    engine.begin_write_batch()
+    with pytest.raises(RuntimeError):
+        engine.begin_write_batch()
+    engine.end_write_batch()
+    assert engine.resync_remote() is True
+    assert enqueued == [protocol_const.OP_REMOTE_SYNC]
+
+
+def test_strict_preflight_refuses_what_the_lenient_one_lets_through(monkeypatch) -> None:
+    engine = _engine()
+    _hub_link(engine, True)
+    doc = _batch_doc()
+
+    monkeypatch.setattr(engine, "backup_activity", lambda *a, **kw: None)
+    monkeypatch.setattr(engine, "backup_device", lambda *a, **kw: None)
+    assert engine._activity_sync_preflight(doc, 101, strict=False) == (None, None)
+    assert engine._device_sync_preflight(doc, 5, strict=False) == (None, None)
+    verdict, message = engine._activity_sync_preflight(doc, 101, strict=True)
+    assert verdict == "unreadable" and "re-read" in message and "nothing was written" in message
+    assert engine._device_sync_preflight(doc, 5, strict=True)[0] == "unreadable"
+    assert engine._activity_sync_is_stale(doc, 101) is False  # the lenient wrapper is unchanged
+
+    monkeypatch.setattr(engine, "backup_activity", lambda *a, **kw: {**doc["activities"][0], "complete": False})
+    assert engine._activity_sync_preflight(doc, 101, strict=False) == (None, None)
+    verdict, message = engine._activity_sync_preflight(doc, 101, strict=True)
+    assert verdict == "incomplete" and "incomplete" in message
+
+
+def test_sync_activity_strict_preflight_fails_before_any_write(monkeypatch) -> None:
+    engine = _engine()
+    _hub_link(engine, True)
+    doc = _batch_doc()
+    edited = _pkg.edits.bind_button(doc, 101, int(_pkg.ButtonName.VOL_UP), 5, 1)
+    monkeypatch.setattr(engine, "backup_activity", lambda *a, **kw: None)
+    frames: list = []
+    monkeypatch.setattr(engine, "_send_family_frame", lambda family, payload: frames.append((family, payload)))
+
+    result = engine.sync_activity(baseline=doc, edited=edited, activity_id=101, strict_preflight=True)
+    assert result["status"] == "failed" and result["failed_at"] == "stale_check"
+    assert result["preflight"] == "unreadable"
+    assert frames == []
+
+
+# ---------------------------------------------------------------------------
+# bench_230 finding: an idle read answered "no record" is known absent
+# ---------------------------------------------------------------------------
+
+
+def test_idle_read_answered_no_record_is_known_absent_and_wakes_the_waiter(monkeypatch) -> None:
+    engine = _engine()
+    _hub_link(engine, True)
+    sent: list = []
+
+    def hub_answers_no_record(dev):
+        # The hub's reply to the read: a bare STATUS_ACK 0x07.
+        sent.append(dev)
+        engine.note_catalog_status_ack(0x07)
+        return True
+
+    monkeypatch.setattr(engine, "request_idle_behavior", hub_answers_no_record)
+
+    # Before any answer: unknown, and a fetch would ask the hub.
+    assert engine.get_idle_behavior(12, fetch_if_missing=False) == (None, False)
+
+    # The read is in flight; the hub answers with a bare STATUS_ACK 0x07.
+    engine._idle_behavior_pending = 12
+    assert engine.note_catalog_status_ack(0x07) is False
+    assert 12 in engine._idle_behavior_absent and engine._idle_behavior_pending is None
+    assert engine.get_idle_behavior(12, fetch_if_missing=False) == (None, True)
+    # A waiting fetch returns at once with "known, absent" (no timeout).
+    t = time.monotonic()
+    assert engine.fetch_idle_behavior(12, timeout=5.0) == (None, True)
+    assert time.monotonic() - t < 1.0
+
+    # The state document carries it; an import restores it.
+    doc = engine.export_cache_state()
+    assert doc["detail_complete"]["idle_absent"] == [12]
+    fresh = _engine()
+    fresh.import_cache_state(doc)
+    assert 12 in fresh._idle_behavior_absent
+
+    # A later value (set locally or read back) supersedes "absent".
+    engine.record_idle_behavior_value(12, 2, source="local_set")
+    assert 12 not in engine._idle_behavior_absent
+    assert engine.get_idle_behavior(12, fetch_if_missing=False) == (2, True)
+
+    # A 0x07 with no idle read pending is not attributed to one.
+    engine._idle_behavior_pending = None
+    engine.note_catalog_status_ack(0x07)
+    assert 12 not in engine._idle_behavior_absent
+
+
+# ---------------------------------------------------------------------------
+# bench_230 finding: an empty-catalog reply over a non-empty cache is verified
+# ---------------------------------------------------------------------------
+
+
+def test_empty_catalog_reply_over_a_non_empty_cache_is_doubted_once() -> None:
+    engine = _engine()
+    # An empty cache believes the first empty answer (an empty or erased hub).
+    assert engine._doubt_empty_catalog("activities", 1, False) is False
+    # A non-empty cache doubts it: no commit, one re-request.
+    assert engine._doubt_empty_catalog("activities", 2, True) is True
+    # The same request answered again: still doubted (no new generation).
+    assert engine._doubt_empty_catalog("activities", 2, True) is True
+    # The re-request (a later generation) answered empty too: believed.
+    assert engine._doubt_empty_catalog("activities", 3, True) is False
+    # A committed catalog with rows clears the doubt, so a later empty
+    # answer is doubted afresh.
+    engine._clear_empty_catalog_doubt("activities")
+    assert engine._doubt_empty_catalog("activities", 4, True) is True
+    # The two catalogs are tracked apart.
+    assert engine._doubt_empty_catalog("devices", 4, True) is True
+    assert engine._doubt_empty_catalog("devices", 5, True) is False
+
+
+def test_stray_empty_reply_does_not_commit_an_empty_activities_catalog(monkeypatch) -> None:
+    """The live sequence: the cache holds activities, a catalog request is in
+    flight, a per-entity 0x07 arrives and is taken for the catalog's answer.
+    The catalog must survive it, and the request must go out again."""
+
+    engine = _engine()
+    _hub_link(engine, True)
+    engine.state.activities = {101: {"name": "Watch TV"}}
+    engine._activities_catalog_ready = True
+    reissued: list = []
+    monkeypatch.setattr(engine, "request_activities", lambda **kw: reissued.append(kw) or True)
+    finished: list = []
+    monkeypatch.setattr(engine._burst, "finish", lambda kind, **kw: finished.append(kind) or True)
+
+    engine._begin_activity_request()
+    generation = engine._activity_request_inflight
+    engine.note_catalog_status_ack(0x07)
+    assert finished == ["activities"] and reissued == [{}]
+    assert engine._activity_pending_expected_rows is None, "expected_rows=0 would have committed an empty catalog"
+    assert engine.state.activities == {101: {"name": "Watch TV"}}
+
+    # The re-request answers empty as well: now it is believed.
+    engine._begin_activity_request()
+    assert engine._activity_request_inflight > generation
+    engine.note_catalog_status_ack(0x07)
+    assert engine._activity_pending_expected_rows == 0 and len(finished) == 2 and len(reissued) == 1
+
+
+# ---------------------------------------------------------------------------
+# bench_230 finding: a burst-terminating 0x07 is not left for the next exchange
+# ---------------------------------------------------------------------------
+
+
+def test_status_ack_that_finished_a_burst_is_not_left_consumable(monkeypatch) -> None:
+    engine = _engine()
+    protocol_const = importlib.import_module(f"{_pkg.__name__}.protocol_const")
+    op = protocol_const.OP_STATUS_ACK
+
+    # The byte terminated a read burst: it answered that burst, nobody else.
+    monkeypatch.setattr(engine, "note_catalog_status_ack", lambda status: True)
+    engine.notify_ack(op, b"\x07")
+    assert list(engine._ack_queue) == []
+
+    # A 0x07 that finished no burst is an exchange's own reply and stays.
+    monkeypatch.setattr(engine, "note_catalog_status_ack", lambda status: False)
+    engine.notify_ack(op, b"\x07")
+    assert [(o, p) for o, p, _ts in engine._ack_queue] == [(op, b"\x07")]
+
+    # An accepted (0x00) ack never goes through the catalog hook.
+    calls: list = []
+    monkeypatch.setattr(engine, "note_catalog_status_ack", lambda status: calls.append(status) or True)
+    engine.notify_ack(op, b"\x00")
+    assert calls == [] and len(engine._ack_queue) == 2

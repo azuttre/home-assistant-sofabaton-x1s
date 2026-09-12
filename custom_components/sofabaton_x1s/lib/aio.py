@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import functools
+from dataclasses import dataclass, field
 import inspect
 import logging
 from typing import Any, AsyncIterator, Callable, Iterable, Optional, Sequence
@@ -55,6 +57,8 @@ from .devices import parse_device_record
 from .device_class_profiles import supported_create_classes
 from .models import (
     Activity,
+    BatchOutcome,
+    WriteBatch,
     ActivityChanged,
     Button,
     CatalogReady,
@@ -79,6 +83,7 @@ from .models import (
     snapshot_content_id,
 )
 from .payloads import MIN_PAYLOAD_BYTES, IrPayload
+from .hub_apply import ApplyState, HubSyncResult, run_sync_hub
 from .version import __version__
 from .protocol_const import BUTTONNAME_BY_CODE, ButtonName
 from .x1_proxy import X1Proxy
@@ -173,6 +178,21 @@ def _bundle_entity(bundle: Any, kind: str, entity_id: int) -> Optional[dict]:
     return None
 
 
+def _display_order_key(payload: Any) -> tuple:
+    block = payload.get("device") if isinstance(payload, dict) else None
+    block = block if isinstance(block, dict) else {}
+    sort = block.get("sort")
+    try:
+        sort_key = (0, int(sort)) if sort is not None else (1, 0)
+    except (TypeError, ValueError):
+        sort_key = (1, 0)
+    try:
+        entity_id = int(block.get("device_id", 0))
+    except (TypeError, ValueError):
+        entity_id = 0
+    return (*sort_key, entity_id)
+
+
 def _snapshot_entity(kind: str, payload: dict) -> SnapshotEntity:
     block = payload.get("device") or {}
     try:
@@ -188,6 +208,17 @@ def _snapshot_entity(kind: str, payload: dict) -> SnapshotEntity:
         editable=bool(payload.get("editable", payload.get("complete"))),
         fetched_at=payload.get("fetched_at"),
     )
+
+
+@dataclass
+class _FacadeBatch:
+    """Facade-side bookkeeping of one open batch_writes() block."""
+
+    start_snapshot_id: Optional[str]
+    device_ids: set[int] = field(default_factory=set)
+    activity_ids: set[int] = field(default_factory=set)
+    rebases: int = 0
+    force: bool = False
 
 
 class _ProgressReporter:
@@ -364,6 +395,9 @@ class AsyncXProxy:
             "create_device",
             "create_activity",
             "delete_device",
+            # write batch (phase 4 plan, H2)
+            "begin_write_batch",
+            "end_write_batch",
             "reorder_devices",
             "reorder_activities",
             "set_hub_name",
@@ -491,6 +525,9 @@ class AsyncXProxy:
         # Burst keys with a fetch in flight: a second read for the same
         # key joins the pending burst instead of issuing another request.
         self._inflight: set[str] = set()
+        # Open write batch (batch_writes): rebases accumulate here and the
+        # single snapshot_changed goes out when the batch closes.
+        self._batch: Optional[_FacadeBatch] = None
         # Connect-time initial sync (banner, devices, activities).
         self._initial_sync_armed = False
         self._initial_sync_task: Optional[asyncio.Task] = None
@@ -1278,6 +1315,7 @@ class AsyncXProxy:
         activity_id: int,
         progress: Optional[Callable] = None,
         snapshot_id: Optional[str] = None,
+        strict: bool = False,
     ) -> SyncResult:
         """Write the ``baseline`` → ``edited`` diff for one activity to the hub.
 
@@ -1297,6 +1335,12 @@ class AsyncXProxy:
         a :class:`WriteProgress` per step on the event loop. After a write
         the entity is re-read by the engine and a ``snapshot_changed``
         event carries the new snapshot id.
+
+        ``strict`` makes the engine's stale preflight refuse to write when
+        the entity cannot be re-read or comes back incomplete (``failed_at
+        == "stale_check"``, ``preflight`` naming which); by default such a
+        re-read is logged and the write proceeds, as the live editor
+        always did. A batch (:meth:`batch_writes`) uses strict.
         """
 
         self._raise_if_cannot_fetch(f"sync_activity({int(activity_id) & 0xFF})")
@@ -1307,6 +1351,7 @@ class AsyncXProxy:
             edited=edited,
             activity_id=activity_id,
             progress_callback=self._engine_progress(progress),
+            **({"strict_preflight": True} if strict else {}),
         )
         new_id = await self._rebase_after_write(result, activity_ids=(int(activity_id) & 0xFF,))
         return SyncResult.from_engine(result, snapshot_id=new_id)
@@ -1319,6 +1364,7 @@ class AsyncXProxy:
         device_id: int,
         progress: Optional[Callable] = None,
         snapshot_id: Optional[str] = None,
+        strict: bool = False,
     ) -> SyncResult:
         """Device-scoped counterpart of :meth:`sync_activity`.
 
@@ -1335,6 +1381,7 @@ class AsyncXProxy:
             edited=edited,
             device_id=device_id,
             progress_callback=self._engine_progress(progress),
+            **({"strict_preflight": True} if strict else {}),
         )
         new_id = await self._rebase_after_write(result, device_ids=(int(device_id) & 0xFF,))
         return SyncResult.from_engine(result, snapshot_id=new_id)
@@ -1389,9 +1436,119 @@ class AsyncXProxy:
                 return self._last_snapshot_id  # nothing was written
         await self.run(self._proxy.bump_cache_generation)
         snap = await self.snapshot(_announce=False)
+        batch = self._batch
+        if batch is not None:
+            # Inside batch_writes: fold the move into the batch's single
+            # event; the projection itself is current for the next read.
+            batch.device_ids.update(int(d) & 0xFF for d in device_ids)
+            batch.activity_ids.update(int(a) & 0xFF for a in activity_ids)
+            batch.rebases += 1
+            batch.force = batch.force or force
+            return snap.snapshot_id
         if force or snap.snapshot_id != self._last_snapshot_id:
             self._announce_snapshot(snap, device_ids, activity_ids)
         return snap.snapshot_id
+
+    # -- whole-document write (phase 4 plan, H3) ------------------------------
+
+    async def sync_hub(
+        self,
+        *,
+        baseline: Optional[dict] = None,
+        desired: Optional[dict] = None,
+        state: Optional[ApplyState] = None,
+        snapshot_id: Optional[str] = None,
+        progress: Optional[Callable] = None,
+        on_state: Optional[Callable] = None,
+        hub_version: Optional[str] = None,
+    ) -> HubSyncResult:
+        """Write a whole edited snapshot document to the hub as one run.
+
+        ``baseline`` is the snapshot bundle the client edited and
+        ``desired`` its edited copy; new entities carry negative
+        placeholder ids (see :mod:`.hub_sync`). Stage A validation runs
+        first and raises a :class:`DocumentError` subclass before any hub
+        traffic; ``snapshot_id``, when given, is checked against the
+        current projection (:class:`SnapshotOutdatedError`). Stage B then
+        re-reads the affected entities strictly, and the items run in the
+        plan's order inside one :meth:`batch_writes` block.
+
+        Returns a :class:`HubSyncResult`; a hub-side outcome is reported
+        there per item, never raised. ``on_state`` (sync or async)
+        receives the :class:`ApplyState` after every item and at the end,
+        for the consumer to persist; ``sync_hub(state=...)`` resumes a
+        stopped or cancelled run: it re-reads what the run touched or was
+        about to touch, keeps the placeholder map (no duplicate creates)
+        and re-plans the remaining items from the hub's actual state.
+        ``progress`` receives :class:`WriteProgress` reports carrying
+        ``item_index`` / ``item_count``. Cancelling the awaiting task
+        finishes the item in flight, closes the batch (one trigger, one
+        event) and leaves the state resumable before the cancellation
+        propagates.
+        """
+
+        self._raise_if_cannot_fetch("sync_hub")
+        return await run_sync_hub(
+            self, baseline=baseline, desired=desired, state=state, snapshot_id=snapshot_id,
+            progress=progress, on_state=on_state, hub_version=hub_version,
+        )
+
+    # -- write batch (phase 4 plan, H2 / decision 8) --------------------------
+
+    @contextlib.asynccontextmanager
+    async def batch_writes(self, *, send_remote_sync: bool = True) -> AsyncIterator[WriteBatch]:
+        """Run several writes as one batch: one remote sync, one event.
+
+        Inside the block every write (``sync_*``, ``add_*``, ``remove_*``,
+        ``reorder_*``, ``set_hub_name``, ``restore``) behaves as usual and
+        rebases the snapshot, but the physical remote-sync trigger each
+        one would send is deferred and ``snapshot_changed`` is held back.
+        Leaving the block, whether normally, on an exception or on a
+        cancellation, **finalises**: the engine sends one trigger if any
+        write asked for one (none when nothing did, so an empty batch is
+        silent), one ``snapshot_changed`` carries every touched id, and
+        the yielded :class:`WriteBatch` gets its :class:`BatchOutcome`.
+        Finalisation is shielded from cancellation: a task cancelled
+        mid-batch still closes the batch before the cancel propagates.
+
+        One batch per proxy at a time; nesting raises ``RuntimeError``.
+        ``send_remote_sync=False`` closes without any trigger.
+        """
+
+        if self._batch is not None:
+            raise RuntimeError("a write batch is already open on this proxy")
+        await self.run(self._proxy.begin_write_batch)
+        batch = _FacadeBatch(start_snapshot_id=self._last_snapshot_id)
+        self._batch = batch
+        handle = WriteBatch()
+        try:
+            yield handle
+        finally:
+            self._batch = None
+            closing = self._loop.create_task(self._close_batch(batch, send_remote_sync))
+            try:
+                handle.outcome = await asyncio.shield(closing)
+            except asyncio.CancelledError:
+                # The batch must close: drain the finalisation, then let the
+                # cancellation continue.
+                handle.outcome = await closing
+                raise
+
+    async def _close_batch(self, batch: "_FacadeBatch", send_remote_sync: bool) -> BatchOutcome:
+        summary = await self.run(self._proxy.end_write_batch, send_remote_sync=send_remote_sync)
+        snap = await self.snapshot(_announce=False)
+        device_ids = tuple(sorted(batch.device_ids))
+        activity_ids = tuple(sorted(batch.activity_ids))
+        if batch.rebases and (batch.force or snap.snapshot_id != batch.start_snapshot_id):
+            self._announce_snapshot(snap, device_ids, activity_ids)
+        return BatchOutcome(
+            remote_sync=summary.get("remote_sync", "not_needed"),
+            remote_sync_requests=int(summary.get("remote_sync_requests", 0) or 0),
+            device_ids=device_ids,
+            activity_ids=activity_ids,
+            rebases=batch.rebases,
+            snapshot_id=snap.snapshot_id,
+        )
 
     # -- intents (phase 3 plan, W3) -----------------------------------------
 
@@ -1864,6 +2021,13 @@ class AsyncXProxy:
         bundle = proxy.assemble_hub_bundle_from_state(include_unfetched=True) or {}
         bundle.setdefault("devices", [])
         bundle.setdefault("activities", [])
+        # The document's array order is the display order (phase 4 plan,
+        # decision 6): list entities by the hub's sort byte, ids as the
+        # tie-break, so a reordered document holds once the reorder is
+        # written and the catalog re-read. The engine's own projection
+        # (id order) is what the HA integration keeps reading.
+        for key in ("devices", "activities"):
+            bundle[key] = sorted(bundle[key], key=_display_order_key)
         state = getattr(proxy, "state", None)
         generation = int(getattr(state, "generation", 0) or 0)
         devices = [_snapshot_entity("device", p) for p in bundle["devices"]]
@@ -1962,11 +2126,18 @@ class AsyncXProxy:
         if payload is None:
             self._log_unknown_entity(kind, ent_lo)
         snap = await self.snapshot(_announce=False)
-        self._announce_snapshot(
-            snap,
-            device_ids=(ent_lo,) if kind == "device" else (),
-            activity_ids=(ent_lo,) if kind == "activity" else (),
-        )
+        device_ids = (ent_lo,) if kind == "device" else ()
+        activity_ids = (ent_lo,) if kind == "activity" else ()
+        batch = self._batch
+        if batch is not None:
+            # Inside batch_writes (a stage B or post-create read of
+            # sync_hub): fold into the batch's single event.
+            batch.device_ids.update(device_ids)
+            batch.activity_ids.update(activity_ids)
+            batch.rebases += 1
+            batch.force = True
+        else:
+            self._announce_snapshot(snap, device_ids=device_ids, activity_ids=activity_ids)
         return snap
 
     async def _refresh_whole(self, progress: Optional[Callable], timeout: float) -> HubSnapshot:
@@ -2412,6 +2583,7 @@ ENGINE_ONLY: dict[str, str] = {
             "record_banner_payload",
             "record_hub_name",
             "record_idle_behavior_value",
+            "record_idle_behavior_absent",
             "try_finish_activities_burst",
             "try_finish_activity_map_burst",
             "try_finish_buttons_burst",

@@ -294,6 +294,40 @@ elsewhere. On a failure after writing starts, inspect the partial result
 and current snapshot before constructing another edit.
 
 
+### Editing the whole document
+
+When one user action changes several entities (a new device, the
+activities that use it, an old device removed, a reorder), send the
+whole edited document instead of a sequence of jobs and let the server
+own the transition:
+
+| step | request | response/action |
+| --- | --- | --- |
+| baseline | `GET /api/v1/hubs/{hub_id}/snapshot` | save `snapshot_id`; edit a copy of the document |
+| new entities | give each a negative `device.device_id` (`-1`, `-2`, ...) and reference it by that id everywhere | the hub assigns the real ids |
+| preview | `POST /api/v1/hubs/{hub_id}/snapshot/plan` with the document | ordered `items`, `notes` to confirm, `live_check_count` re-reads |
+| apply | `PUT /api/v1/hubs/{hub_id}/snapshot` with the document, `If-Match` and an `Idempotency-Key` | `202`; follow the `sync_hub` job |
+| result | the finished job's `result` | `status`, per-item outcomes, `id_map`, `apply_id` |
+| stopped | job `failed` with `apply_stopped` | `POST /api/v1/hubs/{hub_id}/applies/{apply_id}/resume` when ready |
+
+Rules the server enforces before any hub traffic: a removed entity must
+be removed from every activity in the same document (`422
+dangling_reference`), every edited entity must be `editable` (`409
+entity_not_editable`), a device deletion needs every activity read in
+full (`409 snapshot_incomplete`), and each entity's change must be one
+the live editor supports (`422 out_of_scope`). Array order is display
+order. A created device's command rows carry their payload in
+`restore_data` (the same shape `POST .../commands` takes).
+
+The run stops at the first item that does not end `done`; the items
+before it landed, the rest were not attempted, and nothing is rolled
+back. Read the record (`GET /applies/{apply_id}`) to see each item's
+`status` (`done`, `partial`, `uncertain`, `failed`, `not_attempted`,
+`cancelled`) and resume when the cause is gone; the server re-reads what
+the run touched, keeps the ids it created and re-plans the rest. A job
+cancelled with `DELETE /jobs/{job_id}` finishes the item in flight and
+leaves the record resumable too.
+
 ## 9. IR codes, backup and restore
 
 A code in any format your platform has (`{"pronto": "..."}`,

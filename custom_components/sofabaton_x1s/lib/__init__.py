@@ -85,6 +85,24 @@ from .activity_sync import (  # noqa: F401
     build_activity_sync_plan,
     build_device_sync_plan,
 )
+# Whole-document runner state and result (phase 4, H3).
+from .hub_apply import ApplyItem, ApplyState, HubSyncResult  # noqa: F401
+# Whole-document planner (phase 4, H0): stage A validation and the
+# ordered item list for a snapshot edited as one document.
+from .hub_sync import (  # noqa: F401
+    DanglingReferenceError,
+    DocumentError,
+    DocumentIncompleteError,
+    EntityNotEditableError,
+    EntityRef,
+    HubSyncItem,
+    HubSyncPlan,
+    InvalidDocumentError,
+    OutOfScopeError,
+    PlaceholderMap,
+    UnresolvedPlaceholderError,
+    build_hub_sync_plan,
+)
 from .wifi_inplace_plan import (  # noqa: F401
     ManagedWifiSnapshot,
     WifiActivityRefs,
@@ -102,6 +120,8 @@ from .config import ConfigSource, HubConfig  # noqa: F401
 # Typed results and failures of the asyncio facade.
 from .models import (  # noqa: F401
     Activity,
+    BatchOutcome,
+    WriteBatch,
     ActivityChanged,
     CatalogReady,
     ConnectionState,
@@ -206,6 +226,26 @@ _CURATED = [
     "SyncStep",
     "build_activity_sync_plan",
     "build_device_sync_plan",
+    # whole-document planner (phase 4)
+    "DocumentError",
+    "InvalidDocumentError",
+    "DanglingReferenceError",
+    "EntityNotEditableError",
+    "DocumentIncompleteError",
+    "OutOfScopeError",
+    "EntityRef",
+    "HubSyncItem",
+    "HubSyncPlan",
+    "PlaceholderMap",
+    "UnresolvedPlaceholderError",
+    "build_hub_sync_plan",
+    # write batch (phase 4)
+    "BatchOutcome",
+    "WriteBatch",
+    # whole-document runner (phase 4)
+    "ApplyItem",
+    "ApplyState",
+    "HubSyncResult",
     # in-place wifi command re-sync planner
     "ManagedWifiSnapshot",
     "WifiActivityRefs",

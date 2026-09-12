@@ -2159,3 +2159,63 @@ Findings:
   and X1 entries through `ha_entry.py` left the X2 entry `disabled_by:
   user` as well (re-enabled at once, loaded again). Worth a look at the
   integration's disable path.
+
+## ◇ Validated: whole-document writes, phase 4 (X1 + X1S, 2026-09-12)
+
+`scripts/hub-bench/bench_230_document_writes.py <ip> <X1|X1S> <tag>`,
+through root exports only (`AsyncXProxy.sync_hub`, `build_hub_sync_plan`,
+`ApplyState`, `PlaceholderMap`, `edits`). One run per hub, the HA entry
+disabled for it and re-enabled afterwards (all three entries verified
+`disabled_by: null` at close-out). The engine's `enqueue_cmd` is wrapped
+to count physical remote-sync triggers (`0x0064` / `0x0364`) on the wire.
+
+The program, per hub: a whole-hub refresh; a preparatory apply (a bench
+IR device with two commands whose payloads are copied from a real
+device with `read_payload`, a bench activity bound to it and to an
+existing device); the plan's main document (hub rename, two device
+renames, a second new device with payloads, a second new activity using
+it and an existing device, the first activity's `VOL_UP` moved off the
+first bench device, that device deleted, both tables reversed); the
+unchanged document; a stage B refusal after an outside binding change
+written through `sync_activity`; an `uncertain` item forced by raising
+after the engine's real write and its resume from the serialised
+`ApplyState`; a cancel between items (the task cancelled from
+`on_state` after the first item) and its resume; the original document
+applied back; and finally the display order put back to ascending ids.
+Leftovers of an interrupted run (entities named `bench230 …`) are deleted
+at the start.
+
+| | X1S (192.168.2.151), run 9 | X1 (192.168.2.108), run 1 |
+| --- | --- | --- |
+| whole-hub refresh | 25 s, 12 devices / 7 activities, complete | 36 s, 12 devices / 4 activities, complete |
+| prep apply | 6 items, 10 writes, 1 trigger, 22 s, nothing left to do | 6 items, 9 writes, 1 trigger, 20 s, nothing left |
+| main document | 11 items, 20 writes, **exactly 1 trigger**, 80 s, nothing left | 11 items, 20 writes, **exactly 1 trigger**, 73 s, nothing left |
+| unchanged document | 0 items, 0 writes, 0 triggers | same |
+| stage B after an outside binding change | stopped at `live_check`, 0 writes, hub name untouched | same |
+| uncertain item -> resume | `[uncertain]`, `needs_refresh` = the activity, resumable; resume: desired state already held, 0 steps | same |
+| cancel between items -> resume | `[done, not_attempted]`; resume finished both (4 writes) | same |
+| restore of the original document | 8 items, 8 writes, 1 trigger, nothing left | 8 items, 8 writes, 1 trigger, nothing left; final `snapshot_id` == baseline id |
+| problems | none | none |
+
+Nine runs were needed on the X1S; the first eight found and fixed six
+defects (three in the engine, older than phase 4; three in the phase 4
+code), recorded in the plan's section 15
+([sofabaton-x-phase4-document-writes-plan.md](../internal/sofabaton-x-phase4-document-writes-plan.md)):
+an idle read answered "no record" left a fresh device incomplete; a
+burst-terminating `STATUS_ACK 0x07` stayed consumable and the next
+exchange stole it (root cause of a wrongly emptied activity catalog, an
+unanswered idle read and a refused delete); an empty-catalog answer is
+now verified once over a non-empty cache; the reference rewriter added
+`device_id: None` to rows that carry no such key; derived binding labels
+counted as a change; and the projection listed entities by id, not by
+the hub's display order. Observed hub behaviour: the X1S answers no
+catalog read for several minutes after a remote-sync trigger; a created
+device takes sort position 0 (first) and a created activity the last
+position; `sort` is renumbered on every create and delete; a rename made
+outside the library is invisible to the stage B check (the preflight
+signature covers bindings, macros and favorites, by design).
+
+The X1 ran the final bench unchanged on its first attempt. Not run: the
+X2 (not offered for this program), the server routes against a live hub
+(the library runner underneath is what they call; the server suite
+drives them through a fake that runs the real planner).

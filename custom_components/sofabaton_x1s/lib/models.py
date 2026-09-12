@@ -227,6 +227,36 @@ def snapshot_content_id(bundle: dict[str, Any]) -> str:
 
 
 @dataclass(frozen=True)
+class BatchOutcome:
+    """What closing :meth:`AsyncXProxy.batch_writes` did.
+
+    ``remote_sync``: ``"sent"`` (one coalesced trigger went out),
+    ``"not_needed"`` (no participating write asked for one) or
+    ``"failed"`` (the trigger could not be enqueued; the configuration
+    writes are unaffected and ``resync_remote`` can be retried alone).
+    ``device_ids`` / ``activity_ids`` are every entity the batch's
+    writes rebased, ``rebases`` how many rebases were folded into the
+    single ``snapshot_changed`` event, ``snapshot_id`` the projection
+    after the batch.
+    """
+
+    remote_sync: Literal["sent", "failed", "not_needed"]
+    remote_sync_requests: int
+    device_ids: tuple[int, ...]
+    activity_ids: tuple[int, ...]
+    rebases: int
+    snapshot_id: str
+
+
+@dataclass
+class WriteBatch:
+    """Handle yielded by :meth:`AsyncXProxy.batch_writes`; ``outcome`` is
+    filled in when the context closes (also after an error or a cancel)."""
+
+    outcome: Optional[BatchOutcome] = None
+
+
+@dataclass(frozen=True)
 class SnapshotEntity:
     """Provenance of one device or activity inside a :class:`HubSnapshot`.
 
@@ -302,6 +332,9 @@ class WriteProgress:
     entity_kind: Optional[str] = None
     entity_id: Optional[int] = None
     step_kind: Optional[str] = None
+    # Set by sync_hub: which item of how many this report belongs to.
+    item_index: Optional[int] = None
+    item_count: Optional[int] = None
 
     @classmethod
     def from_engine(cls, **payload: Any) -> "WriteProgress":
@@ -354,6 +387,9 @@ class SyncResult:
     total_steps: int
     counters: dict[str, int]
     snapshot_id: Optional[str]
+    # The strict preflight's verdict when it stopped the write
+    # ("changed" | "unreadable" | "incomplete"), else None.
+    preflight: Optional[str] = None
 
     @property
     def ok(self) -> bool:
@@ -378,6 +414,7 @@ class SyncResult:
             total_steps=int(data.get("total_steps") or 0),
             counters={str(k): int(v) for k, v in counters.items()} if isinstance(counters, dict) else {},
             snapshot_id=snapshot_id,
+            preflight=data.get("preflight") if status != "success" else None,
         )
 
     def to_dict(self) -> dict[str, Any]:

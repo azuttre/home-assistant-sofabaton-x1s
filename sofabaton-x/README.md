@@ -395,6 +395,59 @@ hub. The planner refuses (with `ValueError`, surfaced as `failed_at:
 "plan"`) any bundle difference outside the entity being edited, so an
 editor bug cannot silently rewrite unrelated configuration.
 
+### Editing the whole document
+
+An editor that changes many things at once hands back the **whole**
+snapshot document and lets the library own the transition: order,
+id allocation, the one remote-sync trigger, and what happens when the
+run stops halfway. A new device or activity carries a negative
+placeholder id of your choosing (and every reference to it uses that
+same negative id); a removed entity must be removed from every activity
+in the same document; the array order of `devices` / `activities` is
+the display order. `build_hub_sync_plan` validates the document with no
+hub traffic and previews the items; `sync_hub` runs them inside one
+batch (one trigger, one `snapshot_changed`), re-reading the affected
+entities strictly before the first write:
+
+```python
+from sofabaton import ApplyState, DocumentError, build_hub_sync_plan
+
+snap = await proxy.snapshot()
+desired = copy.deepcopy(snap.bundle)
+desired["hub"]["name"] = "Loft"
+desired["devices"].append({"device": {"device_id": -1, "name": "Projector", "device_class": "ir"},
+                           "commands": [], "button_bindings": [], "macros": []})
+try:
+    plan = build_hub_sync_plan(snap.bundle, desired)        # stage A: DocumentError subclasses
+except DocumentError as err:
+    print(err.code, err)                                    # dangling_reference, out_of_scope, ...
+for item in plan.items:
+    print(item.index, item.kind, item.entity_id or item.placeholder_id, item.label)
+
+records: list[dict] = []
+result = await proxy.sync_hub(
+    baseline=snap.bundle, desired=desired, snapshot_id=snap.snapshot_id,
+    progress=lambda p: print(p.item_index, p.phase, p.message),
+    on_state=lambda state: records.append(state.to_dict()),   # persist this; the library never does
+)
+print(result.status, result.id_map, result.remote_sync)      # HubSyncResult
+for item in result.items:
+    print(item.kind, item.status, item.completed_steps, item.total_steps, item.message)
+```
+
+Every item ends `done`, `partial` (some steps landed), `uncertain` (a
+write went out and no answer followed), `failed` (refused before its
+first write), `not_attempted` or `cancelled`; the first non-`done` item
+stops the run and nothing is rolled back. `on_state` receives the
+`ApplyState` after every item (and right after a created entity's id is
+known): store the last one, and continue later with
+`sync_hub(state=ApplyState.from_dict(doc))`, which re-reads what the run
+touched, keeps the ids it already created and re-plans the rest from the
+hub's actual state. Cancelling the awaiting task finishes the item in
+flight and leaves the state resumable. In the CLI: `snapshot out=D0.json`,
+edit a copy, `apply D1.json baseline=D0.json plan`, then without `plan`
+to write; `apply resume=D1.json.apply.json` continues.
+
 ### Edit helpers
 
 The common row edits are pure functions in `sofabaton.edits`: each takes

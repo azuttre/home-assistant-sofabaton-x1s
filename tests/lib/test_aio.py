@@ -2285,3 +2285,490 @@ def test_refresh_second_cancel_keeps_draining_the_in_flight_read() -> None:
         assert [c[1] for c in fake.backup_calls] == [5]   # stopped between entities
 
     asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
+# phase 4 H2: batch_writes on the facade
+# ---------------------------------------------------------------------------
+
+
+class _BatchFake(FakeProxy):
+    """The engine's batch surface plus recording syncs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.batch_calls: list = []
+        self.sync_kwargs: list = []
+        self._ready["devices"] = {5: {"name": "TV"}, 7: {"name": "Amp"}}
+        self._ready["activities"] = {101: {"name": "Watch TV"}}
+        self._backup("device", 5, True)
+        self._backup("activity", 101, True)
+
+    def begin_write_batch(self):
+        self.batch_calls.append("begin")
+
+    def end_write_batch(self, *, send_remote_sync=True):
+        self.batch_calls.append(("end", send_remote_sync))
+        return {"remote_sync": "sent", "remote_sync_requests": 2, "origins": ["a", "b"]}
+
+    def sync_activity(self, *, baseline, edited, activity_id, progress_callback=None, **kw):
+        self.sync_kwargs.append(("activity", kw))
+        self.detail["activity"][activity_id] = [{"button_id": 42}]
+        return {"status": "success", "completed_steps": 1, "total_steps": 1}
+
+    def sync_device(self, *, baseline, edited, device_id, progress_callback=None, **kw):
+        self.sync_kwargs.append(("device", kw))
+        self.detail["device"][device_id] = [{"command_id": 9}]
+        return {"status": "success", "completed_steps": 1, "total_steps": 1}
+
+
+def test_batch_writes_folds_rebases_into_one_event_and_closes_the_engine_batch() -> None:
+    async def main():
+        fake = _BatchFake()
+        proxy = _wrap(fake)
+        snap = await proxy.snapshot()
+        seen_inside: dict = {}
+
+        async def run_batch():
+            await asyncio.sleep(0.01)
+            async with proxy.batch_writes() as batch:
+                r1 = await proxy.sync_activity(baseline=snap.bundle, edited=snap.bundle,
+                                               activity_id=101, strict=True)
+                r2 = await proxy.sync_device(baseline=snap.bundle, edited=snap.bundle, device_id=5)
+                # Rebases happened (the projection moved) but no event went out yet.
+                seen_inside["ids"] = (r1.snapshot_id, r2.snapshot_id)
+                seen_inside["current"] = (await proxy.snapshot()).snapshot_id
+                seen_inside["outcome"] = batch.outcome
+            return batch
+
+        task = asyncio.ensure_future(run_batch())
+        events = await _collect(proxy, 1)
+        batch = await task
+
+        assert [e.kind for e in events] == ["snapshot_changed"]
+        event = events[0].payload
+        assert event.activity_ids == (101,) and event.device_ids == (5,)
+        assert seen_inside["outcome"] is None
+        assert seen_inside["ids"][0] != snap.snapshot_id
+        assert seen_inside["current"] == seen_inside["ids"][1] == event.snapshot_id
+        out = batch.outcome
+        assert out.remote_sync == "sent" and out.remote_sync_requests == 2
+        assert out.rebases == 2 and out.snapshot_id == event.snapshot_id
+        assert out.device_ids == (5,) and out.activity_ids == (101,)
+        assert fake.batch_calls == ["begin", ("end", True)]
+        # strict=True reaches the engine as strict_preflight; the default sends nothing extra.
+        assert fake.sync_kwargs == [("activity", {"strict_preflight": True}), ("device", {})]
+        assert proxy._batch is None
+
+    asyncio.run(main())
+
+
+def test_batch_writes_closes_on_error_and_cancel_and_refuses_nesting() -> None:
+    async def main():
+        fake = _BatchFake()
+        proxy = _wrap(fake)
+        snap = await proxy.snapshot()
+
+        # An exception inside the block still closes the engine batch and fills the outcome.
+        holder: dict = {}
+        try:
+            async with proxy.batch_writes(send_remote_sync=False) as batch:
+                holder["batch"] = batch
+                async with proxy.batch_writes():
+                    pass
+        except RuntimeError as err:
+            assert "already open" in str(err)
+        else:
+            raise AssertionError("nesting must raise")
+        assert fake.batch_calls == ["begin", ("end", False)]
+        assert holder["batch"].outcome is not None and holder["batch"].outcome.rebases == 0
+        assert proxy._batch is None
+
+        # An empty batch emits no event: the projection did not move.
+        assert (await proxy.snapshot()).snapshot_id == snap.snapshot_id
+
+        # A cancelled task drains the finalisation before the cancel propagates.
+        fake.batch_calls.clear()
+        started = asyncio.Event()
+
+        async def cancelled_batch():
+            async with proxy.batch_writes() as batch:
+                holder["cancelled"] = batch
+                await proxy.sync_activity(baseline=snap.bundle, edited=snap.bundle, activity_id=101)
+                started.set()
+                await asyncio.sleep(30)
+
+        task = asyncio.ensure_future(cancelled_batch())
+        await started.wait()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("the cancel must propagate after the batch closed")
+        assert fake.batch_calls == ["begin", ("end", True)]
+        assert holder["cancelled"].outcome is not None
+        assert holder["cancelled"].outcome.activity_ids == (101,)
+        assert proxy._batch is None
+
+    asyncio.run(main())
+
+
+# ---------------------------------------------------------------------------
+# phase 4 H3: sync_hub, the whole-document runner
+# ---------------------------------------------------------------------------
+
+import copy  # noqa: E402
+
+hub_apply = importlib.import_module(f"{_pkg.__name__}.hub_apply")
+hub_sync_mod = importlib.import_module(f"{_pkg.__name__}.hub_sync")
+activity_sync_mod = importlib.import_module(f"{_pkg.__name__}.activity_sync")
+
+
+class _ApplyFake(FakeProxy):
+    """A fake whose syncs run the REAL per-entity planners on the pair the
+    runner hands them (so the working-document splice is exercised) and
+    then report a configurable outcome."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.batch_calls: list = []
+        self.syncs: list = []          # (kind, entity_id, step kinds, strict)
+        self.fail_next_sync: dict = {}  # kind -> engine result dict
+        self.block_sync = None          # threading.Event: a sync waits on it
+        self.in_sync = threading.Event()
+        self._ready["devices"] = {5: {"name": "TV"}, 7: {"name": "Amp"}}
+        self._ready["activities"] = {101: {"name": "Watch TV"}}
+        for ent in (5, 7):
+            self._backup("device", ent, True)
+        self._backup("activity", 101, True)
+
+    def begin_write_batch(self):
+        self.batch_calls.append("begin")
+
+    def end_write_batch(self, *, send_remote_sync=True):
+        self.batch_calls.append(("end", send_remote_sync))
+        asked = sum(1 for c in self.write_calls if c[0] in ("create_device", "create_activity",
+                                                             "reorder_devices", "reorder_activities"))
+        return {"remote_sync": "sent" if asked and send_remote_sync else "not_needed",
+                "remote_sync_requests": asked, "origins": []}
+
+    def _sync(self, kind, baseline, edited, entity_id, kw):
+        build = (activity_sync_mod.build_device_sync_plan if kind == "device"
+                 else activity_sync_mod.build_activity_sync_plan)
+        plan = build(baseline, edited, entity_id)  # raises ValueError when out of scope
+        self.syncs.append((kind, entity_id, [s.kind for s in plan], kw.get("strict_preflight", False)))
+        if self.block_sync is not None:
+            self.in_sync.set()
+            self.block_sync.wait(10)
+        forced = self.fail_next_sync.pop(kind, None)
+        if forced is not None:
+            return forced
+        # The write "lands": the entity's detail becomes what was asked.
+        row = next(r for r in edited["devices" if kind == "device" else "activities"]
+                   if r["device"]["device_id"] == entity_id)
+        self.detail[kind][entity_id] = list(row.get("button_bindings") or [])
+        self.pending_detail[kind][entity_id] = list(row.get("button_bindings") or [])
+        self.bump_cache_generation()
+        return {"status": "success", "completed_steps": len(plan), "total_steps": len(plan)}
+
+    def sync_activity(self, *, baseline, edited, activity_id, progress_callback=None, **kw):
+        return self._sync("activity", baseline, edited, activity_id, kw)
+
+    def sync_device(self, *, baseline, edited, device_id, progress_callback=None, **kw):
+        return self._sync("device", baseline, edited, device_id, kw)
+
+
+def _apply_binding(button, dev, cmd):
+    return {"button_id": button, "device_id": dev, "command_id": cmd,
+            "long_press_device_id": None, "long_press_command_id": None}
+
+
+def _apply_docs(proxy_snapshot):
+    """A desired document touching every item kind the runner knows."""
+
+    base = copy.deepcopy(proxy_snapshot.bundle)
+    desired = copy.deepcopy(base)
+    desired["hub"]["name"] = "Loft"
+    act = next(a for a in desired["activities"] if a["device"]["device_id"] == 101)
+    act["button_bindings"].append(_apply_binding(0xB6, 5, 1))
+    desired["devices"].append({"device": {"device_id": -1, "name": "Projector", "device_class": "ir"},
+                               "button_bindings": [], "commands": [], "macros": []})
+    desired["activities"].append({"device": {"device_id": -2, "name": "Movie", "entity_type": "activity"},
+                                  "button_bindings": [_apply_binding(0xB6, -1, 1)],
+                                  "favorite_slots": [], "favorites_order": [], "macros": []})
+    desired["devices"] = [d for d in desired["devices"] if d["device"]["device_id"] != 7]
+    desired["activities"].reverse()  # -2 first: a real reorder
+    return base, desired
+
+
+def test_sync_hub_runs_every_item_kind_in_order_inside_one_batch() -> None:
+    async def main():
+        fake = _ApplyFake()
+        proxy = _wrap(fake)
+        base, desired = _apply_docs(await proxy.snapshot())
+        fake.backup_calls.clear()  # the fixture's own setup reads
+        states: list = []
+        reports: list = []
+
+        async def run():
+            await asyncio.sleep(0.01)
+            return await proxy.sync_hub(baseline=base, desired=desired, progress=reports.append,
+                                        on_state=lambda s: states.append(s.status))
+
+        task = asyncio.ensure_future(run())
+        events = await _collect(proxy, 1)
+        result = await task
+
+        assert result.ok and result.status == "success"
+        # Plan order: hub rename, device creates (the empty new device needs
+        # no sync), activity creates, activity edits (existing first, then
+        # the created one), deletes, orders.
+        # A create always brings its kind's order item; the runner writes
+        # it only when the live order differs from the desired one.
+        assert [i.kind for i in result.items] == [
+            "hub_rename", "add_device", "add_activity", "sync_activity", "sync_activity",
+            "remove_device", "reorder_devices", "reorder_activities",
+        ]
+        assert all(i.status == "done" for i in result.items)
+        assert result.id_map == {-1: 8, -2: 102}
+        # The created activity's sync item carries the physical id after the create.
+        assert [i.entity_id for i in result.items] == [None, 8, 102, 101, 102, 7, None, None]
+        assert result.remote_sync == "sent" and result.rebased and result.snapshot_id
+        # Engine calls in the plan's order. The device order the document
+        # asks for ([5, 8] once 7 is gone) is what the fake already lists,
+        # so that item is done without a write; the activity order differs
+        # and is written with the placeholder mapped.
+        assert [c[0] for c in fake.write_calls] == [
+            "set_hub_name", "create_device", "create_activity", "delete_device", "reorder_activities",
+        ]
+        assert fake.write_calls[-1] == ("reorder_activities", [102, 101])
+        assert result.items[6].kind == "reorder_devices" and result.items[6].message == "already in this order"
+        # The syncs ran the real planners on the spliced working document,
+        # strictly, and the created activity's binding pointed at device 8.
+        assert [(k, e, strict) for k, e, _steps, strict in fake.syncs] == [
+            ("activity", 101, True), ("activity", 102, True),
+        ]
+        assert "binding_write" in fake.syncs[1][2]
+        # Stage B re-read the touched activity before the first write.
+        assert fake.backup_calls[:1] == [("activity", 101, True)]
+        # One batch, one event, state handed over after every item.
+        assert fake.batch_calls == ["begin", ("end", True)]
+        assert [e.kind for e in events] == ["snapshot_changed"]
+        assert states[0] == "running" and states[-1] == "success" and states.count("running") >= 8
+        assert any(r.phase == "live_check" for r in reports)
+        assert any(r.item_index is not None and r.item_count == 8 for r in reports)
+        assert result.state.runs == 1 and result.writes >= 5
+        # Serialisation round-trips.
+        again = hub_apply.ApplyState.from_dict(result.state.to_dict())
+        assert [i.to_dict() for i in again.items] == [i.to_dict() for i in result.state.items]
+        assert again.placeholders == {"-1": 8, "-2": 102}
+        assert result.to_dict()["id_map"] == {"-1": 8, "-2": 102}
+
+    asyncio.run(main())
+
+
+def test_sync_hub_stage_b_stops_before_any_write_when_an_entity_moved() -> None:
+    async def main():
+        fake = _ApplyFake()
+        proxy = _wrap(fake)
+        base = copy.deepcopy((await proxy.snapshot()).bundle)
+        desired = copy.deepcopy(base)
+        next(a for a in desired["activities"] if a["device"]["device_id"] == 101)["device"]["name"] = "Cinema"
+        # The hub moved after the document was taken.
+        fake.pending_detail["activity"][101] = [_apply_binding(0xB0, 7, 3)]
+
+        result = await proxy.sync_hub(baseline=base, desired=desired)
+        assert result.status == "stopped" and result.failed_at == "live_check"
+        assert "activity 101" in result.message
+        assert fake.write_calls == [] and fake.syncs == []
+        assert [i.status for i in result.items] == ["not_attempted"]
+        assert result.resumable and result.remote_sync == "not_needed"
+        assert fake.batch_calls == ["begin", ("end", True)]
+
+    asyncio.run(main())
+
+
+def test_sync_hub_stops_at_a_partial_item_and_resumes_from_the_hub_state() -> None:
+    async def main():
+        fake = _ApplyFake()
+        proxy = _wrap(fake)
+        base = copy.deepcopy((await proxy.snapshot()).bundle)
+        desired = copy.deepcopy(base)
+        next(d for d in desired["devices"] if d["device"]["device_id"] == 5)["button_bindings"].append(
+            _apply_binding(0xB6, 5, 1))
+        next(a for a in desired["activities"] if a["device"]["device_id"] == 101)["button_bindings"].append(
+            _apply_binding(0xB0, 7, 3))
+        fake.fail_next_sync["device"] = {"status": "failed", "failed_at": "binding_write",
+                                         "message": "no ack", "completed_steps": 1, "total_steps": 2}
+        saved: list = []
+
+        first = await proxy.sync_hub(baseline=base, desired=desired, on_state=lambda s: saved.append(s.to_dict()))
+        assert first.status == "stopped" and first.failed_at == "item" and first.resumable
+        assert [(i.kind, i.status) for i in first.items] == [("sync_device", "partial"), ("sync_activity", "not_attempted")]
+        assert first.items[0].completed_steps == 1 and first.items[0].total_steps == 2
+        assert first.needs_refresh == (hub_sync_mod.EntityRef("device", 5),)
+        assert first.writes == 1
+
+        # Resume from the persisted record (what a server would reload).
+        state = hub_apply.ApplyState.from_dict(saved[-1])
+        assert state.resumable and state.cursor == 0
+        fake.backup_calls.clear()
+        second = await proxy.sync_hub(state=state)
+        assert second.ok and second.state.runs == 2 and second.apply_id == first.apply_id
+        assert [i.status for i in second.items] == ["done", "done"]
+        assert second.needs_refresh == ()
+        # Stage B on resume re-read the partial entity and the untouched one.
+        assert [c[:2] for c in fake.backup_calls[:2]] == [("device", 5), ("activity", 101)]
+        assert fake.batch_calls == ["begin", ("end", True), "begin", ("end", True)]
+
+        # A finished apply cannot be resumed again.
+        try:
+            await proxy.sync_hub(state=second.state)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("a finished apply must not resume")
+
+    asyncio.run(main())
+
+
+def test_sync_hub_cancel_finishes_the_item_in_flight_and_leaves_a_resumable_state() -> None:
+    async def main():
+        fake = _ApplyFake()
+        proxy = _wrap(fake)
+        base = copy.deepcopy((await proxy.snapshot()).bundle)
+        desired = copy.deepcopy(base)
+        next(d for d in desired["devices"] if d["device"]["device_id"] == 5)["button_bindings"].append(
+            _apply_binding(0xB6, 5, 1))
+        next(a for a in desired["activities"] if a["device"]["device_id"] == 101)["button_bindings"].append(
+            _apply_binding(0xB0, 7, 3))
+        fake.block_sync = threading.Event()
+        saved: list = []
+
+        task = asyncio.ensure_future(proxy.sync_hub(baseline=base, desired=desired,
+                                                    on_state=lambda s: saved.append(s)))
+        await asyncio.get_running_loop().run_in_executor(None, fake.in_sync.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done(), "the item in flight must be drained first"
+        fake.block_sync.set()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("the cancel must propagate after the batch closed")
+
+        state = saved[-1]
+        assert state.status == "cancelled" and state.resumable
+        assert [(i.kind, i.status) for i in state.items] == [("sync_device", "done"), ("sync_activity", "not_attempted")]
+        assert fake.batch_calls == ["begin", ("end", True)]
+        assert len(fake.syncs) == 1
+
+        fake.block_sync = None
+        result = await proxy.sync_hub(state=state)
+        assert result.ok and [i.status for i in result.items] == ["done", "done"]
+        assert len(fake.syncs) == 2  # the done item was not re-run
+
+    asyncio.run(main())
+
+
+def test_sync_hub_resume_adopts_a_create_that_landed_without_its_id() -> None:
+    async def main():
+        fake = _ApplyFake()
+        proxy = _wrap(fake)
+        base = copy.deepcopy((await proxy.snapshot()).bundle)
+        desired = copy.deepcopy(base)
+        desired["devices"].append({"device": {"device_id": -1, "name": "Projector", "device_class": "ir"},
+                                   "button_bindings": [_apply_binding(0xB6, -1, 1)], "commands": [], "macros": []})
+        first = await proxy.sync_hub(baseline=base, desired=desired)
+        assert first.ok and first.id_map == {-1: 8}
+        assert [c[0] for c in fake.write_calls] == ["create_device"]
+
+        # The record a crashed server would hold: the create was in flight
+        # and its id never reached the record.
+        doc = first.state.to_dict()
+        doc["status"], doc["cursor"] = "stopped", 0
+        doc["placeholders"] = {"-1": None}
+        for item in doc["items"]:
+            item["status"], item["entity_id"] = ("running" if item["kind"] == "add_device" else "not_attempted"), None
+        state = hub_apply.ApplyState.from_dict(doc)
+
+        second = await proxy.sync_hub(state=state)
+        assert second.ok and second.id_map == {-1: 8}
+        assert [c[0] for c in fake.write_calls] == ["create_device"], "no duplicate create"
+        # Three items: the create, its sync, and the device order item the
+        # create brings, skipped because the live order already matched.
+        assert [i.status for i in second.items] == ["done", "done", "done"]
+        assert second.items[2].kind == "reorder_devices" and second.items[2].message == "already in this order"
+
+    asyncio.run(main())
+
+
+def test_sync_hub_refuses_bad_input_before_any_traffic() -> None:
+    async def main():
+        fake = _ApplyFake()
+        proxy = _wrap(fake)
+        snap = await proxy.snapshot()
+        base = copy.deepcopy(snap.bundle)
+        try:
+            await proxy.sync_hub()
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("documents or a state are required")
+        try:
+            await proxy.sync_hub(baseline=base, desired=base, snapshot_id="stale")
+        except errors.SnapshotOutdatedError:
+            pass
+        else:
+            raise AssertionError("an outdated snapshot id must be refused")
+        desired = copy.deepcopy(base)
+        desired["devices"] = [d for d in desired["devices"] if d["device"]["device_id"] != 5]
+        next(a for a in desired["activities"] if a["device"]["device_id"] == 101)["button_bindings"].append(
+            _apply_binding(0xB0, 5, 1))
+        try:
+            await proxy.sync_hub(baseline=base, desired=desired, snapshot_id=snap.snapshot_id)
+        except hub_sync_mod.DanglingReferenceError:
+            pass
+        else:
+            raise AssertionError("stage A must refuse a dangling reference")
+        assert fake.write_calls == [] and fake.batch_calls == []
+        # An unchanged document is a successful empty run.
+        result = await proxy.sync_hub(baseline=base, desired=copy.deepcopy(base), snapshot_id=snap.snapshot_id)
+        assert result.ok and result.items == () and result.remote_sync == "not_needed" and result.writes == 0
+
+    asyncio.run(main())
+
+
+
+# ---------------------------------------------------------------------------
+# phase 4 decision 6: the snapshot lists entities in the hub's display order
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_arrays_follow_the_hub_sort_byte_not_the_ids() -> None:
+    async def main():
+        class Sorted(FakeProxy):
+            def assemble_hub_bundle_from_state(self, **kwargs):
+                bundle = super().assemble_hub_bundle_from_state(**kwargs)
+                order = {5: 2, 7: 0, 9: 1}          # display order: 7, 9, 5
+                for row in bundle["devices"]:
+                    row["device"]["sort"] = order.get(row["device"]["device_id"])
+                for row in bundle["activities"]:
+                    row["device"]["sort"] = {101: 1, 102: 0}.get(row["device"]["device_id"])
+                return bundle
+
+        fake = Sorted()
+        fake._ready["devices"] = {5: {"name": "TV"}, 7: {"name": "Amp"}, 9: {"name": "Box"}, 11: {"name": "Unsorted"}}
+        fake._ready["activities"] = {101: {"name": "Watch"}, 102: {"name": "Listen"}}
+        proxy = _wrap(fake)
+        snap = await proxy.snapshot()
+        # Sorted by the byte; an entity without one goes last, ids break ties.
+        assert [r["device"]["device_id"] for r in snap.bundle["devices"]] == [7, 9, 5, 11]
+        assert [r["device"]["device_id"] for r in snap.bundle["activities"]] == [102, 101]
+        assert [e.entity_id for e in snap.devices] == [7, 9, 5, 11]
+
+    asyncio.run(main())

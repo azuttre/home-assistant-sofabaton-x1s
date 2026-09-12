@@ -428,6 +428,7 @@ class ActivitySyncMixin:
         edited: Mapping[str, Any],
         activity_id: int,
         progress_callback: Callable[..., None] | None = None,
+        strict_preflight: bool = False,
     ) -> dict[str, Any]:
         activity_id = int(activity_id) & 0xFF
 
@@ -456,9 +457,12 @@ class ActivitySyncMixin:
             # (e.g. a vendor-app edit through the proxy) — fail fast, don't write.
             _progress(phase="stale_check", message="Checking the activity hasn't changed…",
                       completed_steps=0, total_steps=len(plan), current_activity_id=activity_id)
-            if self._activity_sync_is_stale(baseline, activity_id):
+            verdict, message = self._activity_sync_preflight(
+                baseline, activity_id, strict=strict_preflight
+            )
+            if verdict is not None:
                 return {"status": "failed", "failed_at": "stale_check",
-                        "message": "This activity changed on the hub after you loaded it."}
+                        "preflight": verdict, "message": message}
 
             total = len(plan)
             counters: dict[str, int] = {}
@@ -541,6 +545,7 @@ class ActivitySyncMixin:
         device_id: int,
         progress_callback: Callable[..., None] | None = None,
         allow_command_removal: bool = False,
+        strict_preflight: bool = False,
     ) -> dict[str, Any]:
         """Device-scoped counterpart of :meth:`sync_activity`.
 
@@ -574,9 +579,12 @@ class ActivitySyncMixin:
         try:
             _progress(phase="stale_check", message="Checking the device hasn't changed…",
                       completed_steps=0, total_steps=len(plan), current_device_id=device_id)
-            if self._device_sync_is_stale(baseline, device_id):
+            verdict, message = self._device_sync_preflight(
+                baseline, device_id, strict=strict_preflight
+            )
+            if verdict is not None:
                 return {"status": "failed", "failed_at": "stale_check",
-                        "message": "This device changed on the hub after you loaded it."}
+                        "preflight": verdict, "message": message}
 
             total = len(plan)
             counters: dict[str, int] = {}
@@ -621,7 +629,7 @@ class ActivitySyncMixin:
     # mismatch is only trusted after consecutive re-reads keep disagreeing.
     _STALE_PREFLIGHT_ATTEMPTS = 3
 
-    def _preflight_is_stale(
+    def _preflight_verdict(
         self,
         *,
         read_fresh: Callable[[], Any],
@@ -629,7 +637,14 @@ class ActivitySyncMixin:
         baseline_entity: Mapping[str, Any] | None,
         log_tag: str,
         entity_label: str,
-    ) -> bool:
+    ) -> str | None:
+        """Re-read the entity and compare: ``None`` when it still matches
+        the baseline, ``"changed"`` when consecutive re-reads disagree with
+        it, ``"unreadable"`` when the hub did not answer, ``"incomplete"``
+        when the re-read came back partial. The lenient callers treat the
+        last two as "proceed"; the strict ones (a batch, phase 4 decision
+        5) treat them as failures."""
+
         baseline_signature = signature(baseline_entity)
         fresh_signature = None
         for attempt in range(self._STALE_PREFLIGHT_ATTEMPTS):
@@ -638,14 +653,14 @@ class ActivitySyncMixin:
             fresh = read_fresh()
             if not isinstance(fresh, Mapping):
                 self._log.warning(
-                    "[%s] stale preflight skipped: %s could not be re-read", log_tag, entity_label
+                    "[%s] stale preflight: %s could not be re-read", log_tag, entity_label
                 )
-                return False
+                return "unreadable"
             if fresh.get("complete") is False:
                 self._log.warning(
-                    "[%s] stale preflight skipped: %s re-read was incomplete", log_tag, entity_label
+                    "[%s] stale preflight: %s re-read was incomplete", log_tag, entity_label
                 )
-                return False
+                return "incomplete"
             fresh_signature = signature(fresh)
             if fresh_signature == baseline_signature:
                 if attempt:
@@ -653,28 +668,57 @@ class ActivitySyncMixin:
                         "[%s] stale preflight matched on re-read %d for %s (transient hub read)",
                         log_tag, attempt + 1, entity_label,
                     )
-                return False
+                return None
         self._log.warning(
             "[%s] stale preflight mismatch %s baseline=%s fresh=%s",
             log_tag, entity_label, baseline_signature, fresh_signature,
         )
-        return True
+        return "changed"
+
+    def _preflight_is_stale(self, **kwargs: Any) -> bool:
+        """Lenient form: only a confirmed change counts (an unreadable or
+        incomplete re-read lets the write proceed, logged)."""
+
+        return self._preflight_verdict(**kwargs) == "changed"
+
+    @staticmethod
+    def _preflight_failure(verdict: str | None, what: str, *, strict: bool) -> tuple[str | None, str | None]:
+        """``(verdict, message)`` when the sync must stop, ``(None, None)`` to proceed."""
+
+        if verdict == "changed":
+            return verdict, f"This {what} changed on the hub after you loaded it."
+        if verdict is None or not strict:
+            return None, None
+        if verdict == "unreadable":
+            return verdict, f"The {what} could not be re-read from the hub before writing; nothing was written."
+        return verdict, f"The {what} re-read was incomplete; nothing was written."
 
     def _device_sync_is_stale(self, baseline: Mapping[str, Any], device_id: int) -> bool:
+        return self._device_sync_preflight(baseline, device_id, strict=False)[0] == "changed"
+
+    def _device_sync_preflight(
+        self, baseline: Mapping[str, Any], device_id: int, *, strict: bool
+    ) -> tuple[str | None, str | None]:
         baseline_device = None
         for device in baseline.get("devices") or []:
             if int((device.get("device") or {}).get("device_id") or 0) == device_id:
                 baseline_device = device
                 break
-        return self._preflight_is_stale(
+        verdict = self._preflight_verdict(
             read_fresh=lambda: self.backup_device(device_id, include_blobs=False),
             signature=_device_block_signature,
             baseline_entity=baseline_device,
             log_tag="DEVICE_SYNC",
             entity_label=f"device=0x{device_id & 0xFF:02X}",
         )
+        return self._preflight_failure(verdict, "device", strict=strict)
 
     def _activity_sync_is_stale(self, baseline: Mapping[str, Any], activity_id: int) -> bool:
+        return self._activity_sync_preflight(baseline, activity_id, strict=False)[0] == "changed"
+
+    def _activity_sync_preflight(
+        self, baseline: Mapping[str, Any], activity_id: int, *, strict: bool
+    ) -> tuple[str | None, str | None]:
         baseline_activity = None
         for activity in baseline.get("activities") or []:
             if int((activity.get("device") or {}).get("device_id") or 0) == activity_id:
@@ -686,7 +730,7 @@ class ActivitySyncMixin:
         role_page_ref = _role_page_reference(
             baseline, getattr(self.state, "button_details", None)
         )
-        return self._preflight_is_stale(
+        verdict = self._preflight_verdict(
             read_fresh=lambda: self.backup_activity(activity_id),
             signature=lambda entity: _activity_block_signature(
                 entity, role_page_ref=role_page_ref
@@ -695,6 +739,7 @@ class ActivitySyncMixin:
             log_tag="ACTIVITY_SYNC",
             entity_label=f"activity=0x{activity_id & 0xFF:02X}",
         )
+        return self._preflight_failure(verdict, "activity", strict=strict)
 
     # ── Step dispatch ───────────────────────────────────────────────────
 

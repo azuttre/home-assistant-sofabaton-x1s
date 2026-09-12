@@ -244,6 +244,36 @@ baseline fails with `sync_failed` at `stale_check`. Whole-entity operations
 they do not all perform this live baseline comparison. Configuration writes
 are refused up front while an app holds the hub (`409 hub_busy`).
 
+## Whole-document writes
+
+An editor that changes many things at once puts the whole edited
+snapshot back: `PUT /api/v1/hubs/{id}/snapshot` with the document `GET
+/snapshot` returned, edited, and the quoted `snapshot_id` in `If-Match`
+(required). New devices and activities carry a negative placeholder id
+of the client's choosing (every reference to them uses the same negative
+id; the hub assigns the real one and the result's `id_map` says which);
+a removed entity must be removed from every activity in the same
+document; array order is display order. `POST /snapshot/plan` previews
+the ordered items without writing and refuses a bad document the same
+way the `PUT` would (`422 dangling_reference` / `out_of_scope` /
+`invalid_request`, `409 entity_not_editable` / `snapshot_incomplete`).
+
+The `PUT` answers `202` with a cancellable job of kind `sync_hub`. The
+server re-reads the affected entities before the first write, runs the
+items in order inside one batch (one remote-sync trigger, one
+`snapshot_changed`), and keeps an **apply record** under
+`data/applies/<hub_id>/`, written after every item: `GET /applies`,
+`GET /applies/{apply_id}`, `DELETE /applies/{apply_id}`. A run that
+stops (a partial or uncertain item, a cancel, a server restart) fails
+its job with `apply_stopped` and leaves the record resumable: `POST
+/applies/{apply_id}/resume` continues from the hub's actual state
+without creating anything twice. Send an `Idempotency-Key` header to
+make a repeated `PUT` of the same document return the existing apply
+(`200`) instead of running again; the same key with a different
+document is `409 apply_key_reused`. `apply_keep` (default 20) is how
+many finished records a hub keeps; unfinished ones stay until deleted
+or resumed.
+
 ## IR payloads, backup, restore
 
 A code in any format your platform has (`{"pronto": ...}`,

@@ -42,6 +42,7 @@ from .device_create import (
     synthesize_command_code,
 )
 from .backup_export import PAYLOAD_PROFILE_FULL
+from .hub_sync import iter_entity_references
 from .blob_decoders import encode_decoded_blob, try_decode_blob
 from .devices import device_config_from_backup
 from .inputs import ControlKeyBlock, FavoriteSlot, InputEntry, build_inputs_write
@@ -2282,36 +2283,24 @@ class RestoreMixin:
         activities — excluding sentinels and the activity's own id.
         """
 
-        referenced: set[int] = set()
         # The activity's own id is a MACRO-binding target (device_id == the
         # activity, command_id == the macro's button_id), not a source device,
         # so it must not be required in the device_id_map.
         own_id = int((payload.get("device") or {}).get("device_id", 0)) & 0xFF
-
-        def _add(raw: Any) -> None:
-            try:
-                value = int(raw) & 0xFF
-            except (TypeError, ValueError):
-                return
-            # 0x00 = unset; 0xFF = delay/wait sentinel (no real device);
-            # own_id = a macro-binding self-reference.
+        # One reference walker for restore and the document planner (phase
+        # 4, H1): the site list cannot drift between the two. Restore's
+        # exclusions stay: 0x00 = unset, 0xFF = delay/wait sentinel (no real
+        # device), own_id = a macro-binding self-reference; ids are masked
+        # to the wire byte as before. The derived
+        # ``referenced_source_device_ids`` list is not a wire site.
+        row = {**payload, "device": {**(payload.get("device") or {}), "device_id": own_id}}
+        referenced: set[int] = set()
+        for _referrer, site, target in iter_entity_references({"activities": [row]}):
+            if site == "referenced_source":
+                continue
+            value = int(target) & 0xFF
             if value not in (0, 0xFF, own_id):
                 referenced.add(value)
-
-        for row in payload.get("button_bindings") or []:
-            if not isinstance(row, dict):
-                continue
-            _add(row.get("device_id"))
-            _add(row.get("long_press_device_id"))
-        for row in payload.get("macros") or []:
-            if not isinstance(row, dict):
-                continue
-            for entry in row.get("steps") or []:
-                if isinstance(entry, dict):
-                    _add(entry.get("device_id"))
-        for row in payload.get("favorite_slots") or []:
-            if isinstance(row, dict):
-                _add(row.get("device_id"))
         return referenced
 
     @staticmethod

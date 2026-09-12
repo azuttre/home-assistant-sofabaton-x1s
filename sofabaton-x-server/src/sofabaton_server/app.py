@@ -27,12 +27,14 @@ from .jobs import JobRunner
 from .manager import HubManager
 from .problems import install as install_problem_handler, problem_body
 from .routes_callbacks import router as callbacks_router, server_router as callback_listener_router
+from .routes_apply import router as apply_router
 from .routes_discovery import router as discovery_router
 from .routes_edit import router as edit_router
 from .routes_hub_data import router as hub_data_router
 from .routes_hubs import router as hubs_router
 from .routes_payload import router as payload_router
 from .routes_snapshot import router as snapshot_router
+from .store import ApplyStore
 from .ws import WS_MESSAGE_TYPES, EventRelay, WsPress, router as events_router
 
 # ``sofabaton`` is the library's import name (PyPI: sofabaton-x). Only
@@ -114,6 +116,7 @@ def create_app(settings: Settings | None = None, *, manager: Optional[HubManager
     app.state.hub_manager = hub_manager
     app.state.discovery = discovery_service
     app.state.job_runner = job_runner
+    app.state.apply_store = ApplyStore(settings.data_dir, keep=settings.apply_keep)
     relay = EventRelay(hub_manager, jobs=job_runner, **({"maxsize": ws_queue_size} if ws_queue_size else {}))
     relay.instance_id = callback_service.ring.instance_id
     callback_service.on_press(lambda press: relay.publish(press.hub_id, WsPress(**press.to_dict())))
@@ -126,6 +129,7 @@ def create_app(settings: Settings | None = None, *, manager: Optional[HubManager
     app.include_router(hub_data_router)
     app.include_router(snapshot_router)
     app.include_router(edit_router)
+    app.include_router(apply_router)
     app.include_router(payload_router)
     app.include_router(events_router)
     app.include_router(discovery_router)

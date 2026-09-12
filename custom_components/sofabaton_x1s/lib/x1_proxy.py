@@ -104,9 +104,7 @@ from .protocol_const import (
     OP_DEVBTN_TAIL,
     OP_FIND_REMOTE,
     OP_FIND_REMOTE_X2,
-    OP_REMOTE_SYNC,
     OP_SET_HUB_NAME,
-    OP_X2_REMOTE_SYNC_ALL,
     OP_INFO_BANNER,
     OP_CREATE_DEVICE_HEAD,
     OP_DEFINE_IP_CMD,
@@ -161,6 +159,7 @@ from .state_helpers import (
     normalize_device_entry,
 )
 from .deframer import Deframer
+from .write_batch import WriteBatchMixin
 from .transport_bridge import TransportBridge
 from .proxy_restore import RestoreMixin
 from .proxy_wifi_device import WifiDeviceMixin
@@ -386,7 +385,7 @@ def _enable_keepalive(sock: socket.socket, *, idle: int = 30, interval: int = 10
 # ============================================================================
 # Proxy
 # ============================================================================
-class X1Proxy(FrameDecodeMixin, IrBlobMixin, CatalogMixin, ExchangeMixin, AckWaitersMixin, ActivityOpsMixin, ActivitySyncMixin, CacheBackupMixin, WifiDeviceMixin, RestoreMixin, BackupExportMixin):
+class X1Proxy(FrameDecodeMixin, IrBlobMixin, CatalogMixin, ExchangeMixin, AckWaitersMixin, ActivityOpsMixin, ActivitySyncMixin, CacheBackupMixin, WifiDeviceMixin, RestoreMixin, BackupExportMixin, WriteBatchMixin):
     def __init__(
         self,
         real_hub_ip: str,
@@ -512,6 +511,7 @@ class X1Proxy(FrameDecodeMixin, IrBlobMixin, CatalogMixin, ExchangeMixin, AckWai
         # refuses to run there: that thread delivers the acks an exchange
         # blocks on, so entering would deadlock.
         self._frame_thread_ident: int | None = None
+        self._init_write_batch()
         self._x2_remote_sync_id_lock = threading.Lock()
         self._x2_remote_sync_id: bytes | None = None
         self._x2_remote_sync_id_event = threading.Event()
@@ -550,6 +550,8 @@ class X1Proxy(FrameDecodeMixin, IrBlobMixin, CatalogMixin, ExchangeMixin, AckWai
         self._idle_behavior_lock = threading.Lock()
         self._idle_behavior_events: dict[int, threading.Event] = {}
         self._idle_behavior_values: dict[int, int] = {}
+        self._idle_behavior_absent: set[int] = set()  # hub answered 0x07: no idle record
+        self._idle_behavior_pending: int | None = None
         # Settling gate for externally-learned activity changes (MQTT
         # push on X2): armed by apply_external_activity_state, released
         # by the ACK_READY that accompanies the same hub transition (or
@@ -995,6 +997,8 @@ class X1Proxy(FrameDecodeMixin, IrBlobMixin, CatalogMixin, ExchangeMixin, AckWai
 
         if value is not None:
             return (value, True)
+        if dev_lo in self._idle_behavior_absent:
+            return (None, True)
 
         if fetch_if_missing and self.can_issue_commands():
             self.request_idle_behavior(dev_lo)
@@ -1022,10 +1026,12 @@ class X1Proxy(FrameDecodeMixin, IrBlobMixin, CatalogMixin, ExchangeMixin, AckWai
             event = self._idle_behavior_events.setdefault(dev_lo, threading.Event())
             event.clear()
 
+        self._idle_behavior_pending = dev_lo
         if not self.request_idle_behavior(dev_lo):
             return (cached, ready)
 
         event.wait(timeout)
+        self._idle_behavior_pending = None
         refreshed, refreshed_ready = self.get_idle_behavior(dev_lo, fetch_if_missing=False)
         return (refreshed, refreshed_ready)
 
@@ -1173,6 +1179,7 @@ class X1Proxy(FrameDecodeMixin, IrBlobMixin, CatalogMixin, ExchangeMixin, AckWai
 
         with self._idle_behavior_lock:
             self._idle_behavior_values[dev_lo] = normalized_mode
+            self._idle_behavior_absent.discard(dev_lo)
             event = self._idle_behavior_events.get(dev_lo)
 
         existing = dict(self.state.entities("device").get(dev_lo, {}))
@@ -1396,30 +1403,6 @@ class X1Proxy(FrameDecodeMixin, IrBlobMixin, CatalogMixin, ExchangeMixin, AckWai
         self._x2_remote_sync_id_event.wait(timeout)
         with self._x2_remote_sync_id_lock:
             return self._x2_remote_sync_id
-
-    def resync_remote(self, hub_version: str | None = None) -> bool:
-        """Force a physical remote sync with the hub."""
-        version = hub_version or self.hub_version
-        if not version:
-            try:
-                version = classify_hub_version(self.mdns_txt)
-            except ValueError:
-                self._log.warning(
-                    "%s sync: hub_version unknown; cannot pick opcode.", LogTag.REMOTE
-                )
-                return False
-        self.hub_version = version
-
-        if version == HUB_VERSION_X2:
-            # All-remotes broadcast, bench-validated live 2026-08-27: this
-            # is the only form that actually starts a sync. The historical
-            # remote-list + OP_X2_REMOTE_SYNC [id:3][0x01] flow is ACKed
-            # 0x00 by the hub but starts nothing (accepted no-op). The hub
-            # serializes triggers, so re-sending while a sync runs simply
-            # queues one more pass.
-            return self.enqueue_cmd(OP_X2_REMOTE_SYNC_ALL, b"\xff\xff\xff")
-
-        return self.enqueue_cmd(OP_REMOTE_SYNC)
 
     # ------------------------------------------------------------------
     # Virtual IP device/button creation

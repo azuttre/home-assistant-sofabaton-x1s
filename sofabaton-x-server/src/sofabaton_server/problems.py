@@ -18,6 +18,8 @@ section 7) lives here so every route uses the same table:
 | another job holds the hub                  | 409    |
 | a sync the hub refused (``SyncFailed``)    | 409 before the first write, 502 after |
 | ``If-Match`` missing on a row edit         | 428    |
+| ``DocumentError`` (a whole-document edit)  | 422 (``dangling_reference``, ``out_of_scope``, ``invalid_request``) or 409 (``entity_not_editable``, ``snapshot_incomplete``) |
+| an apply that stopped (``ApplyStopped``)   | 409 before the first write, 502 after |
 """
 
 from __future__ import annotations
@@ -31,6 +33,9 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from sofabaton import (
+    DocumentError,
+    DocumentIncompleteError,
+    EntityNotEditableError,
     FetchTimeoutError,
     HubBusyError,
     HubNotConnectedError,
@@ -73,6 +78,41 @@ class RestoreFailed(RuntimeError):
         super().__init__(f"restore failed at {where[0] if where else 'unknown'} {where[1] if where else ''}".rstrip())
         self.result = result
         self.job_result = result.to_dict()
+
+
+class ApplyStopped(RuntimeError):
+    """A document write ran and stopped short (``HubSyncResult.status != "success"``).
+
+    409 when nothing was written (stage B refused, or the first item
+    failed before its first write), 502 after a partial run; the
+    ``HubSyncResult`` rides on the job as its ``result`` and the apply
+    record says how to resume.
+    """
+
+    def __init__(self, result) -> None:
+        super().__init__(f"apply {result.status} at {result.failed_at or 'unknown'}: {result.message or 'no detail'}")
+        self.result = result
+        self.job_result = result.to_dict()
+
+
+def document_problem(err: DocumentError, hub_id: str) -> "ApiProblem":
+    """The ``ApiProblem`` for a stage A refusal of a whole-document edit."""
+
+    entity = getattr(err, "entity", None)
+    detail = str(err)
+    if isinstance(err, DocumentIncompleteError):
+        return ApiProblem(409, "snapshot_incomplete", "Some activities were never read in full", detail=detail, hub_id=hub_id)
+    if isinstance(err, EntityNotEditableError):
+        return ApiProblem(409, "entity_not_editable", "The entity was never read in full", detail=detail, hub_id=hub_id)
+    code = getattr(err, "code", "invalid_request")
+    titles = {
+        "dangling_reference": "The document references an entity it removes or never had",
+        "out_of_scope": "An entity's change is not one the live editor supports",
+    }
+    title = titles.get(code, "Invalid document")
+    if entity is not None:
+        detail = f"{entity[0]} {entity[1]}: {detail}" if not detail.startswith(f"{entity[0]} {entity[1]}") else detail
+    return ApiProblem(422, code, title, detail=detail, hub_id=hub_id)
 
 
 class ApiProblem(Exception):
@@ -153,6 +193,14 @@ def problem_for(err: BaseException, hub_id: str) -> Optional[ApiProblem]:
         return ApiProblem(502, "hub_rejected", "The hub refused the write", detail=str(err), hub_id=hub_id)
     if isinstance(err, SnapshotOutdatedError):
         return ApiProblem(412, "snapshot_outdated", "The snapshot moved", detail=str(err), hub_id=hub_id)
+    if isinstance(err, DocumentError):
+        return document_problem(err, hub_id)
+    if isinstance(err, ApplyStopped):
+        status = 409 if int(err.result.writes or 0) == 0 else 502
+        return ApiProblem(status, "apply_stopped", "The document write did not complete",
+                          detail=f"{err.result.status} at {err.result.failed_at or 'unknown'}: "
+                                 f"{err.result.message or 'no detail'}; resume with POST /applies/{err.result.apply_id}/resume",
+                          hub_id=hub_id)
     if isinstance(err, SnapshotIncompleteError):
         return ApiProblem(409, "entity_not_editable", "The entity was never read in full", detail=str(err), hub_id=hub_id)
     if isinstance(err, IrLearnError):

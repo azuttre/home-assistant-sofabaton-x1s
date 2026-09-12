@@ -138,6 +138,8 @@ class CacheBackupMixin:
             "detail_complete": {
                 "commands": sorted(self._commands_complete),
                 "macros": sorted(self._macros_complete),
+                # Devices whose idle read the hub answered "no record".
+                "idle_absent": sorted(getattr(self, "_idle_behavior_absent", ())),
             },
             "detail_fetched_at": {
                 kind: {str(ent_id): stamp for ent_id, stamp in stamps.items()}
@@ -531,6 +533,9 @@ class CacheBackupMixin:
             macros_complete = detail_complete.get("macros", [])
             if isinstance(macros_complete, list):
                 self._macros_complete |= {int(ent) & 0xFF for ent in macros_complete}
+            idle_absent = detail_complete.get("idle_absent", [])
+            if isinstance(idle_absent, list):
+                self._idle_behavior_absent = {int(ent) & 0xFF for ent in idle_absent}
 
         self._activity_map_complete = {
             act_lo

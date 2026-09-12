@@ -82,6 +82,13 @@ class FakeProxy:
         self.restores: list = []
         self.restore_failure: Optional[dict] = None
         self.restore_gate: Optional[asyncio.Event] = None
+        # Whole-document writes (phase 4): the sync_hub calls, the outcome
+        # the fake reports (success | stopped) and where it stops, a gate
+        # a run waits on (for cancel tests).
+        self.applies: list[dict] = []
+        self.apply_outcome = "success"
+        self.apply_stop_at = 1
+        self.apply_gate: Optional[asyncio.Event] = None
         # Managed wifi devices (callbacks plan): the deploys and updates
         # asked for, injected errors, and the extra device rows the
         # snapshot shows for them (block fields, command labels).
@@ -313,6 +320,67 @@ class FakeProxy:
                                                       activity_ids=(entity_id,) if kind == "activity" else ()))
         return SyncResult(status="success", failed_at=None, message=None, completed_steps=1, total_steps=1,
                           counters={}, snapshot_id=snap.snapshot_id)
+
+    async def sync_hub(self, *, baseline=None, desired=None, state=None, snapshot_id=None,
+                       progress=None, on_state=None, hub_version=None):
+        """Run the real planner (stage A), then report items the way the
+        library's runner would, handing the state to ``on_state`` as it goes."""
+
+        from sofabaton import ApplyState, HubSyncResult, build_hub_sync_plan
+
+        self._maybe_fail()
+        if self.refuse:
+            raise HubBusyError("an app client holds the hub")
+        self.applies.append({"baseline": baseline, "desired": desired, "state": state,
+                             "snapshot_id": snapshot_id, "hub_version": hub_version})
+        if state is None:
+            plan = build_hub_sync_plan(baseline, desired, hub_version=hub_version)
+            state = ApplyState.new(baseline, desired, plan, hub_version=hub_version)
+        state.runs += 1
+        state.status = "running"
+        state.failed_at = state.message = None
+        if on_state:
+            on_state(state)
+        if self.apply_gate is not None:
+            try:
+                await self.apply_gate.wait()
+            except asyncio.CancelledError:
+                state.status = "cancelled"
+                state.message = "cancelled between items"
+                if on_state:
+                    on_state(state)
+                raise
+        for index, item in enumerate(state.items):
+            if item.status == "done":
+                continue
+            if progress:
+                progress(WriteProgress(phase="item", message=item.label, completed_steps=0, total_steps=1,
+                                       entity_kind=item.entity_kind, entity_id=item.entity_id,
+                                       item_index=index, item_count=len(state.items)))
+            if self.apply_outcome == "stopped" and index == self.apply_stop_at:
+                item.status, item.completed_steps, item.total_steps = "partial", 1, 2
+                item.failed_at, item.message = "binding_write", "no ack"
+                state.writes += 1
+                state.cursor = index
+                state.failed_at, state.message = "item", f"item {index} partial: no ack"
+                if item.entity_kind and item.entity_id is not None:
+                    state.note_refresh(item.entity_kind, item.entity_id)
+                state.status = "stopped"
+                break
+            item.status, item.completed_steps, item.total_steps = "done", 1, 1
+            state.writes += 1
+            state.cursor = index + 1
+            if on_state:
+                on_state(state)
+        else:
+            state.status = "success"
+            state.needs_refresh = []
+        state.remote_sync = "sent" if state.writes else "not_needed"
+        snap = await self.snapshot()
+        state.rebased, state.snapshot_id = True, snap.snapshot_id
+        if on_state:
+            on_state(state)
+        return HubSyncResult.from_state(state)
 
     async def _intent(self, name, *args):
         from sofabaton import HubRejectedError
