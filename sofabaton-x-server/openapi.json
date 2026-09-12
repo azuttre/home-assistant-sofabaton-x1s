@@ -633,7 +633,7 @@
         "type": "object"
       },
       "CallbackDeviceRequest": {
-        "description": "What to deploy. Every slot is always written; unnamed ones are ``Button n``.",
+        "description": "Complete desired spec for POST and PUT, not a partial update.\n\nEvery slot is written; omitted slots become ``Button n`` and omitted\npower/input hooks are cleared. For a rename, copy all fields from the\ncurrent record's spec and change only the intended labels. Preserving\ndevice/command IDs and generic bindings does not preserve omitted fields.\nHook slots are one-based (1..10); callback URL indexes are zero-based (0..9).",
         "properties": {
           "input_slots": {
             "description": "slots offered as activity-start inputs (X1S/X2)",
@@ -690,7 +690,7 @@
         "type": "object"
       },
       "CallbackDeviceView": {
-        "description": "The callback device record (plan section 8) plus the effective destination.",
+        "description": "The deployed record plus the destination a new deploy would use now.\n\n``target`` is the address already written to the device;\n``effective_destination`` follows current settings and can differ.\n``stale`` flags a missing device; ``callback_device_stale`` is an event/error name.",
         "properties": {
           "adopted": {
             "title": "Adopted",
@@ -1099,7 +1099,7 @@
       "DeviceCreateRequest": {
         "properties": {
           "device_class": {
-            "description": "the hub's device class (tv, receiver, ...)",
+            "description": "Protocol class: X1 supports ir, wifi_roku, wifi_hue, wifi_sonos; X1S also supports wifi_ip; X2 also supports wifi_mqtt. This is not an appliance category such as TV or receiver.",
             "minLength": 1,
             "title": "Device Class",
             "type": "string"
@@ -2748,7 +2748,7 @@
       },
       "SnapshotDocument": {
         "additionalProperties": true,
-        "description": "``GET /hubs/{id}/snapshot``: the structural configuration plus its header.\n\nThe body is the library's ``hub_bundle`` with the snapshot header\nmerged in; ``snapshot_id`` is also the response ``ETag``.",
+        "description": "``GET /hubs/{id}/snapshot``: the structural configuration plus its header.\n\nThe body is the library's ``hub_bundle`` with the snapshot header\nmerged in. Send the quoted ``snapshot_id`` as ``If-Match`` for edits.\nThe response ``ETag`` is a distinct, opaque conditional-read validator\nthat also covers provenance; send it unchanged as ``If-None-Match``.",
         "properties": {
           "activities": {
             "items": {
@@ -5642,6 +5642,7 @@
     },
     "/api/v1/hubs/{hub_id}/applies/{apply_id}/resume": {
       "post": {
+        "description": "Inspect the record and hub before requesting resume.\n\nUncertain creates can duplicate, and the last persisted checkpoint can\nomit an in-flight write. Do not automatically resume these cases.\nRecords left queued/running by an abrupt restart are not reconciled\non startup and are rejected here with ``apply_not_resumable``.",
         "operationId": "resumeApply",
         "parameters": [
           {
@@ -9173,7 +9174,7 @@
             }
           },
           {
-            "description": "a client-chosen token; the same token with the same document returns the existing apply",
+            "description": "Client token for a retained apply record. After control and If-Match checks pass, the same token/document returns the existing job view (200). The original retry can fail 412 after a write changes the revision; inspect applies/jobs before resubmitting.",
             "in": "header",
             "name": "Idempotency-Key",
             "required": false,
@@ -9187,7 +9188,7 @@
                   "type": "null"
                 }
               ],
-              "description": "a client-chosen token; the same token with the same document returns the existing apply",
+              "description": "Client token for a retained apply record. After control and If-Match checks pass, the same token/document returns the existing job view (200). The original retry can fail 412 after a write changes the revision; inspect applies/jobs before resubmitting.",
               "title": "Idempotency-Key"
             }
           }
@@ -9282,6 +9283,7 @@
     },
     "/api/v1/hubs/{hub_id}/snapshot/plan": {
       "post": {
+        "description": "Validate document structure and supported diffs without hub traffic.\n\nPreview does not validate every stored command's wire encoding or\nguarantee hardware acceptance. Command rows require stored-record\n``restore_data``, not the REST command-create ``payload`` object.",
         "operationId": "planSnapshotEdit",
         "parameters": [
           {

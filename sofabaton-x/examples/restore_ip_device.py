@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Create a WiFi-IP device from scratch by restoring a hand-built bundle.
 
-The restore engine doesn't care whether a bundle came off a real hub or
-was written by hand — it lays down whatever devices and commands the JSON
-describes. That makes ``restore_hub_bundle`` a way to *provision* a
+The restore engine accepts validated bundles exported from a hub or
+written by hand. That makes ``AsyncXProxy.restore`` a way to *provision* a
 brand-new IP device: one whose buttons fire arbitrary HTTP requests at any
 endpoint on your network (a smart plug's REST API, a Home Assistant
 webhook, a media player, ...).
 
-This is the library's provisioning path for network devices: every
+This demonstrates bundle-based provisioning for network devices: every
 command carries its own method, path, content-type and body, and the
 device is created like any other class (the hub assigns the id).
+For individual commands, use ``NetworkCommand`` with the edit helpers;
+for the standard ten-slot callback device, use ``deploy_wifi_device``.
 
 How a command is described
 --------------------------
@@ -185,19 +186,27 @@ async def main() -> None:
         # Restore writes to the hub, so own it first (no app attached).
         if not await proxy.wait_until_controllable(timeout=30):
             raise SystemExit("hub not controllable (not connected, or an app is attached)")
+        if not await proxy.wait_until_ready(timeout=30):
+            raise SystemExit("initial catalogs did not become ready")
+        if (await proxy.status()).hub_version not in ("X1S", "X2"):
+            raise SystemExit("this example requires an X1S or X2 hub")
 
-        result = await proxy.restore_hub_bundle(bundle)
-        if result.get("status") != "success":
-            raise SystemExit(f"restore failed: {result}")
+        result = await proxy.restore(bundle)
+        if not result.ok:
+            raise SystemExit(
+                f"restore failed at {result.failed_at}: {result.to_dict()}; "
+                "inspect the hub before retrying; additive restore can create duplicates"
+            )
 
-        # device_id_map: source id (string) -> the id the hub assigned.
-        new_id = int(result["device_id_map"]["16"])
+        # Typed device_id_map uses integer source ids (JSON serialization uses strings).
+        new_id = result.device_id_map[16]
         print(f"created WiFi-IP device -> hub device_id {new_id}")
-        print(f"  restored devices: {result['restored_devices']}")
+        print(f"  restored devices: {result.restored_devices}")
 
         # Fire one of the freshly-created commands. send() makes the hub
         # perform the HTTP callback we described above.
-        await proxy.send(new_id, 1)
+        if not await proxy.send(new_id, 1):
+            raise SystemExit("device was created, but command 1 was refused")
         print(f"sent command 1 (Ping) on device {new_id}")
 
 

@@ -9,6 +9,10 @@ on the user's LAN and exposes them over HTTP and one WebSocket. Generate
 your client from [`../openapi.json`](../openapi.json); this page covers what
 the document cannot say.
 
+For a first implementation, begin with
+[your first command and your first remote press](getting-started.md).
+Return here for discovery, lifecycle, error handling and advanced editing.
+
 ## 1. Find the server
 
 The server advertises `_sofabaton-x._tcp.local.` over mDNS. TXT fields:
@@ -30,8 +34,11 @@ the **API root**. Trim a trailing slash; preserve any reverse-proxy prefix.
 | direct | `http://192.168.1.10:8480` | `http://192.168.1.10:8480/api/v1` |
 | reverse proxy | `https://home.example/sofabaton` | `https://home.example/sofabaton/api/v1` |
 
-The endpoint tables below use paths relative to the API root. OpenAPI
-operation paths already include `/api/v1`, so configure generated clients
+Paths beginning `/hubs`, `/server` or `/events` below are relative to the
+API root; paths beginning `/api/v1` already include that prefix. `{id}`
+and `{hub_id}` both mean the registered hub ID. Ellipses abbreviate the
+preceding hub/entity path and must be expanded before making a request.
+OpenAPI operation paths already include `/api/v1`, so configure generated clients
 with the server base URL instead. A WebSocket uses the API root plus
 `/events`, changing `http` to `ws` or `https` to `wss`. Always offer a
 manual server URL as well; some networks block multicast.
@@ -143,7 +150,7 @@ One WebSocket at the URL derived in section 1, for example
 `ws://192.168.1.10:8480/api/v1/events` (`?hub_id=` to narrow, repeatable).
 Messages are JSON with a `type`:
 
-- `hello` (once): server version, API version, the hub list.
+- `hello` (once): server version, API version, `instance_id`, the hub list.
 - `hub_event`: `hub_id` and `event` (`seq`, `kind`, `payload`). Kinds:
   `activity_changed` (payload `activity_id`, `previous_activity_id`,
   `name`; `activity_id` null means powered off), `activity_list_updated`
@@ -156,7 +163,8 @@ Messages are JSON with a `type`:
   refresh.
 - `server_event`: `hub_id` and `kind`: `hub_added`, `hub_removed`,
   `hub_enabled`, `hub_disabled`, `hub_rekeyed`, `hub_discovered`,
-  `hub_lost`.
+  `hub_lost`, `callback_device_stale`, `callback_device_restored`,
+  `callback_listener_started`, `callback_listener_failed`.
 - `job_event`: `hub_id` and the full `job` record on queueing, starting,
   progress updates and completion (`done`, `failed` or `cancelled`).
 - `press`: a button press the hub delivered to the server's callback
@@ -166,13 +174,18 @@ Messages are JSON with a `type`:
 - `dropped`: `count` older messages were discarded because your client
   fell behind; re-read hub records, status, relevant snapshots and jobs.
 
-`seq` is per hub per session and restarts after enable. Reconnect with
-backoff on close; the `hello` tells you the current hub list. The
-message types are in `openapi.json` components (`WsHello`, `WsHubEvent`,
-`WsServerEvent`, `WsJobEvent`, `WsPress`, `WsDropped`) for your generator.`WsServerEvent`, `WsJobEvent`, `WsDropped`) for your generator. A gap in
-the hub's sequence also requires reconciliation. There is no event replay:
-re-read relevant state after reconnecting rather than assuming every event
-was delivered. Job events do not carry the library's per-hub `seq`.
+`hub_event.event.seq` belongs to the library proxy and restarts when a
+new proxy is created (enable or server restart), not on an ordinary hub
+transport reconnect. `press.seq` is a separate server-instance-wide
+counter shared with press history; track `(instance_id, seq)` for presses.
+Job events have no library sequence number.
+
+Reconnect with backoff on close. After reconnecting, a `dropped` message
+or a hub-event sequence gap, reconcile hub records, status, snapshots and
+jobs. Hub/job events have no replay; presses have the bounded history
+described in section 10. Message schemas are OpenAPI components
+`WsHello`, `WsHubEvent`, `WsServerEvent`, `WsJobEvent`, `WsPress` and
+`WsDropped`.
 
 ## 6. Pair a hub
 
@@ -197,7 +210,8 @@ projected from the library's cache with no hub traffic. Keep two values:
   (`fetched_at`, `complete`, `editable`), so a conditional read returns
   200 when only provenance changed. Send it back unchanged as
   `If-None-Match` for conditional reads. Do not substitute it for the edit
-  revision or assume that both values are equal.
+  revision or assume that both values are equal. The ETag is currently
+  accepted for compatibility, but `snapshot_id` is the documented edit token.
 
 Provenance can change without a new configuration revision. The server
 never claims the cache is current: the hub can be edited outside it at any
@@ -214,11 +228,14 @@ it does not make incomplete detail complete after a restart.
 A refresh answers `202` with a job. Follow it on `/events` (`job_event`
 messages carry the full job record: `status`, the last `progress`, the
 `result` or a `Problem` in `error`) or poll `GET /hubs/{id}/jobs/{job_id}`.
-One job runs per hub at a time; `DELETE /hubs/{id}/jobs/{job_id}` requests
-cancellation of a whole-hub refresh or IR learn. A refresh finishes its
-in-flight entity before releasing the hub, even if cancellation is requested
-again. Wait for terminal status before submitting another job. Configuration
-writes, single-entity refreshes, backup and restore are not cancellable.
+One job runs per hub at a time. Inspect `cancellable` before requesting
+`DELETE /hubs/{id}/jobs/{job_id}`: whole-hub refresh and IR learn are
+cancellable, as are document writes (`sync_hub` / `resume_apply`) between
+items. The current entity/item is drained before cancellation completes.
+Single-entity refreshes, row edits, intents, callback writes, backup,
+restore and erase run to completion. Wait for terminal status before
+another job. The [server operation table](../README.md#jobs) is the
+cancellation reference.
 
 Only recent jobs are retained, in memory. Persist the hub id and any
 outstanding job id in your client, but reconcile after server restart.
@@ -233,22 +250,27 @@ Most platforms need the intents: `POST /hubs/{id}/activities/{aid}/rename`,
 "command_id": 3}` (add `"long_press": {...}` for the held press),
 `DELETE` on the same path to clear, `POST .../favorites`, `PUT
 .../favorites/order`, `POST /hubs/{id}/devices/{did}/rename`, and the
-whole-entity ones (`POST /devices`, `DELETE /devices/{did}`, `POST
-/activities`, `DELETE /activities/{aid}`, `PUT /devices/order`, `PUT
-/activities/order`, `PUT /name`). Every write answers `202` with a job; follow it as described
+whole-entity ones (`POST /hubs/{id}/devices`, `DELETE /hubs/{id}/devices/{did}`, `POST
+/hubs/{id}/activities`, `DELETE /hubs/{id}/activities/{aid}`, `PUT /hubs/{id}/devices/order`, `PUT
+/hubs/{id}/activities/order`, `PUT /hubs/{id}/name`). Every write answers `202` with a job; follow it as described
 above. Send the quoted `snapshot_id` as `If-Match` when your UI showed the
 user a snapshot; the server refuses with `412` if it moved.
 
 An editor that shows the whole configuration works on the document
-instead: read `GET /snapshot`, change one activity or device element,
+instead: read `GET /hubs/{id}/snapshot`, change one activity or device element,
 preview with `POST /hubs/{id}/activities/{aid}/plan`, then `PUT` the
 element back with `If-Match` (required here). Only the entity you name
 may differ from the snapshot; anything else is `422 out_of_scope`.
 
 The cache revision check and the hub check serve different purposes.
-Sync-based edits re-read the target before writing and fail with
-`sync_failed` at `stale_check` if the live entity differs. Whole-entity
-intents use their own validation, not this same baseline comparison.
+Sync-based edits compare device bindings/macros and activity
+bindings/macros/favorites, with normalization exceptions; they do not
+compare every name, payload or device-head field. A detected difference
+fails with `sync_failed` at `stale_check`. Server row edits use non-strict
+preflight: an unreadable/incomplete read can allow the write to proceed.
+Whole-document sync requires complete live reads, but uses the same
+limited table comparisons. See [write validation](../README.md#writes).
+Whole-entity intents use their own validation, not this same baseline comparison.
 An edit also needs `editable: true`; refresh the entity if necessary.
 
 For example, renaming activity 101 on a registered hub follows these calls
@@ -308,7 +330,7 @@ own the transition:
 | preview | `POST /api/v1/hubs/{hub_id}/snapshot/plan` with the document | ordered `items`, `notes` to confirm, `live_check_count` re-reads |
 | apply | `PUT /api/v1/hubs/{hub_id}/snapshot` with the document, `If-Match` and an `Idempotency-Key` | `202`; follow the `sync_hub` job |
 | result | the finished job's `result` | `status`, per-item outcomes, `id_map`, `apply_id` |
-| stopped | job `failed` with `apply_stopped` | `POST /api/v1/hubs/{hub_id}/applies/{apply_id}/resume` when ready |
+| stopped | job `failed` with `apply_stopped`, or `cancelled` | inspect the apply record and hub; follow the recovery limits below before deciding whether to resume |
 
 Rules the server enforces before any hub traffic: a removed entity must
 be removed from every activity in the same document (`422
@@ -316,17 +338,68 @@ dangling_reference`), every edited entity must be `editable` (`409
 entity_not_editable`), a device deletion needs every activity read in
 full (`409 snapshot_incomplete`), and each entity's change must be one
 the live editor supports (`422 out_of_scope`). Array order is display
-order. A created device's command rows carry their payload in
-`restore_data` (the same shape `POST .../commands` takes).
+order. New command rows use stored-record `restore_data`, which is
+**different from a REST command-create request**.
 
-The run stops at the first item that does not end `done`; the items
-before it landed, the rest were not attempted, and nothing is rolled
-back. Read the record (`GET /applies/{apply_id}`) to see each item's
-`status` (`done`, `partial`, `uncertain`, `failed`, `not_attempted`,
-`cancelled`) and resume when the cause is gone; the server re-reads what
-the run touched, keeps the ids it created and re-plans the rest. A job
-cancelled with `DELETE /jobs/{job_id}` finishes the item in flight and
-leaves the record resumable too.
+For `POST /hubs/{id}/devices/{did}/commands`, the request is:
+
+```json
+{"name": "Power", "payload": {"descriptor": "P:NEC1 D:4 S:5 F:21"}}
+```
+
+Inside an edited document's `commands` array, an equivalent new IR row is:
+
+```json
+{
+  "command_id": 1,
+  "name": "Power",
+  "restore_data": {
+    "transport": "hub_code_record",
+    "library_type": 13,
+    "button_code": 0,
+    "data_hex": "0013000011009470503a4e45433120443a3420533a3520463a323100000000",
+    "new": true,
+    "decoded": {
+      "class": "ir",
+      "fields": {"descriptor": "P:NEC1 D:4 S:5 F:21"}
+    }
+  }
+}
+```
+
+The library constructs this row with:
+
+```python
+from sofabaton import IrPayload
+
+row = IrPayload.from_descriptor("P:NEC1 D:4 S:5 F:21").to_command_row(1, "Power")
+```
+
+Choose a free command ID in the target device; `restore_data.new: true`
+marks a command addition. Do not place `{descriptor: ...}` directly in
+`restore_data`. Preview currently checks structure and supported diffs,
+not every wire payload: an incorrectly encoded payload can pass preview
+and fail during execution. Preserve stored metadata when editing existing
+rows, or construct payloads through the library's conversion helpers.
+
+The run stops at the first item that does not end `done`; earlier items
+may have landed and nothing is rolled back. Read
+`GET /hubs/{id}/applies/{apply_id}` for each item's status and ID mapping.
+Cancellation finishes the item in flight and normally leaves a cancelled
+apply record.
+
+**Do not automatically resume an uncertain create or a record interrupted
+by a process exit.** Creates can duplicate on resume, the saved checkpoint
+can omit an in-flight write, and records left `queued`/`running` after a
+restart are not accepted by the resume route. The original idempotent PUT
+can also fail `412` before its key is recognized. Preserve the record and
+reconcile hub state before another edit. The
+[recovery and retention reference](../README.md#recovery-and-retention)
+explains eligible resume states, idempotency boundaries and pruning of
+stopped/cancelled records.
+
+Use job completion to determine success: an unchanged document can finish
+without a remote-sync trigger or `snapshot_changed` event.
 
 ## 9. IR codes, backup and restore
 
@@ -382,18 +455,38 @@ device for your platform:
    A different `instance_id` (in `hello` and `GET /api/v1/server`) means
    the server restarted: the sequence started over and there is no
    history to fetch.
-5. Rename slots with `PUT /callback-device`; bindings survive, because
-   the device and its command ids stay. A failed job with
+5. Update with `PUT /hubs/{id}/callback-device` and a **complete desired
+   spec**, copied from the current GET response. Omitted slots become
+   defaults and omitted power/input hooks are cleared. Generic bindings
+   survive because device and command IDs stay. A failed job with
    `callback_update_declined` means the device was edited outside the
    server (or the planner refused the diff); show the detail and offer
-   remove-and-deploy. `callback_device_stale` on the record (and the
+   remove-and-deploy. `stale: true` on the record (and the
    `callback_device_stale` server event) means the hub lost the device;
-   offer `POST /callback-device/redeploy`.
+   offer `POST /hubs/{id}/callback-device/redeploy`.
+
+For example, after fetching `GET /hubs/{id}/callback-device` into `record`,
+build the PUT body without dropping hooks or the remaining slots:
+
+```python
+import copy
+
+fields = ("name", "slots", "power_on_slot", "power_off_slot", "input_slots")
+body = {key: copy.deepcopy(record["spec"][key]) for key in fields}
+body["slots"][0]["label"] = "Start"
+body["slots"][0]["long_label"] = "Start Long"
+# PUT body to /api/v1/hubs/{hub_id}/callback-device; follow the returned job.
+```
+
+Hook slots and resolved `press.slot` values are **1..10**; callback path
+indexes are **0..9**. Short command IDs are `1..10`, long IDs `11..20`.
 
 Inside a container on a bridge network the hubs cannot reach the
 server's own address; the operator sets `--callback-host` to the Docker
-host's LAN address and publishes the callback port. Show
-`effective_destination` from the record when a deploy produces no
-presses, and the listener state from `GET /api/v1/server` when
+host's LAN address and publishes the callback port. These settings alone
+do not solve discovery or hub dial-back: see the [Linux deployment recipe](../README.md#docker).
+Show `target` (the destination already deployed) and
+`effective_destination` (what a new deploy would use now) from the record
+when a deploy produces no presses, and the listener state from `GET /api/v1/server` when
 `callback_listener.bound` is false (the port is usually taken by a Home
 Assistant install or Emulated Roku on the same host).

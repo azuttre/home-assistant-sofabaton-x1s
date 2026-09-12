@@ -1,9 +1,11 @@
 # sofabaton-x-server with Docker Compose.
 #
-# Host networking is REQUIRED: the official app finds the proxy over mDNS
+# This deployment uses Linux host networking: the app finds the proxy over mDNS
 # and (iOS) UDP broadcast, and the hub dials back to TCP 8200 on this host.
-# None of that crosses a bridged container network. Linux hosts only:
-# Docker Desktop on Windows/macOS cannot provide host networking.
+# A bridge network needs additional routing/discovery configuration.
+# Docker Desktop has opt-in host networking in recent versions, but this
+# project's multicast and hub dial-back compatibility there is unverified.
+# https://docs.docker.com/engine/network/drivers/host/
 #
 #   docker compose up -d
 #   docker compose logs -f

@@ -54,7 +54,14 @@ class CallbackSlot(BaseModel):
 
 
 class CallbackDeviceRequest(BaseModel):
-    """What to deploy. Every slot is always written; unnamed ones are ``Button n``."""
+    """Complete desired spec for POST and PUT, not a partial update.
+
+    Every slot is written; omitted slots become ``Button n`` and omitted
+    power/input hooks are cleared. For a rename, copy all fields from the
+    current record's spec and change only the intended labels. Preserving
+    device/command IDs and generic bindings does not preserve omitted fields.
+    Hook slots are one-based (1..10); callback URL indexes are zero-based (0..9).
+    """
 
     name: str = Field("Server", min_length=1, max_length=30)
     slots: list[CallbackSlot] = Field(default_factory=list, max_length=WIFI_SLOT_COUNT)
@@ -89,7 +96,12 @@ class CallbackLastPress(BaseModel):
 
 
 class CallbackDeviceView(BaseModel):
-    """The callback device record (plan section 8) plus the effective destination."""
+    """The deployed record plus the destination a new deploy would use now.
+
+    ``target`` is the address already written to the device;
+    ``effective_destination`` follows current settings and can differ.
+    ``stale`` flags a missing device; ``callback_device_stale`` is an event/error name.
+    """
 
     device_id: Optional[int]
     spec: dict[str, Any]

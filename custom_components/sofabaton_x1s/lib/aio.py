@@ -1323,8 +1323,9 @@ class AsyncXProxy:
         ``edited`` a modified copy. Pass ``snapshot_id`` to have the edit
         refused up front (:class:`SnapshotOutdatedError`, no hub traffic)
         when it was made on a snapshot that is no longer current; the
-        engine's stale preflight still runs afterwards as the authoritative
-        check against the hub. A baseline activity that is not editable
+        engine's stale preflight then compares bindings, macros and favorites
+        with normalization exceptions. It does not compare every name,
+        payload or device-head field. A baseline activity that is not editable
         (never fetched, or fetched incomplete) raises
         :class:`SnapshotIncompleteError` before anything is written.
 
@@ -1370,7 +1371,8 @@ class AsyncXProxy:
 
         Same bundle-pair contract, guards, result and rebase, with the
         device id as the entity being edited (command adds and renames,
-        payload edits, idle behaviour, input records).
+        payload edits, idle behaviour, input records). Its live comparison
+        covers bindings and macros; it does not compare every device field.
         """
 
         self._raise_if_cannot_fetch(f"sync_device({int(device_id) & 0xFF})")
@@ -1470,21 +1472,26 @@ class AsyncXProxy:
         first and raises a :class:`DocumentError` subclass before any hub
         traffic; ``snapshot_id``, when given, is checked against the
         current projection (:class:`SnapshotOutdatedError`). Stage B then
-        re-reads the affected entities strictly, and the items run in the
-        plan's order inside one :meth:`batch_writes` block.
+        re-reads the affected entities strictly, comparing device bindings/
+        macros and activity bindings/macros/favorites, not the whole entity.
+        The items run in the plan's order inside one :meth:`batch_writes`
+        block. Preview does not validate every payload's wire encoding.
 
         Returns a :class:`HubSyncResult`; a hub-side outcome is reported
         there per item, never raised. ``on_state`` (sync or async)
         receives the :class:`ApplyState` after every item and at the end,
         for the consumer to persist; ``sync_hub(state=...)`` resumes a
         stopped or cancelled run: it re-reads what the run touched or was
-        about to touch, keeps the placeholder map (no duplicate creates)
-        and re-plans the remaining items from the hub's actual state.
+        about to touch and re-plans remaining items. Current limitations:
+        uncertain creates can repeat even with a saved placeholder mapping,
+        and a checkpoint may not record an in-flight write before dispatch.
+        Do not automatically resume those cases or an abrupt interruption;
+        preserve the record and reconcile against the hub first.
         ``progress`` receives :class:`WriteProgress` reports carrying
         ``item_index`` / ``item_count``. Cancelling the awaiting task
-        finishes the item in flight, closes the batch (one trigger, one
-        event) and leaves the state resumable before the cancellation
-        propagates.
+        finishes the item in flight and closes the batch before cancellation
+        propagates. Requested triggers and notifications are coalesced;
+        no-op work need not produce either. Inspect item outcomes before resume.
         """
 
         self._raise_if_cannot_fetch("sync_hub")
@@ -1497,7 +1504,7 @@ class AsyncXProxy:
 
     @contextlib.asynccontextmanager
     async def batch_writes(self, *, send_remote_sync: bool = True) -> AsyncIterator[WriteBatch]:
-        """Run several writes as one batch: one remote sync, one event.
+        """Coalesce requested remote-sync triggers and snapshot notifications.
 
         Inside the block every write (``sync_*``, ``add_*``, ``remove_*``,
         ``reorder_*``, ``set_hub_name``, ``restore``) behaves as usual and
@@ -1506,7 +1513,8 @@ class AsyncXProxy:
         Leaving the block, whether normally, on an exception or on a
         cancellation, **finalises**: the engine sends one trigger if any
         write asked for one (none when nothing did, so an empty batch is
-        silent), one ``snapshot_changed`` carries every touched id, and
+        silent). When a snapshot notification was requested, one
+        ``snapshot_changed`` carries every touched id, and
         the yielded :class:`WriteBatch` gets its :class:`BatchOutcome`.
         Finalisation is shielded from cancellation: a task cancelled
         mid-batch still closes the batch before the cancel propagates.
@@ -2246,8 +2254,9 @@ class AsyncXProxy:
         """The engine's cache as an opaque, versioned JSON document.
 
         Persist it (the library never touches disk) and hand it back to
-        :meth:`import_state` before :meth:`start` on the next run, so the
-        snapshot is complete without a hub read. The content is the
+        :meth:`import_state` before :meth:`start` on the next run to retain
+        previously fetched detail. Partial state remains partial; import
+        does not make it complete or current. The content is the
         library's own and may change between versions; ``schema`` says
         whether a given library can read it.
         """

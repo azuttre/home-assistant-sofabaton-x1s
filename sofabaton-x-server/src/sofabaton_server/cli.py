@@ -30,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         dest="initial_hubs",
         metavar="HOST",
-        help="hub host to register on first start (repeatable; only when hubs.json is empty)",
+        help="hub host to register on first start (repeatable; only when hubs.json does not exist)",
     )
     ap.add_argument(
         "--advertise-url",

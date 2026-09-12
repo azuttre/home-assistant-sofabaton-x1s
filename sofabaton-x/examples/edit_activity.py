@@ -47,6 +47,7 @@ async def edit(args: argparse.Namespace) -> None:
                 edited=edited,
                 activity_id=args.activity,
                 snapshot_id=snapshot.snapshot_id,
+                strict=True,  # refuse an unreadable or incomplete live preflight
                 progress=lambda p: print(p.phase, p.message),
             )
         except SnapshotOutdatedError as err:
@@ -54,7 +55,10 @@ async def edit(args: argparse.Namespace) -> None:
         if not result.ok:
             print("Current snapshot:", (await proxy.snapshot()).snapshot_id)
             if result.failed_at == "stale_check":
-                raise RuntimeError("Hub changed: refresh and reapply the rename")
+                raise RuntimeError(
+                    f"Live preflight refused: {result.message}; "
+                    "refresh and reapply the rename after resolving the read or change conflict"
+                )
             raise RuntimeError(
                 f"Sync failed at {result.failed_at} after {result.completed_steps} steps; "
                 "inspect the current configuration before retrying"

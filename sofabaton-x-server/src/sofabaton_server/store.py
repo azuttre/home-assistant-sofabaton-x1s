@@ -211,7 +211,10 @@ class ApplyStore:
             path.unlink()
 
     def prune(self, hub_id: str) -> int:
-        """Drop the oldest finished records beyond ``keep``; unfinished ones stay."""
+        """Prune success/stopped/cancelled beyond ``keep``, including resumable records.
+
+        Queued/running records remain; retention is not restart recovery.
+        """
 
         finished = [r for r in self.list(hub_id) if r.finished]
         dropped = 0

@@ -96,7 +96,7 @@ return types can differ from the old methods.
 | `command_to_button()` | Apply `edits.bind_button()` to a bundle, then `sync_activity()`. |
 | `command_to_favorite()`, `delete_favorite()`, `reorder_favorites()` | Apply `edits.add_favorite()`, `edits.remove_favorite()` or `edits.reorder_favorites()` to a bundle, then `sync_activity()`. |
 | `add_device_to_activity()` | Edit activity membership in a bundle, then `sync_activity()`. |
-| `create_wifi_device()` | No direct replacement. Use bundle restore to provision a configured network device. |
+| `create_wifi_device()` | Use `deploy_wifi_device(WifiDeviceSpec(...))` for managed callback devices. For generic network devices, use `add_device()` plus `NetworkCommand`/edit helpers, or `restore(bundle)` for complete provisioning. |
 
 The [library README](README.md) documents the current facade and its
 exceptions. Direct engine access through `.sync` is internal and has no
@@ -107,6 +107,11 @@ compatibility guarantee.
 - `HubConfig`, typed hub status and identity, and typed events.
 - Snapshot revisions, explicit refresh, and state export/import.
 - Pure bundle edit helpers and plan previews before applying changes.
+- Whole-document `build_hub_sync_plan()` and `sync_hub()`, with placeholder
+  IDs and `ApplyState` checkpoints. Read the [current recovery limitations](README.md#current-document-write-limitations)
+  before implementing resume or retry.
+- `batch_writes()` coalesces requested remote-sync triggers and snapshot
+  notifications; empty/no-op work does not guarantee either.
 - Facade operations for activity/device management, backup, restore and erase.
 - `IrPayload` conversion, playback, capture and command payload reads.
 

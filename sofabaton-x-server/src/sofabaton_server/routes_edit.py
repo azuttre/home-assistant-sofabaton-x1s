@@ -11,7 +11,8 @@ Two shapes of write:
 * **Row edits**: ``PUT /activities/{id}`` and ``PUT /devices/{id}`` take
   the edited entity payload (the snapshot's ``activities[]`` /
   ``devices[]`` element) and require ``If-Match`` with the snapshot's
-  ETag, so an edit made on an old document is refused (412) before any
+  quoted snapshot_id (ETag accepted for compatibility), so an edit made
+  on an old cached revision is refused (412) before any
   hub traffic. ``POST .../plan`` previews the steps without writing.
 * **Intents**: rename, bind and clear a button, favorites, command
   rename, idle behaviour (row edits the server derives from the current
@@ -129,7 +130,12 @@ class IdleBehaviorRequest(BaseModel):
 
 class DeviceCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=30)
-    device_class: str = Field(min_length=1, description="the hub's device class (tv, receiver, ...)")
+    device_class: str = Field(
+        min_length=1,
+        description="Protocol class: X1 supports ir, wifi_roku, wifi_hue, wifi_sonos; "
+                    "X1S also supports wifi_ip; X2 also supports wifi_mqtt. "
+                    "This is not an appliance category such as TV or receiver.",
+    )
 
 
 class ActivityCreateRequest(BaseModel):

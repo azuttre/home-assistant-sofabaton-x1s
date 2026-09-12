@@ -9,15 +9,15 @@ A), creates an **apply record** (the library's ``ApplyState``: both
 documents, the placeholder map, every item and its outcome), and runs
 the library's ``sync_hub`` as a cancellable job that re-reads the
 affected entities first (stage B) and writes the items in order inside
-one batch: one remote-sync trigger, one ``snapshot_changed``.
+one batch: at most one explicit remote-sync trigger when requested,
+with coalesced snapshot notifications. No-op work need not emit an event.
 
-The record is written to disk after every item, so a run that stops
-(a partial or uncertain item, a cancel, a server restart) can be
-continued with ``POST /applies/{apply_id}/resume``: the library re-reads
-what the run touched, keeps the ids it already created and re-plans the
-rest from the hub's actual state. An ``Idempotency-Key`` on the ``PUT``
-makes a repeated submission of the same document return the existing
-apply instead of starting a second run.
+The record is saved after each item and when a created ID becomes known.
+Resume accepts stopped/cancelled records, but uncertain creates can repeat
+and an abrupt interruption can leave an outdated checkpoint. Startup does
+not reconcile records left queued/running. See README recovery limitations.
+Idempotency lookup happens only after control and revision checks; replaying
+the original PUT can fail 412 after its first write changes the snapshot.
 """
 
 from __future__ import annotations
@@ -54,7 +54,9 @@ _PLAN_ERRORS = {404: {"model": Problem}, 409: {"model": Problem}, 422: {"model":
 _APPLY_ERRORS = {**_PLAN_ERRORS, 412: {"model": Problem}, 428: {"model": Problem}}
 
 IDEMPOTENCY_KEY = Header(None, alias="Idempotency-Key", max_length=200,
-                         description="a client-chosen token; the same token with the same document returns the existing apply")
+                         description="Client token for a retained apply record. After control and If-Match checks pass, "
+                                     "the same token/document returns the existing job view (200). The original retry "
+                                     "can fail 412 after a write changes the revision; inspect applies/jobs before resubmitting.")
 
 
 # -- bodies and views ---------------------------------------------------------------
@@ -305,6 +307,12 @@ def _run_apply(request: Request, hub_id: str, proxy: AsyncXProxy, record: ApplyR
              summary="Preview what writing an edited snapshot document would do (nothing is written)",
              responses=_PLAN_ERRORS)
 async def plan_snapshot_edit(request: Request, hub_id: str, body: SnapshotEditDocument) -> HubSyncPlanView:
+    """Validate document structure and supported diffs without hub traffic.
+
+    Preview does not validate every stored command's wire encoding or
+    guarantee hardware acceptance. Command rows require stored-record
+    ``restore_data``, not the REST command-create ``payload`` object.
+    """
     proxy = _proxy(request, hub_id)
     snap = await proxy.snapshot()
     status = await proxy.status()
@@ -369,6 +377,13 @@ async def get_apply(request: Request, hub_id: str, apply_id: str) -> ApplyView:
              summary="Continue a stopped or cancelled apply from the hub's actual state",
              responses=_PLAN_ERRORS)
 async def resume_apply(request: Request, hub_id: str, apply_id: str) -> JobView:
+    """Inspect the record and hub before requesting resume.
+
+    Uncertain creates can duplicate, and the last persisted checkpoint can
+    omit an in-flight write. Do not automatically resume these cases.
+    Records left queued/running by an abrupt restart are not reconciled
+    on startup and are rejected here with ``apply_not_resumable``.
+    """
     proxy = _proxy(request, hub_id)
     record = _record_or_404(request, hub_id, apply_id)
     if str(record.state.get("status")) not in ("stopped", "cancelled"):

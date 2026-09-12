@@ -3,8 +3,9 @@ and the long-running operations on it (plan S7 and S9).
 
 The snapshot is the library's projection of the hub's structural
 configuration, served from the warm cache with no hub traffic and
-identified by its content hash, sent as the ``ETag``. A client edits
-against it and sends the id back (``If-Match``) with a write. Refreshing
+identified by ``snapshot_id``, its configuration content hash. A client
+sends that id quoted as ``If-Match`` with a write. The distinct response
+``ETag`` also covers provenance and is used for conditional reads. Refreshing
 the snapshot reads from the hub and is a **job**: one entity is a few
 bursts, the whole hub takes minutes and is meant as a user action.
 """
@@ -70,7 +71,9 @@ class SnapshotDocument(BaseModel):
     """``GET /hubs/{id}/snapshot``: the structural configuration plus its header.
 
     The body is the library's ``hub_bundle`` with the snapshot header
-    merged in; ``snapshot_id`` is also the response ``ETag``.
+    merged in. Send the quoted ``snapshot_id`` as ``If-Match`` for edits.
+    The response ``ETag`` is a distinct, opaque conditional-read validator
+    that also covers provenance; send it unchanged as ``If-None-Match``.
     """
 
     model_config = ConfigDict(extra="allow")

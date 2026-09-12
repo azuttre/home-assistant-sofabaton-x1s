@@ -35,7 +35,7 @@ class Settings:
     # Escape hatch for operators who bring their own certificate.
     tls_cert: Optional[Path] = None
     tls_key: Optional[Path] = None
-    # Hosts to register on first start when hubs.json is empty.
+    # Hosts to register only when hubs.json does not exist.
     initial_hubs: tuple[str, ...] = ()
     log_level: str = "info"
     # Callback devices (callbacks plan, section 5): what gets baked into
@@ -46,8 +46,8 @@ class Settings:
     # (the X1 can call no other).
     callback_host: Optional[str] = None
     callback_port: int = 8060
-    # Finished apply records kept per hub (phase 4 plan, decision 13);
-    # unfinished ones stay until deleted or resumed.
+    # Terminal apply records kept per hub: success, stopped and cancelled
+    # all count, including resumable records. Queued/running are not pruned.
     apply_keep: int = 20
 
     def __post_init__(self) -> None:

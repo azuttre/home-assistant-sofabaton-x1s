@@ -12,8 +12,10 @@ descriptor the hub renders itself.
 
 ``POST /backup`` reads a full, restorable bundle (a job; minutes),
 ``POST /restore`` writes one back (a job; not cancellable; ``replace``
-erases first) and ``POST /erase`` wipes the hub. Restore and erase are
-the API's only destructive operations.
+erases first) and ``POST /erase`` wipes the hub. Replacing restore and
+erase are whole-hub destructive operations; entity deletion and payload
+replacement can also remove existing configuration. Additive restore
+creates new entities and is not safe to retry blindly after a timeout.
 """
 
 from __future__ import annotations

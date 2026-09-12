@@ -17,16 +17,27 @@ This is the protocol engine extracted from the
 [Home Assistant Sofabaton X integration](https://github.com/m3tac0de/home-assistant-sofabaton-x1s);
 the integration is its reference consumer.
 
+**Building your first integration? Start with the
+[server starter guide](../sofabaton-x-server/docs/getting-started.md).**
+The server manages this library for you and provides HTTP/WebSocket APIs
+for sending commands and receiving remote presses. Use the library directly
+when you need to embed the hub connection in your Python application.
+
 > **Disclaimer:** this project is not affiliated with or endorsed by
 > Sofabaton. The protocol was reverse-engineered from network captures;
 > behavior may break with future hub firmware.
 
-## ◇ What it does
+[Install](#install) · [Quickstart](#quickstart) · [Editing](#snapshots-and-live-editing) ·
+[Whole-document writes](#editing-the-whole-document) · [Managed callbacks](#managed-wifi-devices) ·
+[CLI and examples](#cli-and-examples) · [Stability](#stability)
+
+## What it does
 
 - **Proxy** a physical hub: the library advertises itself via mDNS exactly
   like a real hub, the official app connects to it, and every frame is
   relayed, decoded and observable. The hub keeps working with the app while
-  your application gets full visibility and control.
+  your application observes the traffic. While the app is attached, it
+  owns the session and the proxy refuses writes and control commands.
 - **Catalogs**: read activities, devices (with live power state),
   buttons, commands, macros and favorites as typed results.
 - **Control**: send button/command presses, switch activities, trigger
@@ -39,7 +50,8 @@ the integration is its reference consumer.
   whether the library discovered the hub, a foreign mDNS stack did, a
   user typed an address, or it arrived as a REST body.
 - **Backup / restore**: export and restore hub configuration, including
-  provisioning devices of any class from a hand-built bundle.
+  provisioning supported device classes from a validated hand-built bundle
+  with payloads appropriate to the hub model.
 - **Snapshots and live editing**: project the hub configuration from the
   cache at no hub cost, diff an edited copy against it and sync the
   difference to the hub as targeted in-place writes
@@ -55,7 +67,7 @@ network-class devices define (e.g. a Roku-style ECP listener). The
 library carries the protocol artifacts for those features so applications
 can build them on top — the Home Assistant integration does exactly that.
 
-## ◇ Install
+## Install
 
 For the unreleased API documented here, install from the repository root:
 
@@ -74,7 +86,7 @@ Python 3.11+. The only dependency is
 [python-zeroconf](https://pypi.org/project/zeroconf/) (mDNS advertising and
 hub discovery).
 
-## ◇ Quickstart
+## Quickstart
 
 Find a hub, then proxy it. Blocking work runs in the event loop's
 executor and callbacks (plain functions or coroutines) are delivered on
@@ -108,7 +120,8 @@ async def main():
 
         # Fires one real command — command 5 on device 1. Pick your own
         # (entity_id, command_id) pair from the listing printed above.
-        await proxy.send(1, 5)
+        if not await proxy.send(1, 5):
+            raise RuntimeError("Command refused; check the hub mode")
 
 asyncio.run(main())
 ```
@@ -300,7 +313,7 @@ returns on its own. Both waiters are plain state predicates, so a
 long-running application can simply re-await
 `wait_until_controllable()` whenever a send comes back `False`.
 
-## ◇ Snapshots and live editing
+## Snapshots and live editing
 
 The **snapshot** is the hub's structural configuration (devices,
 activities, commands, bindings, macros, favorites; everything but the IR
@@ -338,8 +351,9 @@ still current. The hub can be edited outside this library at any time
 (the vendor app, another client, a restore) and never says so; the
 library deliberately reports no freshness verdict. `fetched_at` is the
 age of each entity's copy, a refresh is the only way to bring it up to
-date, and the sync stale check protects writes by re-reading the target
-entity first. An `app_state` event with `connected=False` means a
+date. Sync re-reads the target before writing, but compares only the
+selected tables described below; it cannot detect every outside edit.
+An `app_state` event with `connected=False` means a
 vendor-app session through the proxy just ended: one visible occasion,
 among many invisible ones, on which to offer a refresh.
 
@@ -355,8 +369,8 @@ snap = await proxy.import_state(doc)    # StateDocumentError if unreadable
 Editing is bundle-based: take a snapshot as the baseline, modify a copy
 of its bundle, and sync. The engine diffs the two bundles into an ordered
 plan of targeted in-place writes (nothing is deleted-and-restored),
-re-reads the entity first to detect concurrent changes, applies the steps
-serially, each gated on the hub's acknowledgement, and re-reads the entity
+re-reads selected entity tables to detect some concurrent changes, applies
+the steps serially, each gated on the hub's acknowledgement, and re-reads the entity
 afterwards so the next snapshot reflects the hub:
 
 ```python
@@ -375,10 +389,12 @@ for step in build_activity_sync_plan(baseline, edited, activity_id=101):
 
 result = await proxy.sync_activity(
     baseline=baseline, edited=edited, activity_id=101,
-    snapshot_id=snap.snapshot_id,          # refused up front if the snapshot moved
+    snapshot_id=snap.snapshot_id,          # refused if the cached revision moved
+    strict=True,                          # also refuse incomplete/unreadable preflight
     progress=lambda p: print(p.phase, p.message),   # WriteProgress, on the loop
 )
-assert result.ok, result.message           # SyncResult: failed_at, completed_steps, snapshot_id
+if not result.ok:
+    raise RuntimeError(f"Sync stopped at {result.failed_at}: {result.message}")
 ```
 
 `sync_device` / `build_device_sync_plan` are the device-scoped
@@ -389,27 +405,49 @@ anything is written: a `snapshot_id` that is no longer current raises
 (never fetched, or fetched incomplete) raises `SnapshotIncompleteError`;
 refresh the entity and edit again. A failed sync reports where it stopped
 (`failed_at`, `completed_steps`) in the `SyncResult` rather than raising;
-`failed_at: "stale_check"` means the entity changed on the hub after the
-baseline was captured, and `wrote_nothing` tells you no step reached the
-hub. The planner refuses (with `ValueError`, surfaced as `failed_at:
+`failed_at: "stale_check"` means the live preflight refused the edit:
+selected tables changed, or, with `strict=True`, the read was unreadable or
+incomplete. Inspect `message` and `preflight`; `wrote_nothing` tells you
+no step reached the hub. The planner refuses (with `ValueError`, surfaced as `failed_at:
 "plan"`) any bundle difference outside the entity being edited, so an
 editor bug cannot silently rewrite unrelated configuration.
+
+The live comparison covers device **bindings and macros**, and activity
+**bindings, macros and favorites**, with normalization of power durations
+and role-page bindings. It does not compare all names, command payloads or
+device-head fields. `sync_device` and `sync_activity` default to
+`strict=False`, which can proceed when the preflight cannot be read in full;
+pass `strict=True` to refuse those reads. Neither setting provides an atomic
+transaction or protection against every concurrent edit.
+
+| Document | Purpose and persistence |
+| --- | --- |
+| Structural snapshot | Cached configuration and provenance; edit a copy for sync. Contains no restorable command blobs. |
+| Full backup bundle | Configuration plus payloads; keep the whole bundle for restore. Restore creates new IDs. |
+| Exported state | Opaque, versioned cache document; persist and import it without editing. It is not a backup or an apply checkpoint. |
+| Apply state | Both edit documents, item outcomes and ID mappings; persist for an interrupted document write, subject to the limits below. |
 
 ### Editing the whole document
 
 An editor that changes many things at once hands back the **whole**
 snapshot document and lets the library own the transition: order,
-id allocation, the one remote-sync trigger, and what happens when the
+id allocation, batching of remote-sync requests, and what happens when the
 run stops halfway. A new device or activity carries a negative
 placeholder id of your choosing (and every reference to it uses that
 same negative id); a removed entity must be removed from every activity
 in the same document; the array order of `devices` / `activities` is
 the display order. `build_hub_sync_plan` validates the document with no
-hub traffic and previews the items; `sync_hub` runs them inside one
-batch (one trigger, one `snapshot_changed`), re-reading the affected
-entities strictly before the first write:
+hub traffic and previews the items. This checks structure and supported
+edits, not every payload's encoding or whether the hub will accept a write.
+`sync_hub` runs the items inside one batch, with at most one explicit
+remote-sync trigger when required. Snapshot notifications are coalesced;
+an unchanged document is a successful no-op and need not emit an event.
+Affected entities must pass strict live reads before the first write;
+the comparisons still cover only the selected tables described above.
+Use the returned result, not an event, to determine completion:
 
 ```python
+import copy
 from sofabaton import ApplyState, DocumentError, build_hub_sync_plan
 
 snap = await proxy.snapshot()
@@ -418,17 +456,22 @@ desired["hub"]["name"] = "Loft"
 desired["devices"].append({"device": {"device_id": -1, "name": "Projector", "device_class": "ir"},
                            "commands": [], "button_bindings": [], "macros": []})
 try:
-    plan = build_hub_sync_plan(snap.bundle, desired)        # stage A: DocumentError subclasses
+    plan = build_hub_sync_plan(
+        snap.bundle, desired, hub_version=(await proxy.status()).hub_version,
+    )
 except DocumentError as err:
-    print(err.code, err)                                    # dangling_reference, out_of_scope, ...
+    print(err.code, err)  # dangling_reference, out_of_scope, ...
+    raise                # do not submit a document whose preview failed
 for item in plan.items:
     print(item.index, item.kind, item.entity_id or item.placeholder_id, item.label)
 
+# In-memory illustration only. For recovery, atomically save each document
+# to durable storage in your on_state callback; the library never saves it.
 records: list[dict] = []
 result = await proxy.sync_hub(
     baseline=snap.bundle, desired=desired, snapshot_id=snap.snapshot_id,
     progress=lambda p: print(p.item_index, p.phase, p.message),
-    on_state=lambda state: records.append(state.to_dict()),   # persist this; the library never does
+    on_state=lambda state: records.append(copy.deepcopy(state.to_dict())),
 )
 print(result.status, result.id_map, result.remote_sync)      # HubSyncResult
 for item in result.items:
@@ -440,13 +483,27 @@ write went out and no answer followed), `failed` (refused before its
 first write), `not_attempted` or `cancelled`; the first non-`done` item
 stops the run and nothing is rolled back. `on_state` receives the
 `ApplyState` after every item (and right after a created entity's id is
-known): store the last one, and continue later with
-`sync_hub(state=ApplyState.from_dict(doc))`, which re-reads what the run
-touched, keeps the ids it already created and re-plans the rest from the
-hub's actual state. Cancelling the awaiting task finishes the item in
-flight and leaves the state resumable. In the CLI: `snapshot out=D0.json`,
+known). After inspecting the resulting hub state and the limitations below,
+a stopped or cancelled run can be continued with
+`sync_hub(state=ApplyState.from_dict(doc))`. It re-reads affected entities
+and re-plans remaining work. Cancelling the awaiting task drains the item
+in flight before stopping. In the CLI: `snapshot out=D0.json`,
 edit a copy, `apply D1.json baseline=D0.json plan`, then without `plan`
 to write; `apply resume=D1.json.apply.json` continues.
+
+#### Current document-write limitations
+
+Resume is not yet a guarantee against duplicate creates. A create whose
+acknowledgement or readback was lost can be repeated even when an ID mapping
+was recorded. Also, a running item's state is not always emitted before
+dispatch, so the last saved checkpoint can say `not_attempted` after its
+write reached the hub. Do not automatically resume an uncertain create or
+a checkpoint from an abrupt interruption. Preserve the checkpoint, refresh
+and inspect the hub, then construct a new edit against the reconciled
+snapshot when the intended changes are clear. There is no rollback.
+
+The server adds persistent apply records but has further
+[restart and retry limitations](../sofabaton-x-server/README.md#recovery-and-retention).
 
 ### Edit helpers
 
@@ -465,7 +522,9 @@ snap = await proxy.snapshot()
 edited = edits.bind_button(snap.bundle, 101, ButtonName.VOL_UP, device_id=7, command_id=3,
                            long_press=(7, 4))
 result = await proxy.sync_activity(baseline=snap.bundle, edited=edited, activity_id=101,
-                                   snapshot_id=snap.snapshot_id)
+                                   snapshot_id=snap.snapshot_id, strict=True)
+if not result.ok:
+    raise RuntimeError(f"Sync stopped at {result.failed_at}: {result.message}")
 ```
 
 ### Intents
@@ -551,7 +610,12 @@ hook = NetworkCommand.http(host="192.168.1.20", port=8123, method="POST",
                            body='{"state": "toggle"}')
 snap = await proxy.refresh(device_id=device_id)
 edited, command_id = edits.add_command(snap.bundle, device_id, hook, "Lights")
-await proxy.sync_device(baseline=snap.bundle, edited=edited, device_id=device_id)
+result = await proxy.sync_device(
+    baseline=snap.bundle, edited=edited, device_id=device_id,
+    snapshot_id=snap.snapshot_id, strict=True,
+)
+if not result.ok:
+    raise RuntimeError(f"Sync stopped at {result.failed_at}: {result.message}")
 ```
 
 `NetworkCommand.roku("keypress/Home")` is a Roku ECP path; the Roku device head
@@ -570,26 +634,48 @@ pointing at one host and port. Deploy one from a `WifiDeviceSpec`, keep the
 returned `WifiDeployment`, and edit it in place later:
 
 ```python
-from sofabaton import WifiDeviceSpec, WifiSlotSpec, WifiUpdateDeclined
+from dataclasses import replace
+from sofabaton import (
+    ButtonName, edits, WifiDeviceSpec, WifiSlotSpec,
+    WifiUpdateDeclined, WifiUpdateFailed,
+)
 
 spec = WifiDeviceSpec(name="Server", slots=(WifiSlotSpec("Play"), WifiSlotSpec("Pause")),
                       power_on_slot=1, input_slots=(2,))
 deployment = await proxy.deploy_wifi_device(spec, host="192.168.1.10", port=8060)
-store(deployment.to_dict())           # device id, spec, target, the 20 labels written
+deployment_document = deployment.to_dict()  # persist this in your application
 
 # Bind the commands with the generic helpers; the update below never touches those.
 snap = await proxy.refresh(activity_id=101)
 edited = edits.bind_button(snap.bundle, 101, ButtonName.PLAY, device_id=deployment.device_id, command_id=1)
-await proxy.sync_activity(baseline=snap.bundle, edited=edited, activity_id=101)
+result = await proxy.sync_activity(
+    baseline=snap.bundle, edited=edited, activity_id=101,
+    snapshot_id=snap.snapshot_id, strict=True,
+)
+if not result.ok:
+    raise RuntimeError(f"Binding stopped at {result.failed_at}: {result.message}")
 
+# Updates replace the complete spec. Copy the normalized deployed spec so
+# power/input hooks, the other slots and the brand survive this rename.
+slots = list(deployment.spec.slots)
+slots[0] = replace(slots[0], label="Start", long_label="Start Long")
+updated_spec = replace(deployment.spec, slots=tuple(slots))
 try:
-    deployment = await proxy.update_wifi_device(
-        deployment, WifiDeviceSpec(name="Server", slots=(WifiSlotSpec("Start"), WifiSlotSpec("Pause"))))
-except WifiUpdateDeclined as declined:      # "drift", "missing", "device" or "planner"
-    ...                                     # nothing was written; remove and deploy again
+    deployment = await proxy.update_wifi_device(deployment, updated_spec)
+except WifiUpdateDeclined as err:  # nothing written by this update
+    raise RuntimeError(f"Update declined; inspect the deployment: {err}") from err
+except WifiUpdateFailed as err:    # some steps may have landed
+    raise RuntimeError(f"Update incomplete; retain the desired spec and inspect: {err}") from err
+deployment_document = deployment.to_dict()  # persist the successful update
 ```
 
-Every slot is written, defaults included (`Button n` / `Button n Long`). The
+Both deploy and update take a **complete desired specification**. Omitted
+slots become `Button n` / `Button n Long`; omitted power/input hooks are
+cleared. Preserving device/command IDs and generic bindings does not preserve
+omitted spec fields. Hook slots are **1..10**; callback path indexes are
+**0..9**. Short command IDs are `1..10`, long IDs `11..20`.
+
+Every slot is written, defaults included. The
 callback target never changes in place: a new address is a remove and a new
 deploy. The X1 always calls port 8060 and ignores the power and input hooks.
 `update_wifi_device` refuses (`WifiUpdateDeclined`) when a record's label
@@ -598,6 +684,8 @@ edit made in the Sofabaton app is never silently overwritten; a record that
 already carries the new label is an interrupted update being resumed. A write
 the hub rejects raises `WifiUpdateFailed` (a `HubRejectedError`) and the next
 update with the same spec resumes.
+
+## CLI and examples
 
 A CLI ships as a console script:
 
@@ -610,7 +698,7 @@ x> commands 1                        # list (command_id, label) for device 1
 x> send 1 5                          # numeric ids, exactly like the Python API
 x> send 101 POWER_ON                 # the CLI also resolves button names to codes
 x> testir 01 20 00 10 01 00 94 ac .. # fire a raw IR payload once (nothing saved)
-x> snapshot                          # every device/activity + complete / stale flags
+x> snapshot                          # every device/activity + completeness / editability
 x> refresh act=101                   # re-read one entity (refresh alone = whole hub, slow)
 x> rename act 101 Movie night        # snapshot, edit, sync
 x> bind 101 VOL_UP 7 3 7 4           # button -> device 7 command 3, long press command 4
@@ -649,7 +737,7 @@ python sofabaton-x/examples/edit_activity.py --hub 192.168.1.50 --activity 101 -
 python sofabaton-x/examples/edit_activity.py --hub 192.168.1.50 --activity 101 --name "Movie night" --apply
 ```
 
-## ◇ Protocol & networking docs
+## Protocol & networking docs
 
 This library is a reverse-engineered implementation; the wire protocol and
 network topology are documented in the repository:
@@ -666,7 +754,13 @@ network topology are documented in the repository:
   [`docs/networking.md`](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/networking.md):
   the full port map, the two proxy faces, firewall rules and VLAN caveats.
 
-## ◇ Stability
+Model support describes implemented protocol paths, not proof that every
+operation has been exercised on every firmware. The
+[live-hub testing notes](../docs/protocol/live-hub-testing.md) record the
+bench coverage and outstanding checks. In particular, the document-write
+bench covers X1/X1S; equivalent X2 and server-route coverage is still pending.
+
+## Stability
 
 Names importable from the package root — `from sofabaton import ...`,
 the set listed in `sofabaton.__all__` — are the supported API and follow
@@ -696,7 +790,7 @@ values as well as catching exceptions.
 | `HubRejectedError` | `RuntimeError` | inspect hub state before retrying a write; its outcome may be uncertain |
 | `IrLearnError` | `RuntimeError` | inspect `state`; retry capture with the hub idle if appropriate |
 
-## ◇ Issues & release notes
+## Issues & release notes
 
 Bugs and feature requests go to the shared
 [issue tracker](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/issues).
@@ -709,6 +803,6 @@ for library changes and migration instructions. Library versions are tagged
 `sofabaton-x-vX.Y.Z`; published releases are listed on the
 [GitHub releases page](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/releases).
 
-## ◇ License
+## License
 
 MIT — see [LICENSE](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/LICENSE).

@@ -1,11 +1,9 @@
 """FastAPI application factory.
 
-S0 ships the skeleton: settings wired in, the OpenAPI document shaped
-the way generated clients need it (stable operation ids, named
-components, ``servers[0].url`` from the advertised URL, root path), and
-one route, ``GET /api/v1/server``. Hubs, discovery and the WebSocket
-arrive in S1 to S4; every route added later follows the conventions
-set here.
+Wires settings, hub management, discovery, jobs, callbacks, REST routes
+and the WebSocket lifecycle. The OpenAPI document uses stable operation
+IDs, named components, the advertised server URL and any root path for
+generated clients.
 """
 
 from __future__ import annotations

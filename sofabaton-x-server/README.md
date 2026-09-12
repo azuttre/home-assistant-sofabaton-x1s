@@ -16,7 +16,17 @@ It supports hub discovery and
 management, reads and control, configuration editing, IR payloads, and
 backup / restore / erase.
 
+**Building your first integration? Start with
+[your first command and your first remote press](docs/getting-started.md).**
+It walks through finding command IDs, sending a command, assigning a
+callback to a remote button, and receiving its WebSocket event. A runnable
+server client handles the setup steps and shows the underlying HTTP calls.
+
 > Unofficial; not affiliated with or endorsed by Sofabaton.
+
+[Starter guide](docs/getting-started.md) · [Run](#run) · [Settings](#settings) · [API](#api) · [Jobs](#jobs) ·
+[Writes](#writes) · [Recovery](#recovery-and-retention) ·
+[Button events](#button-events) · [Development](#development)
 
 ## Run
 
@@ -48,19 +58,24 @@ docker run -d --name sofabaton-x-server --network host -v ./data:/data \
 cd sofabaton-x-server && docker compose up -d
 ```
 
-Use Docker on Linux with `network_mode: host` so mDNS, the app's UDP
-broadcast and the hub's TCP dial-back can reach the LAN interface.
-Callback devices (Button events below) need the hubs to reach the
-server's callback listener. On host networking nothing is needed. On a
-bridge network the server's own address is the container's, which the
-hubs cannot reach: set `SOFABATON_CALLBACK_HOST` to the Docker host's
-LAN address and publish the callback port (`-p 8060:8060`). The
-server cannot detect this itself; it shows the address it will use as
-`effective_destination` on the callback device record and on
-`GET /api/v1/server`.
-The supplied compose file configures this. `/data` holds `hubs.json`,
-`server.json` and one `state-<hub_id>.json` per hub (the library's cache
-document; see Snapshot below).
+The supplied Compose file uses Linux **host networking** so mDNS, the
+app's UDP broadcast and the hub's TCP dial-back can reach the LAN interface.
+Docker Desktop compatibility with this project's discovery and dial-back
+requirements is unverified; this is a Linux deployment recipe.
+
+Callback devices also need the hub to reach the separate HTTP callback
+listener (TCP 8060 by default). A bridge deployment would need a reachable
+`SOFABATON_CALLBACK_HOST` and callback-port publication, as well as working
+discovery and hub dial-back; those two callback settings alone are not a
+complete bridge-network deployment recipe.
+
+`GET /api/v1/hubs/{hub_id}/callback-device` reports `target`, the address
+already written to that device, and `effective_destination`, the address a
+new deploy would use with the current settings. These can differ after a
+settings change. `GET /api/v1/server` reports callback listener state, not
+`effective_destination`. `/data` holds `hubs.json`, `server.json`, one
+`state-<hub_id>.json` cache document per hub, and the apply records described
+below.
 
 ### Behind a reverse proxy (TLS)
 
@@ -121,16 +136,31 @@ variables, then flags; each layer overrides the one before.
 | `--bind` | `SOFABATON_BIND` | `0.0.0.0` | address to listen on |
 | `--port` | `SOFABATON_PORT` | `8480` | API port |
 | `--data-dir` | `SOFABATON_DATA_DIR` | `./data` | `server.json`, `hubs.json` |
-| `--hub HOST` (repeatable) | `SOFABATON_HUBS=a,b` | none | hubs registered on first start, only while `hubs.json` is empty |
+| `--hub HOST` (repeatable) | `SOFABATON_HUBS=a,b` | none | hubs registered on first start, only when `hubs.json` does not exist |
 | `--advertise-url` | `SOFABATON_ADVERTISE_URL` | none | public base URL behind a reverse proxy; published as mDNS TXT `base_url` and as the OpenAPI `servers[0].url` |
 | `--root-path` | `SOFABATON_ROOT_PATH` | none | path prefix a reverse proxy mounts the API under |
 | `--trusted-proxy ADDR` (repeatable) | `SOFABATON_TRUSTED_PROXIES=a,b` | none | sources whose `X-Forwarded-*` headers are honoured |
 | `--tls-cert` / `--tls-key` | `SOFABATON_TLS_CERT` / `_KEY` | none | bring your own certificate (a reverse proxy is the usual way) |
 | `--callback-host` | `SOFABATON_CALLBACK_HOST` | routed local IP per hub | IPv4 address the hubs call back on for callback devices (see Button events); set the host's LAN address inside a container on a bridge network |
 | `--callback-port` | `SOFABATON_CALLBACK_PORT` | `8060` | port of the callback listener; the X1 can call no other |
+| no flag (`server.json`: `apply_keep`) | `SOFABATON_APPLY_KEEP` | `20` | retained terminal apply records per hub, including stopped/cancelled ones |
 | `--log-level` | `SOFABATON_LOG_LEVEL` | `info` | |
 
-`--print-settings` prints the effective settings and exits.
+For example, save this as `server.json` in the selected data directory:
+
+```json
+{
+  "port": 8480,
+  "callback_port": 8060,
+  "initial_hubs": ["192.168.1.50"],
+  "apply_keep": 20,
+  "log_level": "info"
+}
+```
+
+Choose that directory with `--data-dir` or `SOFABATON_DATA_DIR` before the
+file is loaded. An existing empty `hubs.json` is respected: seed hubs are
+not re-added. `--print-settings` prints effective settings and exits.
 
 ## Security
 
@@ -153,7 +183,10 @@ components. Job results and editable entity tables contain open objects;
 clients must interpret them according to the operation. Errors are one shape,
 `Problem` (`type`, `title`, `status`, `detail`, `hub_id`, `mode`).
 
-Paths below beginning `/hubs` are relative to the API root `/api/v1`.
+Paths beginning `/hubs`, `/server` or `/events` below are relative to
+`/api/v1`. `{id}` and `{hub_id}` both mean the registered hub ID, not a
+device or activity ID. An ellipsis (`...`) abbreviates the preceding
+hub/entity path; it is not an executable URL.
 For an executable refresh/preview/apply workflow, see
 [the integration guide](docs/platform-integration.md#8-complete-edit-workflow).
 
@@ -191,6 +224,14 @@ flags. A partial cache remains partial; absent or unreadable state starts
 cold. Check `editable` before editing rather than assuming a restart made
 the snapshot complete.
 
+| Document | Use |
+| --- | --- |
+| Snapshot | Cached structural configuration; edit a copy and sync. It is not restorable. |
+| Full backup bundle | Configuration plus command payloads; retain the whole bundle for restore. |
+| State document | Opaque library cache persisted by the server; do not edit or submit it to restore. |
+| Job | In-memory progress and outcome of one operation; lost on restart. |
+| Apply record | Persistent documents, item outcomes and ID mappings for a document write; recovery and retention limits apply below. |
+
 ## Jobs
 
 Anything that holds the hub for more than a moment answers `202` with a
@@ -202,13 +243,23 @@ or poll `GET /hubs/{id}/jobs/{job_id}`; `GET /hubs/{id}/jobs` lists
 recent ones. One job runs per hub at a time (`409 hub_job_running`). Reads
 are not rejected merely because a job runs, but a read that needs hub
 traffic can wait or fail; keep the hub idle during IR learning.
-`DELETE /hubs/{id}/jobs/{job_id}` cancels a
-whole-hub refresh (between entities) or a learn; writes, backup and
-restore run to completion, and disabling or removing a hub is refused
-while a job holds it. Cancellation may remain pending until the current
-entity finishes; repeating the request is accepted and changes nothing.
-Wait for the terminal job status before starting another operation.
-A graceful stop waits for running writes, with a bounded timeout.
+Check the job's `cancellable` field before requesting cancellation with
+`DELETE /hubs/{id}/jobs/{job_id}`:
+
+| Operation | Cancellable | Stopping point |
+| --- | --- | --- |
+| Whole-hub refresh | yes | after the entity in flight |
+| Single-entity refresh | no | runs to completion |
+| IR learn | yes | ends the capture wait |
+| Whole-document `sync_hub` / `resume_apply` | yes | after draining the item in flight |
+| Row edits, intents, callback writes, backup, restore, erase | no | runs to completion |
+
+Cancellation can remain pending while the current entity/item finishes.
+Repeating the request while cancellation is pending changes nothing. Wait
+for terminal status before another operation; disable/remove is refused
+while a job holds the hub. A graceful stop requests cancellation of
+cancellable work and waits for non-cancellable writes, with a bounded drain
+timeout. It does not guarantee completion after an abrupt process exit.
 
 `202` means accepted, not successful. Terminal states are `done`, `failed`
 and `cancelled`. On failure inspect both `error` and `result`, which may
@@ -227,9 +278,9 @@ Two shapes, both jobs:
   the same path, `POST` / `DELETE` / `PUT .../favorites[/order]`,
   `POST .../devices/{did}/rename`, `POST .../commands/{cid}/rename`,
   `PUT .../devices/{did}/idle-behavior`; and the whole-entity ones:
-  `POST /devices` (empty device of a class the hub can create), `POST
-  /activities`, `DELETE /devices/{did}`, `DELETE /activities/{aid}`,
-  `PUT /devices/order`, `PUT /activities/order`, `PUT /hubs/{id}/name`.
+  `POST /hubs/{id}/devices` (empty device of a class the hub can create), `POST
+  /hubs/{id}/activities`, `DELETE /hubs/{id}/devices/{did}`, `DELETE /hubs/{id}/activities/{aid}`,
+  `PUT /hubs/{id}/devices/order`, `PUT /hubs/{id}/activities/order`, `PUT /hubs/{id}/name`.
   `If-Match` is optional and honours the snapshot's `snapshot_id` revision.
 - **Row edits** for an editor that works on the document: change one
   `activities[]` or `devices[]` element of the snapshot, preview with
@@ -238,41 +289,94 @@ Two shapes, both jobs:
   differ from the snapshot (`422 out_of_scope`).
 
 `If-Match` compares the cached configuration revision. Sync-based row edits
-and intents also re-read the target entity before writing: a changed live
-baseline fails with `sync_failed` at `stale_check`. Whole-entity operations
-(create, delete, reorder, hub rename, restore) use their own validation;
+and intents also re-read the target before writing, but compare only
+device bindings/macros and activity bindings/macros/favorites, with
+normalization exceptions. Names, payloads and device-head fields are not
+fully compared. A detected difference fails with `sync_failed` at
+`stale_check`. These routes use the library's `strict=False` default, so an
+unreadable or incomplete preflight can allow the write to proceed. There is
+no REST strict-mode option for row edits. Whole-document sync requires
+complete live reads, but uses the same limited comparison tables.
+Whole-entity operations (create, delete, reorder, hub rename, restore) use their own validation;
 they do not all perform this live baseline comparison. Configuration writes
 are refused up front while an app holds the hub (`409 hub_busy`).
+
+The `device_class` on create is a protocol class, not an appliance category
+such as TV or receiver:
+
+| Hub | Creatable classes |
+| --- | --- |
+| X1 | `ir`, `wifi_roku`, `wifi_hue`, `wifi_sonos` |
+| X1S | X1 classes plus `wifi_ip` |
+| X2 | X1S classes plus `wifi_mqtt` |
+
+Payloads and device fields must match the class/model. This table describes
+implemented create support; see the [bench notes](../docs/protocol/live-hub-testing.md)
+for which workflows have been tested on hardware.
 
 ## Whole-document writes
 
 An editor that changes many things at once puts the whole edited
-snapshot back: `PUT /api/v1/hubs/{id}/snapshot` with the document `GET
-/snapshot` returned, edited, and the quoted `snapshot_id` in `If-Match`
+snapshot back: `PUT /api/v1/hubs/{id}/snapshot` with the document
+`GET /hubs/{id}/snapshot` returned, edited, and the quoted `snapshot_id` in `If-Match`
 (required). New devices and activities carry a negative placeholder id
 of the client's choosing (every reference to them uses the same negative
 id; the hub assigns the real one and the result's `id_map` says which);
 a removed entity must be removed from every activity in the same
-document; array order is display order. `POST /snapshot/plan` previews
-the ordered items without writing and refuses a bad document the same
-way the `PUT` would (`422 dangling_reference` / `out_of_scope` /
+document; array order is display order. `POST /hubs/{id}/snapshot/plan` previews
+the ordered items without writing and performs structural validation
+shared with `PUT` (`422 dangling_reference` / `out_of_scope` /
 `invalid_request`, `409 entity_not_editable` / `snapshot_incomplete`).
 
-The `PUT` answers `202` with a cancellable job of kind `sync_hub`. The
-server re-reads the affected entities before the first write, runs the
-items in order inside one batch (one remote-sync trigger, one
-`snapshot_changed`), and keeps an **apply record** under
-`data/applies/<hub_id>/`, written after every item: `GET /applies`,
-`GET /applies/{apply_id}`, `DELETE /applies/{apply_id}`. A run that
-stops (a partial or uncertain item, a cancel, a server restart) fails
-its job with `apply_stopped` and leaves the record resumable: `POST
-/applies/{apply_id}/resume` continues from the hub's actual state
-without creating anything twice. Send an `Idempotency-Key` header to
-make a repeated `PUT` of the same document return the existing apply
-(`200`) instead of running again; the same key with a different
-document is `409 apply_key_reused`. `apply_keep` (default 20) is how
-many finished records a hub keeps; unfinished ones stay until deleted
-or resumed.
+A successful preview does not validate every command's wire encoding or
+guarantee hub acceptance. The [integration guide](docs/platform-integration.md#editing-the-whole-document)
+shows the distinct REST payload and document `restore_data` formats.
+
+The `PUT` answers `202` with a cancellable `sync_hub` job. The server
+requires live reads of affected entities before the first write, then runs
+items in order in one batch. Requested remote-sync triggers and snapshot
+notifications are coalesced: at most one explicit trigger when required;
+an unchanged document can finish without a change event. Follow the job's
+terminal status to determine completion.
+
+Apply records are saved under `data/applies/<hub_id>/` after each item and
+when a created ID becomes known. Read them with `GET /hubs/{id}/applies`
+or `GET /hubs/{id}/applies/{apply_id}`; `DELETE` on the latter forgets the
+record, not the hub changes.
+
+### Recovery and retention
+
+| Outcome | Job status | Apply status | Next step |
+| --- | --- | --- | --- |
+| All items completed | `done` | `success` | adopt the resulting snapshot |
+| Partial, uncertain or refused item | `failed`, error `apply_stopped` | `stopped` | inspect item outcomes and hub state before recovery |
+| Cancellation drained by the apply runner | `cancelled` | `cancelled` | inspect the drained item's outcome before recovery |
+| Abrupt server restart | in-memory job lost | last persisted status, possibly `queued`/`running` | refresh and reconcile; no automatic restart recovery |
+
+`POST /hubs/{id}/applies/{apply_id}/resume` accepts stopped or cancelled
+records. **Resume is not currently duplicate-safe for uncertain creates**:
+lost acknowledgements/readback can cause a create to repeat, and a crash
+checkpoint can omit an in-flight write. Do not automatically resume these
+cases. Preserve the record, refresh and inspect the hub, and construct a
+new edit from that reconciled state when the intended changes are clear.
+Records left `queued` or `running` by an abrupt restart are not reconciled
+on startup and the resume endpoint rejects them. See the
+[library limitations](../sofabaton-x/README.md#current-document-write-limitations).
+
+An `Idempotency-Key` can make a repeated `PUT` of the same document return
+the existing job view (`200`), but **control and `If-Match` checks run before
+key lookup**. The original retry can therefore return `412` after the first
+write changes the revision. Check jobs and apply records after a timeout;
+do not blindly resubmit the old document with a newer revision. Once those
+checks pass, reusing a key with a different document returns
+`409 apply_key_reused`. Keys cease to protect against repeated submission
+when their apply record is deleted or pruned.
+
+`apply_keep` (default 20) limits terminal records per hub: **`success`,
+`stopped` and `cancelled` all count**, so even a resumable record can be
+pruned. `queued`/`running` records are not automatically pruned. Export any
+record needed for diagnosis before deleting it or allowing retention to
+remove it.
 
 ## IR payloads, backup, restore
 
@@ -319,10 +423,21 @@ GET  /hubs/{id}/presses?after=<seq>    the catch-up view of the press stream
 GET  /server/callback-listener         the listener's state; POST .../retry tries to bind it now
 ```
 
+`PUT /hubs/{id}/callback-device` replaces the **complete desired spec**.
+Omitted slots become defaults; omitted power/input hooks are cleared. To
+rename safely, copy `name`, `slots`, `power_on_slot`, `power_off_slot` and
+`input_slots` from the GET response's `spec`, change the intended fields,
+and PUT all five back. Preserved IDs and generic bindings do not imply
+preservation of omitted spec fields. The integration guide includes a
+[copy-and-edit example](docs/platform-integration.md#10-button-events).
+
+Hook slots are one-based (`1..10`); the callback URL uses a zero-based
+index (`0..9`). The `press.slot` field is one-based when resolved.
+
 Every deploy writes all ten slots (unnamed ones are `Button n`), each as
 a short and a long press record: command ids `1..10` and `11..20`. Bind
 them like any command with the generic routes (`PUT
-/activities/{aid}/buttons/{button}`, favorites, activity membership); an
+/hubs/{id}/activities/{aid}/buttons/{button}`, favorites, activity membership); an
 in-place update never touches those bindings. On the X1S and X2,
 `power_on_slot` / `power_off_slot` fire when an activity powers on or
 off and `input_slots` are offered as activity-start inputs; the X1
@@ -409,24 +524,29 @@ JSON objects discriminated by `type`:
 
 | type | payload |
 | --- | --- |
-| `hello` | once on connect: `server_version`, `api_version`, `hubs` (`hub_id`, `enabled`) |
+| `hello` | once on connect: `server_version`, `api_version`, `instance_id`, `hubs` (`hub_id`, `enabled`) |
 | `hub_event` | `hub_id` and the library `event` (`seq`, `kind`, `payload`): `activity_changed`, `activity_list_updated`, `hub_state`, `app_state`, `status_changed`, `catalog_ready`, `snapshot_changed`, `ota` |
-| `server_event` | `hub_id` and `kind`: `hub_added`, `hub_removed`, `hub_enabled`, `hub_disabled`, `hub_rekeyed`, `hub_discovered`, `hub_lost` |
+| `server_event` | `hub_id` and `kind`: hub lifecycle/discovery events (`hub_added`, `hub_removed`, `hub_enabled`, `hub_disabled`, `hub_rekeyed`, `hub_discovered`, `hub_lost`) and callback events (`callback_device_stale`, `callback_device_restored`, `callback_listener_started`, `callback_listener_failed`) |
 | `job_event` | `hub_id` and the full `job` record on every transition: queued, running, each progress report, done / failed / cancelled |
 | `press` | a button press the hub delivered to the callback listener: `seq` (the server-instance press sequence, shared with `GET /hubs/{id}/presses`), `hub_id`, `device_id`, `command_id`, `slot`, `label`, `press_type` (`short` / `long`), `resolution`, `transport`, `source`, `received_at` (see Button events) |
 | `dropped` | `count` of older messages discarded because this client fell behind; sent before the next message that gets through |
 
-`seq` is the library's per-hub counter and passes through untouched, so
-a gap means the hub's own consumer queue overflowed inside the server.
+`hub_event.event.seq` is the library's per-proxy counter, passed through
+untouched. A gap means events were lost in a bounded queue; either the
+library's consumer or the WebSocket client can fall behind. `press.seq` is
+a separate server-instance-wide counter shared with press history; use
+`(instance_id, seq)` to de-duplicate presses.
 `hub_rekeyed` is the one to watch after registering by host: the id
 becomes the hub's MAC once its banner is read. Disabling a hub is
 announced by `hub_disabled` alone (its proxy is gone before any link
-event could be relayed); enabling it starts a fresh session whose `seq`
-begins at 1 again. On reconnect, a `dropped` message or a sequence gap,
+event could be relayed); enabling it creates a new proxy whose
+`hub_event.event.seq` starts over. A hub transport reconnect alone does not
+reset that proxy counter. On reconnect, a `dropped` message or a sequence gap,
 re-read the hub list, status, relevant snapshots and outstanding jobs;
-events have no replay history. Inbound text is ignored.
+hub and job events have no replay history. Presses have the bounded
+catch-up history described above. Inbound text is ignored.
 The message types are published as components in the OpenAPI document
-(`WsHello`, `WsHubEvent`, `WsServerEvent`, `WsJobEvent`, `WsDropped`)
+(`WsHello`, `WsHubEvent`, `WsServerEvent`, `WsJobEvent`, `WsPress`, `WsDropped`)
 for generators.
 
 Writing a platform integration? Start with
@@ -452,16 +572,18 @@ From the repository root, with the library importable (the tests alias
 the in-tree library automatically):
 
 ```
-pip install fastapi "uvicorn[standard]" httpx pytest
-pytest sofabaton-x-server/tests -q
+python -m pip install . ./sofabaton-x-server
+python -m pip install -r sofabaton-x-server/openapi-toolchain.txt pytest
+python -m pytest sofabaton-x-server/tests -q
 ```
 
 `openapi.json` is the committed contract; a test fails when the running
 app's document differs. After an API change:
 
 ```
-pip install -r sofabaton-x-server/openapi-toolchain.txt
-PYTHONPATH=sofabaton-x-server/src python -m sofabaton_server.openapi
+python -m pip install -e ./sofabaton-x-server
+python -m pip install -r sofabaton-x-server/openapi-toolchain.txt
+python -m sofabaton_server.openapi
 ```
 
 The toolchain file pins the FastAPI and pydantic versions the document
@@ -476,6 +598,11 @@ client:
 npx -y openapi-typescript@7 sofabaton-x-server/openapi.json -o sofabaton-x-server/codegen-smoke/schema.d.ts
 npx tsc --noEmit -p sofabaton-x-server/codegen-smoke/tsconfig.json
 ```
+
+Unit tests and schema checks do not establish live hub compatibility.
+The [live-hub testing notes](../docs/protocol/live-hub-testing.md) record
+hardware coverage; the document-write bench covers library operations on
+X1/X1S, with X2 and the corresponding server-route bench still pending.
 
 When ready for the first release, set `__version__` in
 `src/sofabaton_server/__init__.py` and tag `sofabaton-x-server-vX.Y.Z`.

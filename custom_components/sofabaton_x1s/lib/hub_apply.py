@@ -4,16 +4,20 @@ Takes a baseline snapshot document and the client's edited copy, plans
 the transition with :func:`.hub_sync.build_hub_sync_plan` (stage A,
 pure), re-reads the affected entities before the first write (stage B,
 strict), then runs the items in the plan's order inside one
-``batch_writes()`` block: one remote-sync trigger, one
-``snapshot_changed``. Every item is **planned when it runs**, against the
+``batch_writes()`` block: requested remote-sync triggers and snapshot
+notifications are coalesced; no-op work need not emit either. Every item
+is **planned when it runs**, against the
 working document (the engine's projection, rebased after every write),
 with the hub-assigned ids substituted for the client's placeholders.
 
 The run's bookkeeping is an :class:`ApplyState`: the two documents, the
 placeholder map, every item with its outcome, and what a resume must
 re-read. The library never persists it; ``on_state`` hands it to the
-consumer after every item so a server can write it to disk and resume
-after a restart with ``sync_hub(state=...)``.
+consumer after every item for persistence. ``sync_hub(state=...)`` can
+continue stopped/cancelled work, but is not duplicate-safe for uncertain
+creates. A checkpoint can also omit an in-flight write before dispatch.
+Inspect and reconcile hub state before recovery from those cases or an
+abrupt interruption; see the public README's document-write limitations.
 
 Outcome vocabulary per item (plan decision 7): ``done``, ``partial``
 (some steps landed), ``uncertain`` (a write went out and no answer or a

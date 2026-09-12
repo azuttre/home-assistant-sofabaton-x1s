@@ -802,6 +802,8 @@ def build_hub_sync_plan(
 ) -> HubSyncPlan:
     """Stage A validation and the ordered item list for ``baseline`` ->
     ``desired``. Raises a :class:`DocumentError` subclass; never writes.
+    Validates structure and supported diffs, not every command's stored
+    wire encoding or whether the hub will accept a write.
 
     ``hub_version`` defaults to ``baseline["hub"]["version"]`` and gates
     the classes a new device may have; without one any class passes here
