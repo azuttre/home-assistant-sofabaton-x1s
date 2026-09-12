@@ -26,7 +26,7 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
-      - run: pip install pytest zeroconf -r sofabaton-x-server/openapi-toolchain.txt
+      - run: pip install pytest zeroconf "websockets>=12" -r sofabaton-x-server/openapi-toolchain.txt
       - name: Install the library from this checkout (the export script imports it)
         run: pip install .
       - name: Server tests

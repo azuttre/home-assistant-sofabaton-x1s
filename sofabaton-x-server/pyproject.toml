@@ -34,7 +34,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest", "httpx"]
+dev = ["pytest", "httpx", "websockets>=12"]
 
 [project.urls]
 Homepage = "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/tree/main/sofabaton-x-server"

@@ -108,7 +108,12 @@ def test_released_hub_that_dials_back_is_refused_again() -> None:
         listener.register_hub(proxy_id="me", real_hub_ip="127.0.0.1", on_socket=lambda sock, addr: sock.close())
         with listener._lock:
             assert "127.0.0.1" not in listener._released
-        assert _wait(lambda: _connect(port) == "accepted", 3.0)
+        # The dial-back above was accepted by the kernel before the accept
+        # loop saw it, so the bounce it earns (the third) may only start
+        # now, after the registration. Let that in-flight bounce play out;
+        # a registered hub earns no further ones.
+        _wait(lambda: _connect(port) == "closed", 2.0)
+        assert _wait(lambda: _connect(port) == "accepted", 5.0), "listener did not come back"
         time.sleep(0.5)
         assert _connect(port) == "accepted"                    # no bounce for a registered hub
     finally:
