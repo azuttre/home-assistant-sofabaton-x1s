@@ -407,6 +407,17 @@ editing flows.
 
 ## Development
 
+The server serves a development console at `http://<server>:8480/harness`
+(under the root path when one is configured): pick an operation from the
+OpenAPI document or type a method and path, fill `{hub_id}` from the hub
+chips, send, and read the exact request and the raw response (status
+line, headers, body; pretty or raw). A 202 can be followed until its job
+finishes, the last requests are kept as history, and the Events panel
+streams the WebSocket with a filter, press messages highlighted. It is
+not part of the API contract (absent from the OpenAPI document) and has
+the same reach as the API: anyone who can open the page can change the
+hub.
+
 From the repository root, with the library importable (the tests alias
 the in-tree library automatically):
 

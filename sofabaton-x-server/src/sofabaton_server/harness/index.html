@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sofabaton-x-server console</title>
+<style>
+  :root {
+    --bg: #14171c; --panel: #1c2027; --panel-2: #232830; --line: #2f3641; --text: #e6e9ee;
+    --muted: #8c95a3; --accent: #5aa9ff; --ok: #4ccf8a; --warn: #f2b84b; --err: #ff6b6b; --press: #c792ea;
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 14px;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); height: 100vh; display: flex; flex-direction: column; }
+  header { display: flex; align-items: center; gap: 12px; padding: 8px 14px; border-bottom: 1px solid var(--line); background: var(--panel); flex-wrap: wrap; }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; }
+  header .meta { color: var(--muted); font-size: 12px; }
+  header .hubs { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip { border: 1px solid var(--line); border-radius: 12px; padding: 2px 9px; font-size: 12px; cursor: pointer; background: var(--panel-2); }
+  .chip.on { border-color: var(--accent); color: var(--accent); }
+  .chip .st { color: var(--muted); }
+  main { flex: 1; display: grid; grid-template-columns: minmax(360px, 1fr) minmax(360px, 1fr) minmax(320px, 0.9fr); gap: 0; min-height: 0; }
+  section { display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--line); }
+  section:last-child { border-right: 0; }
+  section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 8px; }
+  section h2 .spacer { flex: 1; }
+  .body { padding: 10px 12px; overflow: auto; min-height: 0; }
+  label { display: block; color: var(--muted); font-size: 11px; margin: 8px 0 3px; }
+  input, select, textarea, button { font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: 4px; padding: 5px 7px; }
+  input, select, textarea { width: 100%; }
+  textarea { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; min-height: 64px; resize: vertical; }
+  button { cursor: pointer; }
+  button.primary { background: var(--accent); color: #0b1220; border-color: var(--accent); font-weight: 600; }
+  button.small { font-size: 11px; padding: 3px 7px; }
+  .row { display: flex; gap: 8px; align-items: end; }
+  .row > * { flex: 1; }
+  .row > .fixed { flex: 0 0 auto; }
+  pre { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 12px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; background: var(--panel); border: 1px solid var(--line); border-radius: 4px; padding: 8px; }
+  .status { font-weight: 600; }
+  .s2 { color: var(--ok); } .s3 { color: var(--accent); } .s4 { color: var(--warn); } .s5 { color: var(--err); }
+  .hint { color: var(--muted); font-size: 12px; }
+  .ws-list { display: flex; flex-direction: column; gap: 4px; }
+  .msg { border: 1px solid var(--line); border-radius: 4px; background: var(--panel); }
+  .msg summary { padding: 4px 8px; cursor: pointer; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; display: flex; gap: 8px; }
+  .msg summary .t { color: var(--muted); }
+  .msg pre { border: 0; border-top: 1px solid var(--line); border-radius: 0; }
+  .k-press summary { border-left: 3px solid var(--press); }
+  .k-job_event summary { border-left: 3px solid var(--warn); }
+  .k-server_event summary { border-left: 3px solid var(--accent); }
+  .k-hub_event summary { border-left: 3px solid var(--ok); }
+  .k-dropped summary { border-left: 3px solid var(--err); }
+  .history { display: flex; flex-direction: column; gap: 3px; margin-top: 6px; }
+  .history button { text-align: left; font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; padding: 3px 6px; background: var(--panel); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--err); }
+  .dot.on { background: var(--ok); }
+  @media (max-width: 1100px) { main { grid-template-columns: 1fr; grid-auto-rows: minmax(300px, auto); overflow: auto; } section { border-right: 0; border-bottom: 1px solid var(--line); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>sofabaton-x-server console</h1>
+  <span class="meta" id="server-meta">connecting…</span>
+  <span class="hubs" id="hubs"></span>
+  <span class="spacer" style="flex:1"></span>
+  <button class="small" id="reload-hubs">reload hubs</button>
+</header>
+<main>
+  <section>
+    <h2>Request <span class="spacer"></span><span class="hint" id="api-base"></span></h2>
+    <div class="body">
+      <label>Operation (from openapi.json)</label>
+      <select id="op"><option value="">custom…</option></select>
+      <div class="row">
+        <div class="fixed" style="width:110px"><label>Method</label>
+          <select id="method"><option>GET</option><option>POST</option><option>PUT</option><option>DELETE</option><option>PATCH</option></select></div>
+        <div><label>Path (relative to the API root; <code>{hub_id}</code> is filled from the selected hub)</label>
+          <input id="path" placeholder="/hubs/{hub_id}/status"></div>
+      </div>
+      <label>Query (a=b&amp;c=d)</label>
+      <input id="query" placeholder="after=12&limit=50">
+      <label>Headers (one per line, <code>Name: value</code>)</label>
+      <textarea id="headers" placeholder="If-Match: &quot;snapshot id&quot;"></textarea>
+      <label>Body (JSON; sent when the method is not GET or DELETE, or when non-empty)</label>
+      <textarea id="reqbody" style="min-height:120px"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button class="primary" id="send">Send</button>
+        <button id="follow" class="fixed" title="poll GET /hubs/{hub_id}/jobs/{job_id} from the last 202 until it finishes">Follow job</button>
+        <button id="clear-hist" class="fixed small">clear history</button>
+      </div>
+      <label>Sent (raw)</label>
+      <pre id="rawreq">nothing sent yet</pre>
+      <label>History</label>
+      <div class="history" id="history"></div>
+    </div>
+  </section>
+  <section>
+    <h2>Response <span class="spacer"></span><span class="hint" id="timing"></span>
+      <button class="small" id="toggle-pretty">raw</button></h2>
+    <div class="body">
+      <pre id="rawres">no response yet</pre>
+    </div>
+  </section>
+  <section>
+    <h2><span class="dot" id="ws-dot"></span> Events
+      <input id="ws-filter" placeholder="hub_id filter (optional, comma separated)" style="flex:1; font-size:12px; padding:2px 6px">
+      <button class="small" id="ws-toggle">connect</button>
+      <button class="small" id="ws-clear">clear</button></h2>
+    <div class="body">
+      <div class="row" style="margin-bottom:6px">
+        <input id="ws-grep" placeholder="show only messages containing… (type, kind, hub, label)">
+        <label class="fixed" style="margin:0"><input type="checkbox" id="ws-expand" style="width:auto"> expand all</label>
+      </div>
+      <div class="hint" id="ws-count">0 messages</div>
+      <div class="ws-list" id="ws-list"></div>
+    </div>
+  </section>
+</main>
+<script>
+(() => {
+  const API = new URL("api/v1/", location.href);                // works under a root path too
+  const $ = (id) => document.getElementById(id);
+  const state = { hub: null, hubs: [], ops: [], lastResponse: null, pretty: true, lastJob: null, history: [], ws: null, msgs: [] };
+  $("api-base").textContent = API.pathname;
+
+  // -- helpers -----------------------------------------------------------------
+  const fmt = (text) => {
+    if (!state.pretty) return text;
+    try { return JSON.stringify(JSON.parse(text), null, 2); } catch { return text; }
+  };
+  const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({"&": "&amp;", "<": "&lt;", ">": "&gt;"}[c]));
+  const save = () => { try { localStorage.setItem("sofabaton-console", JSON.stringify({ history: state.history.slice(0, 30), hub: state.hub })); } catch {} };
+  const load = () => { try { const d = JSON.parse(localStorage.getItem("sofabaton-console") || "{}"); state.history = d.history || []; state.hub = d.hub || null; } catch {} };
+
+  // -- server + hubs ------------------------------------------------------------
+  async function loadServer() {
+    try {
+      const info = await (await fetch(new URL("server", API))).json();
+      const l = info.callback_listener || {};
+      $("server-meta").textContent = `v${info.version} · lib ${info.library_version} · api ${info.api_version} · instance ${info.instance_id || "?"} · listener ${l.bound ? "bound :" + l.bound_port : (l.wanted ? "wanted, not bound" : "idle")}`;
+    } catch (e) { $("server-meta").textContent = "server unreachable: " + e; }
+  }
+  async function loadHubs() {
+    try {
+      state.hubs = await (await fetch(new URL("hubs", API))).json();
+    } catch { state.hubs = []; }
+    const box = $("hubs"); box.innerHTML = "";
+    if (!state.hubs.length) { box.innerHTML = '<span class="hint">no hubs registered</span>'; }
+    for (const h of state.hubs) {
+      const el = document.createElement("span");
+      el.className = "chip" + (state.hub === h.hub_id ? " on" : "");
+      const st = h.status ? `${h.status.hub_version || "?"} · ${h.status.mode}` : (h.enabled ? "starting" : "disabled");
+      el.innerHTML = `${esc(h.hub_id)} <span class="st">${esc(h.config.host)} · ${esc(st)}</span>`;
+      el.onclick = () => { state.hub = h.hub_id; save(); loadHubs(); };
+      box.appendChild(el);
+    }
+    if (!state.hub && state.hubs.length) { state.hub = state.hubs[0].hub_id; save(); loadHubs(); }
+  }
+  async function loadOps() {
+    try {
+      const spec = await (await fetch(new URL("openapi.json", API))).json();
+      const prefix = API.pathname.replace(/\/$/, "");
+      for (const [path, methods] of Object.entries(spec.paths || {})) {
+        for (const [method, op] of Object.entries(methods)) {
+          const rel = path.startsWith(prefix) ? path.slice(prefix.length) : path;
+          state.ops.push({ id: op.operationId, method: method.toUpperCase(), path: rel, summary: op.summary || "", body: !!op.requestBody });
+        }
+      }
+      state.ops.sort((a, b) => a.path.localeCompare(b.path) || a.method.localeCompare(b.method));
+      const sel = $("op");
+      for (const [i, op] of state.ops.entries()) {
+        const o = document.createElement("option");
+        o.value = String(i); o.textContent = `${op.method.padEnd(6)} ${op.path}  —  ${op.summary}`;
+        sel.appendChild(o);
+      }
+    } catch (e) { console.warn("openapi.json not loaded", e); }
+  }
+  $("op").onchange = () => {
+    const op = state.ops[Number($("op").value)];
+    if (!op) return;
+    $("method").value = op.method; $("path").value = op.path;
+    $("reqbody").value = op.body && !$("reqbody").value ? "{}" : $("reqbody").value;
+  };
+
+  // -- request -------------------------------------------------------------------
+  function resolvePath(raw) {
+    let p = raw.trim();
+    if (!p.startsWith("/")) p = "/" + p;
+    p = p.replace(/\{hub_id\}/g, state.hub || "{hub_id}");
+    if (state.lastJob && /\{job_id\}/.test(p)) p = p.replace(/\{job_id\}/g, state.lastJob.job_id);
+    return p;
+  }
+  function parseHeaders() {
+    const out = {};
+    for (const line of $("headers").value.split("\n")) {
+      const i = line.indexOf(":"); if (i < 0) continue;
+      out[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+    }
+    return out;
+  }
+  async function send(preset) {
+    const method = (preset && preset.method) || $("method").value;
+    const path = resolvePath((preset && preset.path) || $("path").value);
+    const query = (preset && preset.query !== undefined) ? preset.query : $("query").value.trim();
+    const headers = (preset && preset.headers) || parseHeaders();
+    let body = (preset && preset.body !== undefined) ? preset.body : $("reqbody").value.trim();
+    const url = new URL(path.replace(/^\//, ""), API);
+    if (query) url.search = query.startsWith("?") ? query : "?" + query;
+    const init = { method, headers: { ...headers } };
+    if (body && method !== "GET") { init.headers["Content-Type"] = init.headers["Content-Type"] || "application/json"; init.body = body; }
+    else body = "";
+    const reqLines = [`${method} ${url.pathname}${url.search} HTTP/1.1`, `Host: ${url.host}`];
+    for (const [k, v] of Object.entries(init.headers)) reqLines.push(`${k}: ${v}`);
+    if (body) reqLines.push(`Content-Length: ${new TextEncoder().encode(body).length}`, "", body);
+    $("rawreq").textContent = reqLines.join("\n");
+    $("rawres").textContent = "…"; $("timing").textContent = "";
+    const t0 = performance.now();
+    let res, text;
+    try {
+      res = await fetch(url, init);
+      text = await res.text();
+    } catch (e) { $("rawres").textContent = "request failed: " + e; return; }
+    const dt = Math.round(performance.now() - t0);
+    state.lastResponse = { status: res.status, statusText: res.statusText, headers: [...res.headers.entries()], text };
+    renderResponse();
+    $("timing").textContent = `${dt} ms`;
+    try { const j = JSON.parse(text); if (res.status === 202 && j.job_id) state.lastJob = { hub_id: j.hub_id, job_id: j.job_id }; } catch {}
+    state.history.unshift({ method, path: (preset && preset.path) || $("path").value, query, body, status: res.status, at: new Date().toLocaleTimeString() });
+    state.history = state.history.slice(0, 30); save(); renderHistory();
+    loadServer();
+  }
+  function renderResponse() {
+    const r = state.lastResponse; if (!r) return;
+    const cls = "s" + String(r.status)[0];
+    const head = [`<span class="status ${cls}">HTTP/1.1 ${r.status} ${esc(r.statusText)}</span>`, ...r.headers.map(([k, v]) => esc(`${k}: ${v}`))];
+    $("rawres").innerHTML = head.join("\n") + "\n\n" + esc(fmt(r.text));
+  }
+  function renderHistory() {
+    const box = $("history"); box.innerHTML = "";
+    for (const h of state.history) {
+      const b = document.createElement("button");
+      b.textContent = `${h.at}  ${h.status}  ${h.method} ${h.path}${h.query ? "?" + h.query : ""}`;
+      b.onclick = () => { $("method").value = h.method; $("path").value = h.path; $("query").value = h.query; $("reqbody").value = h.body; $("op").value = ""; };
+      box.appendChild(b);
+    }
+  }
+  $("send").onclick = () => send();
+  $("reqbody").addEventListener("keydown", (e) => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") send(); });
+  $("path").addEventListener("keydown", (e) => { if (e.key === "Enter") send(); });
+  $("toggle-pretty").onclick = () => { state.pretty = !state.pretty; $("toggle-pretty").textContent = state.pretty ? "raw" : "pretty"; renderResponse(); };
+  $("clear-hist").onclick = () => { state.history = []; save(); renderHistory(); };
+  $("follow").onclick = async () => {
+    if (!state.lastJob) { $("rawres").textContent = "no 202 job to follow yet"; return; }
+    for (let i = 0; i < 600; i++) {
+      await send({ method: "GET", path: `/hubs/${state.lastJob.hub_id}/jobs/${state.lastJob.job_id}`, query: "", headers: {}, body: "" });
+      let j = null; try { j = JSON.parse(state.lastResponse.text); } catch {}
+      if (!j || ["done", "failed", "cancelled"].includes(j.status)) break;
+      await new Promise((r) => setTimeout(r, 500));
+    }
+  };
+  $("reload-hubs").onclick = () => { loadHubs(); loadServer(); };
+
+  // -- events --------------------------------------------------------------------
+  function wsUrl() {
+    const u = new URL("events", API); u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
+    const filter = $("ws-filter").value.split(",").map((s) => s.trim()).filter(Boolean);
+    for (const h of filter) u.searchParams.append("hub_id", h);
+    return u;
+  }
+  function wsConnect() {
+    if (state.ws) { state.ws.close(); state.ws = null; return; }
+    const ws = new WebSocket(wsUrl()); state.ws = ws;
+    ws.onopen = () => { $("ws-dot").classList.add("on"); $("ws-toggle").textContent = "disconnect"; };
+    ws.onclose = () => { $("ws-dot").classList.remove("on"); $("ws-toggle").textContent = "connect"; if (state.ws === ws) state.ws = null; };
+    ws.onmessage = (ev) => {
+      let m; try { m = JSON.parse(ev.data); } catch { m = { type: "raw", raw: ev.data }; }
+      state.msgs.push({ at: new Date().toLocaleTimeString(), text: ev.data, m });
+      if (state.msgs.length > 500) state.msgs.shift();
+      renderWs();
+    };
+  }
+  function wsSummary(m) {
+    switch (m.type) {
+      case "press": return `press seq=${m.seq} ${m.hub_id} dev=${m.device_id} slot=${m.slot} ${m.press_type} "${m.label}" ${m.resolution}`;
+      case "hub_event": return `hub_event ${m.hub_id} ${m.event.kind} seq=${m.event.seq}`;
+      case "server_event": return `server_event ${m.hub_id} ${m.kind}`;
+      case "job_event": return `job_event ${m.hub_id} ${m.job.kind} ${m.job.status}${m.job.progress ? " " + (m.job.progress.completed_steps ?? "") + "/" + (m.job.progress.total_steps ?? "") : ""}`;
+      case "hello": return `hello v${m.server_version} instance=${m.instance_id} hubs=${(m.hubs || []).map((h) => h.hub_id).join(",")}`;
+      case "dropped": return `dropped ${m.count}`;
+      default: return m.type || "?";
+    }
+  }
+  function renderWs() {
+    const grep = $("ws-grep").value.trim().toLowerCase();
+    const expand = $("ws-expand").checked;
+    const list = $("ws-list"); list.innerHTML = "";
+    let shown = 0;
+    for (const row of state.msgs) {
+      const summary = wsSummary(row.m);
+      if (grep && !(summary + " " + row.text).toLowerCase().includes(grep)) continue;
+      shown++;
+      const d = document.createElement("details");
+      d.className = "msg k-" + (row.m.type || "raw"); d.open = expand;
+      d.innerHTML = `<summary><span class="t">${row.at}</span><span>${esc(summary)}</span></summary><pre>${esc(fmt(row.text))}</pre>`;
+      list.appendChild(d);
+    }
+    $("ws-count").textContent = `${shown} of ${state.msgs.length} messages`;
+    list.lastElementChild && list.lastElementChild.scrollIntoView({ block: "nearest" });
+  }
+  $("ws-toggle").onclick = wsConnect;
+  $("ws-clear").onclick = () => { state.msgs = []; renderWs(); };
+  $("ws-grep").oninput = renderWs;
+  $("ws-expand").onchange = renderWs;
+
+  // -- boot ------------------------------------------------------------------------
+  load(); renderHistory(); loadServer(); loadHubs(); loadOps();
+  $("path").value = "/hubs/{hub_id}/status";
+})();
+</script>
+</body>
+</html>

@@ -13,9 +13,11 @@ from __future__ import annotations
 import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 
 from fastapi import FastAPI
+from fastapi.responses import HTMLResponse
 
 from . import API_PREFIX, API_VERSION, __version__
 from .callbacks import CallbackService, ListenerState
@@ -37,6 +39,9 @@ from .ws import WS_MESSAGE_TYPES, EventRelay, WsPress, router as events_router
 # its version is needed at the skeleton stage; the hub manager (S1) is
 # where AsyncXProxy comes in.
 from sofabaton import __version__ as library_version
+
+# The development console (``GET /harness``), shipped inside the package.
+_HARNESS_PATH = Path(__file__).resolve().parent / "harness" / "index.html"
 
 
 @dataclass(frozen=True)
@@ -125,6 +130,15 @@ def create_app(settings: Settings | None = None, *, manager: Optional[HubManager
     app.include_router(events_router)
     app.include_router(discovery_router)
     _publish_ws_components(app)
+
+    @app.get("/harness", include_in_schema=False)
+    async def harness() -> HTMLResponse:
+        """The development console: a page that builds requests against this
+        server, shows the exact request and the raw response, and streams
+        the WebSocket. Served by the server itself so no CORS is needed;
+        not part of the API contract (absent from the OpenAPI document)."""
+
+        return HTMLResponse(_HARNESS_PATH.read_text(encoding="utf-8"))
 
     @app.get(
         f"{API_PREFIX}/server",

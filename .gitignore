@@ -41,3 +41,6 @@ sofabaton-x-server/codegen-smoke/schema.d.ts
 # bench_200 Linux runner artifacts
 dist-bench/
 .venv-bench/
+
+# local data directory of the dev-console launch config (.claude/launch.json)
+sofabaton-x-server/.harness-data/
