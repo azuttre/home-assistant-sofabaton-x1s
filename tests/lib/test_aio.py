@@ -776,17 +776,34 @@ def test_commands_and_buttons_return_send_pairs() -> None:
     async def main():
         fake = FakeProxy()
         fake.make_commands_ready(5, {12: "Sleep"})
-        fake.buttons_ready[101] = [174]
-        fake.state.button_details = {101: {174: {"device_id": 3, "command_id": 20}}}
+        fake.buttons_ready[101] = [174, 175, 176]
+        fake.state.button_details = {
+            101: {
+                174: {"device_id": 3, "command_id": 20},
+                # A long-press pair rides on the same row.
+                175: {"device_id": 3, "command_id": 21,
+                      "long_press_device_id": 4, "long_press_command_id": 9},
+                # A command without a device is not a pair (remote.py rule).
+                176: {"device_id": 3, "command_id": 22, "long_press_command_id": 9},
+            }
+        }
         proxy = _wrap(fake)
 
         assert [c.to_dict() for c in await proxy.commands(5)] == [{"command_id": 12, "label": "Sleep"}]
 
         btns = await proxy.buttons(101)
         assert [b.to_dict() for b in btns] == [
-            {"button_code": 174, "name": btns[0].name, "device_id": 3, "command_id": 20}
+            {"button_code": 174, "name": btns[0].name, "device_id": 3, "command_id": 20,
+             "long_press_device_id": None, "long_press_command_id": None},
+            {"button_code": 175, "name": btns[1].name, "device_id": 3, "command_id": 21,
+             "long_press_device_id": 4, "long_press_command_id": 9},
+            {"button_code": 176, "name": btns[2].name, "device_id": 3, "command_id": 22,
+             "long_press_device_id": None, "long_press_command_id": None},
         ]
-        assert set(btns[0].to_dict()) == {"button_code", "name", "device_id", "command_id"}
+        assert set(btns[0].to_dict()) == {
+            "button_code", "name", "device_id", "command_id",
+            "long_press_device_id", "long_press_command_id",
+        }
 
     asyncio.run(main())
 

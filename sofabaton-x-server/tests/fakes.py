@@ -169,7 +169,11 @@ class FakeProxy:
 
     async def buttons(self, entity_id: int) -> list[Button]:
         self._maybe_fail()
-        return [Button(button_code=174, name="UP", device_id=1, command_id=17)]
+        return [
+            Button(button_code=174, name="UP", device_id=1, command_id=17),
+            Button(button_code=175, name="DOWN", device_id=1, command_id=18,
+                   long_press_device_id=2, long_press_command_id=5),
+        ]
 
     async def macros(self, activity_id: int) -> list[Macro]:
         self._maybe_fail()

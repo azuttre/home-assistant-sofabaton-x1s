@@ -190,6 +190,17 @@ hub/entity path; it is not an executable URL.
 For an executable refresh/preview/apply workflow, see
 [the integration guide](docs/platform-integration.md#8-complete-edit-workflow).
 
+Catalog reads (`.../activities`, `.../devices`, `.../devices/{did}/commands`,
+`.../entities/{eid}/buttons`, `.../activities/{aid}/macros` and `/favorites`)
+answer from the library's cached catalog; `GET .../devices?refresh=true`
+re-reads the device list. `GET .../devices/{did}/power-state` is the one
+read that always goes to the hub: it re-reads the list and returns that
+device's power byte (`0` / `1`, `null` when the row has no parseable
+record, `504` when the hub never answers), which is what a remote UI needs
+before it fires a power toggle. `Button` rows carry the hub's long-press
+pair (`long_press_device_id` / `long_press_command_id`, both `null` when
+the button has none); send the pair like any other command.
+
 ## Snapshot
 
 `GET /api/v1/hubs/{id}/snapshot` is the hub's structural configuration
@@ -488,6 +499,58 @@ before every deploy the server reconciles it, and a device it created
 but forgot (a crash before the save, a lost data directory) is adopted
 by that same identity check instead of being created twice
 (`adopted: true` on the record).
+
+## Web remote
+
+The server serves the Sofabaton remote card as a page of its own at
+`/ui/remote/` (`/` redirects there). It is the same card the Home
+Assistant integration ships, talking to this server's API instead of
+Home Assistant, so a household without Home Assistant gets a phone,
+tablet or wall-panel remote by opening a URL. Bookmark it, add it to a
+phone's home screen (it ships a web manifest), or frame it from a
+dashboard that can show a URL (Hubitat, openHAB, Node-RED dashboards,
+Home Assistant's own iframe card).
+
+The page needs the hub in the URL: `/ui/remote/?hub=<hub id>`, the id
+as `GET /hubs` lists it. Without it, or with an unknown id, the page
+lists the registered hubs as links. Optional parameters: `lang=<bcp47>`
+(the card's language; the browser's by default), `device=<device id>`
+(open in device mode on that device), `zoom=<factor>` for a wall panel,
+and `theme=light|dark` to pin a theme (the system setting by default).
+The page carries the Home Assistant default palette, so it looks like
+the card on a default Home Assistant dashboard; other themes are not
+available outside Home Assistant.
+
+**Configuration.** The card's layout (which key groups show, their
+order, device mode, shortcuts, custom favourites, hold-to-repeat, key
+style) is a per-hub JSON document the server stores:
+
+```text
+GET    /hubs/{id}/ui/remote-card        the document (null until one is stored)
+PUT    /hubs/{id}/ui/remote-card        {"document": {...}} replaces it (64 KB max)
+DELETE /hubs/{id}/ui/remote-card        back to the card's defaults
+```
+
+The document holds the same keys as the Home Assistant card's YAML,
+minus `entity`, `theme` and Home Assistant actions (custom favourites
+that call a Home Assistant action are dropped; those that name a hub
+command stay). Two ways to author it without writing JSON by hand: the
+Home Assistant card editor has a "Copy config for the web remote"
+button that puts the document on the clipboard, and the `/harness`
+console has a Web remote pane that loads, edits and saves it. Reload the
+page after saving. The page never stores anything in the browser.
+
+**Icons.** The page bundles the icons the card itself uses plus a set of
+common `mdi:` names for favourites and shortcuts; an icon outside that
+set renders as a neutral dot.
+
+**Exposure.** The server has no authentication, and this page is the
+first thing a household will want to reach from a phone. Keep it on the
+LAN, or put the server behind a reverse proxy that authenticates (see
+[Behind a reverse proxy](#behind-a-reverse-proxy-tls)); do not
+port-forward it. The page and its assets are outside the API contract
+(not in the OpenAPI document); the configuration document routes are in
+it.
 
 ## Discovery
 

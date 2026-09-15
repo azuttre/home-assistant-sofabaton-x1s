@@ -1,3 +1,489 @@
+// remote-card/src/backend/server-backend.ts
+var SERVER_API_PREFIX = "/api/v1";
+var MAX_RECONNECT_DELAY_MS = 3e4;
+function toNumber(value) {
+  if (value == null || value === "") return null;
+  const n7 = Number(value);
+  return Number.isFinite(n7) ? n7 : null;
+}
+function longPressPairs(buttons) {
+  const out = {};
+  for (const button of buttons) {
+    const device = toNumber(button.long_press_device_id);
+    const command = toNumber(button.long_press_command_id);
+    if (device && command != null) {
+      out[String(button.button_code)] = { device_id: device, command_id: command };
+    }
+  }
+  return out;
+}
+var ServerRemoteBackend = class {
+  constructor(options = {}) {
+    this.kind = "server";
+    this.hubId = "";
+    this.listeners = [];
+    // Server-side state, in wire shapes
+    this.hubStatus = null;
+    this.activities = [];
+    this.devices = [];
+    this.running = null;
+    this.activityPages = {};
+    this.devicePages = {};
+    this.loaded = false;
+    this.loadPromise = null;
+    this.pagePromises = {};
+    this._lastError = null;
+    // Snapshot cache: rebuilt lazily, invalidated on every mutation
+    this.snapshotCache = null;
+    // Stream
+    this.socket = null;
+    this.socketGeneration = 0;
+    this.reconnectTimer = null;
+    this.streaming = false;
+    this.baseUrl = String(options.baseUrl ?? "").replace(/\/+$/, "");
+    this.fetchImpl = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
+    this.wsFactory = options.webSocket ?? (typeof WebSocket === "function" ? (url) => new WebSocket(url) : null);
+    this.reconnectDelayMs = Math.max(100, options.reconnectDelayMs ?? 1e3);
+    this.reconnectDelay = this.reconnectDelayMs;
+  }
+  // ---------- RemoteBackend ----------
+  get target() {
+    return this.hubId;
+  }
+  /** The last failed request or stream error, for the page to show. */
+  get lastError() {
+    return this._lastError;
+  }
+  setTarget(target) {
+    const next = String(target ?? "");
+    if (next === this.hubId) return;
+    this.hubId = next;
+    this.resetState();
+    this.closeSocket();
+    if (this.listeners.length) this.start();
+  }
+  snapshot() {
+    if (!this.hubId) return void 0;
+    if (this.snapshotCache === null) this.snapshotCache = this.buildSnapshot();
+    return this.snapshotCache;
+  }
+  subscribe(listener) {
+    this.listeners.push(listener);
+    if (this.listeners.length === 1) this.start();
+    return () => {
+      this.listeners = this.listeners.filter((entry) => entry !== listener);
+      if (!this.listeners.length) this.stop();
+    };
+  }
+  async probeIntegration() {
+    if (!this.hubId) throw new Error("no hub selected");
+    await this.ensureLoaded();
+    if (!this.hubStatus) throw new Error(this._lastError ?? "hub status unavailable");
+    return "x1s";
+  }
+  async devicePowerState(deviceId) {
+    try {
+      const response = await this.get(
+        `/devices/${deviceId}/power-state`
+      );
+      const raw = response?.power_state;
+      return raw === 1 ? 1 : raw === 0 ? 0 : null;
+    } catch (_err) {
+      return null;
+    }
+  }
+  async deviceKeymap(deviceId) {
+    if (!this.hubId) return null;
+    await this.ensureLoaded();
+    const device = this.devices.find((entry) => entry.device_id === deviceId);
+    if (!device) return { keymap: null, reason: "cache_miss" };
+    const key = String(deviceId);
+    if (!this.devicePages[key]) {
+      const [buttons, commands] = await Promise.all([
+        this.get(`/entities/${deviceId}/buttons`),
+        this.get(`/devices/${deviceId}/commands`)
+      ]);
+      this.devicePages[key] = { buttons, commands };
+      this.invalidate();
+      this.notify();
+    }
+    const page = this.devicePages[key];
+    return {
+      keymap: {
+        device: {
+          device_id: device.device_id,
+          name: device.name,
+          device_class: device.device_class ?? void 0
+        },
+        buttons: page.buttons.map((button) => button.button_code),
+        bindings: page.buttons.filter((button) => button.command_id != null).map((button) => ({
+          button_id: button.button_code,
+          button_name: button.name,
+          command_id: Number(button.command_id),
+          long_press_command_id: button.long_press_command_id ?? null
+        })),
+        commands: page.commands.map((command) => ({
+          command_id: command.command_id,
+          name: command.label
+        })),
+        // Same gate as the HA projection: idle-behavior byte 1..3.
+        power_configured: device.idle_behavior != null && [1, 2, 3].includes(Number(device.idle_behavior))
+      }
+    };
+  }
+  async sendCommand(commandId, scopeId) {
+    const command = toNumber(commandId);
+    if (command == null) return;
+    let scope = toNumber(scopeId);
+    if (!scope) scope = this.running?.activity_id ?? null;
+    if (scope == null) return;
+    await this.post(`/send`, { entity_id: scope, command_id: command });
+  }
+  async startActivity(activity) {
+    const id = activity.id ?? this.activities.find((entry) => entry.name === activity.name)?.activity_id ?? null;
+    if (id == null) return;
+    await this.post(`/activities/${id}/start`);
+  }
+  async stopActivity() {
+    const id = this.running?.activity_id;
+    if (id == null) return;
+    await this.post(`/activities/${id}/stop`);
+  }
+  // ---------- lifecycle ----------
+  /** Begin loading and streaming; idempotent. subscribe() calls it. */
+  start() {
+    if (!this.hubId) return;
+    void this.ensureLoaded();
+    this.openSocket();
+  }
+  stop() {
+    this.closeSocket();
+  }
+  resetState() {
+    this.hubStatus = null;
+    this.activities = [];
+    this.devices = [];
+    this.running = null;
+    this.activityPages = {};
+    this.devicePages = {};
+    this.loaded = false;
+    this.loadPromise = null;
+    this.pagePromises = {};
+    this._lastError = null;
+    this.invalidate();
+  }
+  invalidate() {
+    this.snapshotCache = null;
+  }
+  notify() {
+    for (const listener of [...this.listeners]) listener();
+  }
+  // ---------- HTTP ----------
+  url(path) {
+    return `${this.baseUrl}${SERVER_API_PREFIX}/hubs/${encodeURIComponent(this.hubId)}${path}`;
+  }
+  async get(path) {
+    const response = await this.fetchImpl(this.url(path), {
+      headers: { accept: "application/json" }
+    });
+    if (!response.ok) throw new Error(`GET ${path} -> ${response.status}`);
+    return await response.json();
+  }
+  async post(path, body) {
+    const response = await this.fetchImpl(this.url(path), {
+      method: "POST",
+      headers: body ? { accept: "application/json", "content-type": "application/json" } : { accept: "application/json" },
+      body: body ? JSON.stringify(body) : void 0
+    });
+    if (!response.ok) throw new Error(`POST ${path} -> ${response.status}`);
+  }
+  // ---------- loading ----------
+  ensureLoaded() {
+    if (this.loaded) return Promise.resolve();
+    if (!this.loadPromise) {
+      this.loadPromise = this.loadAll().finally(() => {
+        this.loadPromise = null;
+      });
+    }
+    return this.loadPromise;
+  }
+  /** Full reload: status, catalog, running activity, then its pages. */
+  async loadAll() {
+    if (!this.hubId) return;
+    const hubId = this.hubId;
+    try {
+      const [status, activities, devices, running] = await Promise.all([
+        this.get(`/status`),
+        this.get(`/activities`),
+        this.get(`/devices`),
+        this.get(`/activity`)
+      ]);
+      if (hubId !== this.hubId) return;
+      this.hubStatus = status;
+      this.activities = activities;
+      this.devices = devices;
+      this.running = running;
+      this.loaded = true;
+      this._lastError = null;
+    } catch (err) {
+      if (hubId !== this.hubId) return;
+      this._lastError = err instanceof Error ? err.message : String(err);
+      this.hubStatus = null;
+      this.loaded = false;
+    }
+    this.invalidate();
+    this.notify();
+    if (this.running) await this.ensureActivityPages(this.running.activity_id);
+  }
+  async refreshStatus() {
+    try {
+      const [status, running] = await Promise.all([
+        this.get(`/status`),
+        this.get(`/activity`)
+      ]);
+      this.hubStatus = status;
+      this.running = running;
+      this._lastError = null;
+    } catch (err) {
+      this._lastError = err instanceof Error ? err.message : String(err);
+      this.hubStatus = null;
+    }
+    this.invalidate();
+    this.notify();
+  }
+  ensureActivityPages(activityId) {
+    const key = String(activityId);
+    if (this.activityPages[key]) return Promise.resolve();
+    if (!this.pagePromises[key]) {
+      this.pagePromises[key] = this.loadActivityPages(activityId).finally(() => {
+        delete this.pagePromises[key];
+      });
+    }
+    return this.pagePromises[key];
+  }
+  async loadActivityPages(activityId) {
+    const hubId = this.hubId;
+    try {
+      const [buttons, macros, favorites] = await Promise.all([
+        this.get(`/entities/${activityId}/buttons`),
+        this.get(`/activities/${activityId}/macros`),
+        this.get(`/activities/${activityId}/favorites`)
+      ]);
+      if (hubId !== this.hubId) return;
+      this.activityPages[String(activityId)] = { buttons, macros, favorites };
+    } catch (err) {
+      if (hubId !== this.hubId) return;
+      this._lastError = err instanceof Error ? err.message : String(err);
+      return;
+    }
+    this.invalidate();
+    this.notify();
+  }
+  // ---------- stream ----------
+  wsUrl() {
+    let origin = this.baseUrl;
+    if (!origin && typeof location !== "undefined") origin = location.origin;
+    const ws = origin.replace(/^http/, "ws");
+    return `${ws}${SERVER_API_PREFIX}/events?hub_id=${encodeURIComponent(this.hubId)}`;
+  }
+  openSocket() {
+    if (!this.wsFactory || !this.hubId || this.socket) return;
+    this.streaming = true;
+    const generation = ++this.socketGeneration;
+    let socket;
+    try {
+      socket = this.wsFactory(this.wsUrl());
+    } catch (err) {
+      this._lastError = err instanceof Error ? err.message : String(err);
+      this.scheduleReconnect();
+      return;
+    }
+    this.socket = socket;
+    socket.onopen = () => {
+      if (generation !== this.socketGeneration) return;
+      this.reconnectDelay = this.reconnectDelayMs;
+      if (this.loaded) {
+        this.loaded = false;
+        void this.ensureLoaded();
+      }
+    };
+    socket.onmessage = (event) => {
+      if (generation !== this.socketGeneration) return;
+      this.handleMessage(event.data);
+    };
+    socket.onerror = () => {
+    };
+    socket.onclose = () => {
+      if (generation !== this.socketGeneration) return;
+      this.socket = null;
+      if (this.streaming) this.scheduleReconnect();
+    };
+  }
+  closeSocket() {
+    this.streaming = false;
+    this.socketGeneration += 1;
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+    const socket = this.socket;
+    this.socket = null;
+    if (socket) {
+      try {
+        socket.close();
+      } catch (_err) {
+      }
+    }
+  }
+  scheduleReconnect() {
+    if (!this.streaming || this.reconnectTimer) return;
+    const delay = this.reconnectDelay;
+    this.reconnectDelay = Math.min(this.reconnectDelay * 2, MAX_RECONNECT_DELAY_MS);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.streaming) this.openSocket();
+    }, delay);
+  }
+  /** Exposed for tests and the page host; routes one stream message. */
+  handleMessage(raw) {
+    let message;
+    try {
+      message = typeof raw === "string" ? JSON.parse(raw) : raw;
+    } catch (_err) {
+      return;
+    }
+    if (!message || typeof message !== "object") return;
+    switch (message.type) {
+      case "hello":
+        return;
+      case "dropped":
+        this.loaded = false;
+        void this.ensureLoaded();
+        return;
+      case "server_event":
+        if (message.hub_id !== this.hubId) return;
+        if (message.kind === "hub_removed") {
+          this.hubStatus = null;
+          this.invalidate();
+          this.notify();
+        } else {
+          void this.refreshStatus();
+        }
+        return;
+      case "hub_event":
+        if (message.hub_id !== this.hubId || !message.event) return;
+        this.handleHubEvent(message.event);
+        return;
+      default:
+        return;
+    }
+  }
+  handleHubEvent(event) {
+    const payload = event.payload ?? {};
+    switch (event.kind) {
+      case "activity_changed": {
+        const id = toNumber(payload.activity_id);
+        this.running = id == null ? null : { activity_id: id, name: payload.name ?? null };
+        if (this.hubStatus?.status) {
+          this.hubStatus = {
+            ...this.hubStatus,
+            status: { ...this.hubStatus.status, running_activity: this.running }
+          };
+        }
+        this.invalidate();
+        this.notify();
+        if (id != null) void this.ensureActivityPages(id);
+        return;
+      }
+      case "hub_state":
+      case "app_state":
+      case "status_changed":
+        void this.refreshStatus();
+        return;
+      case "catalog_ready":
+        if (payload.ready) {
+          this.loaded = false;
+          void this.ensureLoaded();
+        } else {
+          void this.refreshStatus();
+        }
+        return;
+      case "snapshot_changed": {
+        const deviceIds = Array.isArray(payload.device_ids) ? payload.device_ids : [];
+        const activityIds = Array.isArray(payload.activity_ids) ? payload.activity_ids : [];
+        if (!deviceIds.length && !activityIds.length) {
+          this.activityPages = {};
+          this.devicePages = {};
+        } else {
+          for (const id of deviceIds) delete this.devicePages[String(id)];
+          for (const id of activityIds) delete this.activityPages[String(id)];
+          if (deviceIds.length) this.activityPages = {};
+        }
+        this.loaded = false;
+        void this.ensureLoaded();
+        return;
+      }
+      default:
+        return;
+    }
+  }
+  // ---------- the attribute contract ----------
+  buildSnapshot() {
+    const status = this.hubStatus?.status ?? null;
+    const enabled = this.hubStatus?.enabled ?? false;
+    const available = Boolean(this.hubStatus && enabled && status?.controllable);
+    const runningId = this.running?.activity_id ?? null;
+    const activities = this.activities.map((activity) => ({
+      id: activity.activity_id,
+      name: activity.name,
+      state: activity.activity_id === runningId ? "on" : "off"
+    }));
+    const devices = this.devices.map((device) => ({
+      id: device.device_id,
+      name: device.name,
+      device_class: device.device_class ?? void 0
+    }));
+    const assignedKeys = {};
+    const macroKeys = {};
+    const favoriteKeys = {};
+    const longPressKeys = {};
+    for (const [key, page] of Object.entries(this.activityPages)) {
+      assignedKeys[key] = page.buttons.map((button) => button.button_code);
+      macroKeys[key] = page.macros.map((macro) => ({
+        id: macro.command_id,
+        name: macro.label ?? ""
+      }));
+      favoriteKeys[key] = page.favorites.map((favorite) => ({
+        id: favorite.command_id,
+        name: favorite.label ?? "",
+        device_id: favorite.device_id
+      }));
+      const pairs = longPressPairs(page.buttons);
+      if (Object.keys(pairs).length) longPressKeys[key] = pairs;
+    }
+    for (const [key, page] of Object.entries(this.devicePages)) {
+      const pairs = longPressPairs(page.buttons);
+      if (Object.keys(pairs).length) longPressKeys[key] = pairs;
+    }
+    const currentName = this.running?.name ?? activities.find((activity) => activity.id === runningId)?.name ?? void 0;
+    const attributes = {
+      hub_version: String(status?.hub_version ?? "").toUpperCase(),
+      current_activity: available ? currentName : void 0,
+      current_activity_id: available ? runningId : null,
+      load_state: this.loaded ? "ready" : "loading",
+      activities,
+      devices,
+      assigned_keys: assignedKeys,
+      macro_keys: macroKeys,
+      favorite_keys: favoriteKeys,
+      long_press_keys: longPressKeys,
+      hub_id: this.hubId
+    };
+    return {
+      state: !available ? "unavailable" : runningId != null ? "on" : "off",
+      attributes
+    };
+  }
+};
+
 // node_modules/@lit/reactive-element/css-tag.js
 var t = globalThis;
 var e = t.ShadowRoot && (void 0 === t.ShadyCSS || t.ShadyCSS.nativeShadow) && "adoptedStyleSheets" in Document.prototype && "replace" in CSSStyleSheet.prototype;
@@ -550,6 +1036,201 @@ var o4 = s3.litElementPolyfillSupport;
 o4?.({ LitElement: i4 });
 (s3.litElementVersions ?? (s3.litElementVersions = [])).push("4.2.2");
 
+// node_modules/lit-html/directive.js
+var t3 = { ATTRIBUTE: 1, CHILD: 2, PROPERTY: 3, BOOLEAN_ATTRIBUTE: 4, EVENT: 5, ELEMENT: 6 };
+var e4 = (t5) => (...e6) => ({ _$litDirective$: t5, values: e6 });
+var i5 = class {
+  constructor(t5) {
+  }
+  get _$AU() {
+    return this._$AM._$AU;
+  }
+  _$AT(t5, e6, i7) {
+    this._$Ct = t5, this._$AM = e6, this._$Ci = i7;
+  }
+  _$AS(t5, e6) {
+    return this.update(t5, e6);
+  }
+  update(t5, e6) {
+    return this.render(...e6);
+  }
+};
+
+// node_modules/lit-html/directive-helpers.js
+var { I: t4 } = j;
+var i6 = (o8) => o8;
+var r4 = (o8) => void 0 === o8.strings;
+var s4 = () => document.createComment("");
+var v2 = (o8, n7, e6) => {
+  const l4 = o8._$AA.parentNode, d3 = void 0 === n7 ? o8._$AB : n7._$AA;
+  if (void 0 === e6) {
+    const i7 = l4.insertBefore(s4(), d3), n8 = l4.insertBefore(s4(), d3);
+    e6 = new t4(i7, n8, o8, o8.options);
+  } else {
+    const t5 = e6._$AB.nextSibling, n8 = e6._$AM, c7 = n8 !== o8;
+    if (c7) {
+      let t6;
+      e6._$AQ?.(o8), e6._$AM = o8, void 0 !== e6._$AP && (t6 = o8._$AU) !== n8._$AU && e6._$AP(t6);
+    }
+    if (t5 !== d3 || c7) {
+      let o9 = e6._$AA;
+      for (; o9 !== t5; ) {
+        const t6 = i6(o9).nextSibling;
+        i6(l4).insertBefore(o9, d3), o9 = t6;
+      }
+    }
+  }
+  return e6;
+};
+var u3 = (o8, t5, i7 = o8) => (o8._$AI(t5, i7), o8);
+var m2 = {};
+var p3 = (o8, t5 = m2) => o8._$AH = t5;
+var M2 = (o8) => o8._$AH;
+var h3 = (o8) => {
+  o8._$AR(), o8._$AA.remove();
+};
+
+// node_modules/lit-html/directives/repeat.js
+var u4 = (e6, s7, t5) => {
+  const r6 = /* @__PURE__ */ new Map();
+  for (let l4 = s7; l4 <= t5; l4++) r6.set(e6[l4], l4);
+  return r6;
+};
+var c4 = e4(class extends i5 {
+  constructor(e6) {
+    if (super(e6), e6.type !== t3.CHILD) throw Error("repeat() can only be used in text expressions");
+  }
+  dt(e6, s7, t5) {
+    let r6;
+    void 0 === t5 ? t5 = s7 : void 0 !== s7 && (r6 = s7);
+    const l4 = [], o8 = [];
+    let i7 = 0;
+    for (const s8 of e6) l4[i7] = r6 ? r6(s8, i7) : i7, o8[i7] = t5(s8, i7), i7++;
+    return { values: o8, keys: l4 };
+  }
+  render(e6, s7, t5) {
+    return this.dt(e6, s7, t5).values;
+  }
+  update(s7, [t5, r6, c7]) {
+    const d3 = M2(s7), { values: p4, keys: a4 } = this.dt(t5, r6, c7);
+    if (!Array.isArray(d3)) return this.ut = a4, p4;
+    const h6 = this.ut ?? (this.ut = []), v3 = [];
+    let m3, y3, x2 = 0, j2 = d3.length - 1, k2 = 0, w2 = p4.length - 1;
+    for (; x2 <= j2 && k2 <= w2; ) if (null === d3[x2]) x2++;
+    else if (null === d3[j2]) j2--;
+    else if (h6[x2] === a4[k2]) v3[k2] = u3(d3[x2], p4[k2]), x2++, k2++;
+    else if (h6[j2] === a4[w2]) v3[w2] = u3(d3[j2], p4[w2]), j2--, w2--;
+    else if (h6[x2] === a4[w2]) v3[w2] = u3(d3[x2], p4[w2]), v2(s7, v3[w2 + 1], d3[x2]), x2++, w2--;
+    else if (h6[j2] === a4[k2]) v3[k2] = u3(d3[j2], p4[k2]), v2(s7, d3[x2], d3[j2]), j2--, k2++;
+    else if (void 0 === m3 && (m3 = u4(a4, k2, w2), y3 = u4(h6, x2, j2)), m3.has(h6[x2])) if (m3.has(h6[j2])) {
+      const e6 = y3.get(a4[k2]), t6 = void 0 !== e6 ? d3[e6] : null;
+      if (null === t6) {
+        const e7 = v2(s7, d3[x2]);
+        u3(e7, p4[k2]), v3[k2] = e7;
+      } else v3[k2] = u3(t6, p4[k2]), v2(s7, d3[x2], t6), d3[e6] = null;
+      k2++;
+    } else h3(d3[j2]), j2--;
+    else h3(d3[x2]), x2++;
+    for (; k2 <= w2; ) {
+      const e6 = v2(s7, v3[w2 + 1]);
+      u3(e6, p4[k2]), v3[k2++] = e6;
+    }
+    for (; x2 <= j2; ) {
+      const e6 = d3[x2++];
+      null !== e6 && h3(e6);
+    }
+    return this.ut = a4, p3(s7, v3), E;
+  }
+});
+
+// node_modules/lit-html/async-directive.js
+var s5 = (i7, t5) => {
+  const e6 = i7._$AN;
+  if (void 0 === e6) return false;
+  for (const i8 of e6) i8._$AO?.(t5, false), s5(i8, t5);
+  return true;
+};
+var o5 = (i7) => {
+  let t5, e6;
+  do {
+    if (void 0 === (t5 = i7._$AM)) break;
+    e6 = t5._$AN, e6.delete(i7), i7 = t5;
+  } while (0 === e6?.size);
+};
+var r5 = (i7) => {
+  for (let t5; t5 = i7._$AM; i7 = t5) {
+    let e6 = t5._$AN;
+    if (void 0 === e6) t5._$AN = e6 = /* @__PURE__ */ new Set();
+    else if (e6.has(i7)) break;
+    e6.add(i7), c5(t5);
+  }
+};
+function h4(i7) {
+  void 0 !== this._$AN ? (o5(this), this._$AM = i7, r5(this)) : this._$AM = i7;
+}
+function n4(i7, t5 = false, e6 = 0) {
+  const r6 = this._$AH, h6 = this._$AN;
+  if (void 0 !== h6 && 0 !== h6.size) if (t5) if (Array.isArray(r6)) for (let i8 = e6; i8 < r6.length; i8++) s5(r6[i8], false), o5(r6[i8]);
+  else null != r6 && (s5(r6, false), o5(r6));
+  else s5(this, i7);
+}
+var c5 = (i7) => {
+  i7.type == t3.CHILD && (i7._$AP ?? (i7._$AP = n4), i7._$AQ ?? (i7._$AQ = h4));
+};
+var f3 = class extends i5 {
+  constructor() {
+    super(...arguments), this._$AN = void 0;
+  }
+  _$AT(i7, t5, e6) {
+    super._$AT(i7, t5, e6), r5(this), this.isConnected = i7._$AU;
+  }
+  _$AO(i7, t5 = true) {
+    i7 !== this.isConnected && (this.isConnected = i7, i7 ? this.reconnected?.() : this.disconnected?.()), t5 && (s5(this, i7), o5(this));
+  }
+  setValue(t5) {
+    if (r4(this._$Ct)) this._$Ct._$AI(t5, this);
+    else {
+      const i7 = [...this._$Ct._$AH];
+      i7[this._$Ci] = t5, this._$Ct._$AI(i7, this, 0);
+    }
+  }
+  disconnected() {
+  }
+  reconnected() {
+  }
+};
+
+// node_modules/lit-html/directives/ref.js
+var e5 = () => new h5();
+var h5 = class {
+};
+var o6 = /* @__PURE__ */ new WeakMap();
+var n5 = e4(class extends f3 {
+  render(i7) {
+    return A;
+  }
+  update(i7, [s7]) {
+    const e6 = s7 !== this.G;
+    return e6 && void 0 !== this.G && this.rt(void 0), (e6 || this.lt !== this.ct) && (this.G = s7, this.ht = i7.options?.host, this.rt(this.ct = i7.element)), A;
+  }
+  rt(t5) {
+    if (this.isConnected || (t5 = void 0), "function" == typeof this.G) {
+      const i7 = this.ht ?? globalThis;
+      let s7 = o6.get(i7);
+      void 0 === s7 && (s7 = /* @__PURE__ */ new WeakMap(), o6.set(i7, s7)), void 0 !== s7.get(this.G) && this.G.call(this.ht, void 0), s7.set(this.G, t5), void 0 !== t5 && this.G.call(this.ht, t5);
+    } else this.G.value = t5;
+  }
+  get lt() {
+    return "function" == typeof this.G ? o6.get(this.ht ?? globalThis)?.get(this.G) : this.G?.value;
+  }
+  disconnected() {
+    this.lt === this.ct && this.rt(void 0);
+  }
+  reconnected() {
+    this.rt(this.ct);
+  }
+});
+
 // remote-card/src/remote-card-layout.ts
 var DEFAULT_GROUP_ORDER = [
   "activity",
@@ -590,18 +1271,8 @@ var LAYOUT_KEYS = [
   "mf_row_visible_rows"
 ];
 var DEVICE_LAYOUT_PREFIX = "device:";
-var DEVICE_DEFAULT_LAYOUT_KEY = "device:default";
 function deviceLayoutKey(deviceId) {
   return `${DEVICE_LAYOUT_PREFIX}${deviceId == null ? "default" : String(deviceId)}`;
-}
-function isDeviceLayoutKey(selection) {
-  return typeof selection === "string" && selection.startsWith(DEVICE_LAYOUT_PREFIX);
-}
-function parseDeviceLayoutKey(selection) {
-  if (!isDeviceLayoutKey(selection)) return null;
-  const rest = String(selection).slice(DEVICE_LAYOUT_PREFIX.length);
-  const id = Number(rest);
-  return Number.isFinite(id) ? id : null;
 }
 var DEVICE_LAYOUT_KEYS = [
   "group_order",
@@ -662,13 +1333,6 @@ function resolveStoredDeviceLayer(layer) {
     resolved[DEVICE_INTERNAL_KEY_FOR[key] ?? key] = value;
   }
   return resolved;
-}
-function toStoredDeviceLayer(layer) {
-  const stored = {};
-  for (const [key, value] of Object.entries(layer)) {
-    stored[DEVICE_STORED_KEY_FOR[key] ?? key] = value;
-  }
-  return stored;
 }
 var DEVICE_LAYOUT_DEFAULTS = Object.freeze({
   show_activity: true,
@@ -836,18 +1500,6 @@ function normalizedGroupOrder(configured) {
   }
   return order;
 }
-var GROUP_VISIBILITY_KEYS = {
-  activity: "show_activity",
-  dpad: "show_dpad",
-  nav: "show_nav",
-  mid: "show_mid",
-  media: "show_media",
-  colors: "show_colors",
-  abc: "show_abc",
-  // Device layouts only: the editor never lists the group for activity
-  // selections, so the key is never written on the activity side.
-  shortcuts: "show_shortcuts"
-};
 var ID = {
   UP: 174,
   DOWN: 178,
@@ -916,6 +1568,46 @@ var X2_ONLY_HARD_BUTTON_IDS = /* @__PURE__ */ new Set([
   ID.PLAY,
   ID.GUIDE
 ]);
+
+// remote-card/src/remote-card-compat.ts
+function hubVersionFromState(remoteState) {
+  return String(remoteState?.attributes?.hub_version || "").toUpperCase();
+}
+function isX2Hub(hubVersion, hubIntegration) {
+  if (hubIntegration) return true;
+  return hubVersion.includes("X2");
+}
+function supportsUnicodeCommandNames(hubVersion, hubIntegration) {
+  return isX2Hub(hubVersion, hubIntegration) || hubVersion.includes("X1S");
+}
+function selectItemTagName() {
+  return customElements.get("ha-dropdown-item") ? "ha-dropdown-item" : "mwc-list-item";
+}
+function selectOpenEvents() {
+  return customElements.get("ha-dropdown-item") ? ["wa-open"] : ["opened"];
+}
+function selectCloseEvents() {
+  return customElements.get("ha-dropdown-item") ? ["wa-close"] : ["closed"];
+}
+function selectValueCompat(value, options = []) {
+  const resolvedValue = String(value ?? "");
+  const useDropdownItems = Boolean(customElements.get("ha-dropdown-item"));
+  if (!useDropdownItems) return resolvedValue;
+  const selectedOption = options.find(
+    (option) => String(option?.value ?? "") === resolvedValue
+  );
+  return selectedOption ? String(selectedOption.label ?? selectedOption.value ?? "") : resolvedValue;
+}
+async function ensureHaElements() {
+  const dropdownItemTag = selectItemTagName();
+  await Promise.all([
+    customElements.whenDefined("ha-icon"),
+    customElements.whenDefined("ha-select"),
+    customElements.whenDefined(dropdownItemTag).catch(() => {
+    })
+    // optional
+  ]);
+}
 
 // remote-card/src/remote-card-strings.ts
 var REMOTE_CARD_STRINGS_EN = {
@@ -1043,8 +1735,8 @@ var REMOTE_CARD_STRINGS_EN = {
     macrosFavoritesAsRows: "Macros/Favorites as rows",
     commandsAsRows: "Commands as rows",
     visibleRows: "Visible rows",
-    moveGroupUp: (groupLabel2) => `Move ${groupLabel2} up`,
-    moveGroupDown: (groupLabel2) => `Move ${groupLabel2} down`,
+    moveGroupUp: (groupLabel) => `Move ${groupLabel} up`,
+    moveGroupDown: (groupLabel) => `Move ${groupLabel} down`,
     macros: "Macros",
     favorites: "Favorites",
     volume: "Volume",
@@ -1171,332 +1863,6 @@ function isLocalizedPoweredOffLabel(label) {
   if (!s7) return false;
   if (s7 === REMOTE_CARD_STRINGS_EN.card.poweredOff.toLowerCase()) return true;
   return s7 === currentStrings.card.poweredOff.toLowerCase();
-}
-
-// remote-card/src/remote-card-editor-layout.ts
-function deviceStoredLayerKey(selection) {
-  const id = parseDeviceLayoutKey(selection);
-  return id == null ? "default" : String(id);
-}
-function layoutHasCustomOverride(config, selection) {
-  if (isDeviceLayoutKey(selection)) {
-    return Boolean(storedDeviceLayer(config, deviceStoredLayerKey(selection)));
-  }
-  const layouts = config?.layouts;
-  if (!layouts || typeof layouts !== "object") return false;
-  const key = String(selection ?? "");
-  const override = layouts[key] ?? (Number.isFinite(Number(selection)) ? layouts[Number(selection)] : null);
-  return Boolean(override && typeof override === "object");
-}
-function layoutSelectionNote(config, selection) {
-  if (selection === "default") {
-    return str().editor.noteDefaultLayout;
-  }
-  if (selection === DEVICE_DEFAULT_LAYOUT_KEY) {
-    return str().editor.noteDeviceDefaultLayout;
-  }
-  const isDevice = isDeviceLayoutKey(selection);
-  if (layoutHasCustomOverride(config, selection)) {
-    return isDevice ? str().editor.noteCustomDeviceLayout : str().editor.noteCustomActivityLayout;
-  }
-  return isDevice ? str().editor.noteUsingDeviceDefault : str().editor.noteUsingActivityDefault;
-}
-function editorActivitiesFromState(state) {
-  const list = state?.attributes?.activities;
-  if (!Array.isArray(list)) return [];
-  return list.map((activity) => ({
-    id: Number(activity?.id),
-    name: String(activity?.name ?? "")
-  })).filter((activity) => Number.isFinite(activity.id) && activity.name);
-}
-function editorDevicesFromState(state) {
-  const list = state?.attributes?.devices;
-  if (!Array.isArray(list)) return [];
-  return list.map((device) => ({
-    id: Number(device?.id),
-    name: String(device?.name ?? "")
-  })).filter((device) => Number.isFinite(device.id) && device.name);
-}
-function layoutConfigForSelection(config, selection) {
-  if (selection === "default") {
-    return layoutDefaultConfig(config);
-  }
-  if (isDeviceLayoutKey(selection)) {
-    return layoutConfigForDevice(config, parseDeviceLayoutKey(selection));
-  }
-  return layoutConfigForActivity(config, selection);
-}
-var ACTIVITY_LAYOUT_DEFAULTS = Object.freeze({
-  show_activity: true,
-  show_dpad: true,
-  show_nav: true,
-  show_mid: true,
-  show_volume: true,
-  show_channel: true,
-  show_media: true,
-  show_dvr: true,
-  show_colors: true,
-  show_abc: true,
-  show_macros_button: true,
-  show_favorites_button: true,
-  show_device_toggle: true,
-  mf_as_rows: false,
-  mf_row_visible_rows: DEFAULT_ROW_VISIBLE_ROWS,
-  group_order: Object.freeze(DEFAULT_GROUP_ORDER.slice())
-});
-var sameLayoutValue = (a4, b3) => JSON.stringify(a4) === JSON.stringify(b3);
-function effectiveValueFor(key, raw, defaults) {
-  switch (key) {
-    case "show_volume":
-      return volumeGroupEnabled(raw);
-    case "show_channel":
-      return channelGroupEnabled(raw);
-    case "show_macros_button":
-      return macrosButtonEnabled(raw);
-    case "show_favorites_button":
-      return favoritesButtonEnabled(raw);
-    case "group_order":
-      return normalizedGroupOrder(raw.group_order);
-    default:
-      return raw[key] !== void 0 ? raw[key] : defaults[key];
-  }
-}
-function pruneLayoutLayer(layer, rawBase, defaults) {
-  const pruned = {};
-  const withLayer = { ...rawBase, ...layer };
-  for (const [key, value] of Object.entries(layer)) {
-    if (value === void 0) continue;
-    const without = { ...withLayer };
-    if (rawBase[key] !== void 0) {
-      without[key] = rawBase[key];
-    } else {
-      delete without[key];
-    }
-    const kept = effectiveValueFor(key, withLayer, defaults);
-    const dropped = effectiveValueFor(key, without, defaults);
-    if (dropped !== void 0 && sameLayoutValue(kept, dropped)) continue;
-    pruned[key] = value;
-  }
-  return pruned;
-}
-function setOrDelete(target, key, value) {
-  if (Object.keys(value).length) {
-    target[key] = value;
-  } else {
-    delete target[key];
-  }
-}
-function applyLayoutConfigPatch(config, selection, patch) {
-  const next = { ...config || {} };
-  if (isDeviceLayoutKey(selection)) {
-    const layerKey = deviceStoredLayerKey(selection);
-    const block = { ...next.device_mode || {} };
-    const layouts2 = { ...block.layouts || {} };
-    const current = resolveStoredDeviceLayer(storedDeviceLayer(next, layerKey));
-    const rawBase = layerKey === "default" ? {} : resolveStoredDeviceLayer(storedDeviceLayer(next, "default"));
-    const merged2 = pruneLayoutLayer(
-      { ...current, ...patch },
-      rawBase,
-      DEVICE_LAYOUT_DEFAULTS
-    );
-    setOrDelete(layouts2, layerKey, toStoredDeviceLayer(merged2));
-    setOrDelete(block, "layouts", layouts2);
-    setOrDelete(next, "device_mode", block);
-    return { nextConfig: next };
-  }
-  if (selection === "default") {
-    const defaultLayout = next.layouts?.default;
-    const existing2 = defaultLayout && typeof defaultLayout === "object" ? defaultLayout : {};
-    const merged2 = pruneLayoutLayer(
-      { ...layoutBaseConfig(next), ...existing2, ...patch },
-      {},
-      ACTIVITY_LAYOUT_DEFAULTS
-    );
-    for (const key of LAYOUT_KEYS) delete next[key];
-    const layouts2 = { ...next.layouts || {} };
-    setOrDelete(layouts2, "default", merged2);
-    setOrDelete(next, "layouts", layouts2);
-    return { nextConfig: next };
-  }
-  const layouts = { ...next.layouts || {} };
-  const selectionKey = String(selection);
-  const existing = layouts[selectionKey] && typeof layouts[selectionKey] === "object" ? layouts[selectionKey] : {};
-  const merged = pruneLayoutLayer(
-    { ...existing, ...patch },
-    layoutDefaultConfig(next),
-    ACTIVITY_LAYOUT_DEFAULTS
-  );
-  setOrDelete(layouts, selectionKey, merged);
-  setOrDelete(next, "layouts", layouts);
-  return { nextConfig: next };
-}
-function groupOrderListForEditor(config, selection) {
-  const layout = layoutConfigForSelection(config, selection);
-  return normalizedGroupOrder(layout?.group_order);
-}
-function groupLabel(key) {
-  return str().groups[key] || key;
-}
-function isGroupEnabled(config, selection, key) {
-  const prop = GROUP_VISIBILITY_KEYS[key];
-  if (!prop) return true;
-  const layout = layoutConfigForSelection(config, selection);
-  return layout?.[prop] ?? true;
-}
-function macroTogglePatch(enabled) {
-  return { show_macros_button: !!enabled };
-}
-function favoritesTogglePatch(enabled) {
-  return { show_favorites_button: !!enabled };
-}
-function commandsEnabled(config, selection) {
-  return commandsButtonEnabled(layoutConfigForSelection(config, selection));
-}
-function commandsTogglePatch(enabled) {
-  return { show_commands_button: !!enabled };
-}
-function powerEnabled(config, selection) {
-  return powerButtonEnabled(layoutConfigForSelection(config, selection));
-}
-function powerTogglePatch(enabled) {
-  return { show_power_button: !!enabled };
-}
-function applyShortcutSlotPatch(config, deviceId, slot, value) {
-  const next = { ...config || {} };
-  const block = { ...next.device_mode || {} };
-  const shortcuts = {
-    ...block.shortcuts || {}
-  };
-  const key = String(deviceId);
-  const entry = {
-    ...shortcuts[key] || {}
-  };
-  const normalized = normalizedShortcutSlot(value);
-  if (normalized) {
-    entry[slot] = normalized;
-  } else {
-    delete entry[slot];
-  }
-  setOrDelete(shortcuts, key, entry);
-  setOrDelete(block, "shortcuts", shortcuts);
-  setOrDelete(next, "device_mode", block);
-  return { nextConfig: next };
-}
-function deviceToggleEnabledForEditor(config, selection) {
-  return deviceToggleEnabled(layoutConfigForSelection(config, selection));
-}
-function deviceTogglePatch(enabled) {
-  return { show_device_toggle: !!enabled };
-}
-function mfAsRowsForEditor(config, selection) {
-  return mfAsRows(layoutConfigForSelection(config, selection));
-}
-function mfRowVisibleRowsForEditor(config, selection) {
-  return mfRowVisibleRows(layoutConfigForSelection(config, selection));
-}
-function mfAsRowsPatch(enabled) {
-  return { mf_as_rows: !!enabled };
-}
-function mfRowVisibleRowsPatch(value) {
-  return { mf_row_visible_rows: value };
-}
-function volumeTogglePatch(enabled) {
-  return { show_volume: !!enabled };
-}
-function channelTogglePatch(enabled) {
-  return { show_channel: !!enabled };
-}
-function dvrTogglePatch(enabled) {
-  return {
-    show_dvr: !!enabled
-  };
-}
-function groupEnabledPatch(key, enabled) {
-  const prop = GROUP_VISIBILITY_KEYS[key];
-  return prop ? { [prop]: !!enabled } : null;
-}
-function moveVisibleGroup(order, isVisible, fromVisible, toVisible) {
-  const visibleOrder = order.filter(isVisible);
-  if (!Number.isInteger(fromVisible) || !Number.isInteger(toVisible) || fromVisible < 0 || fromVisible >= visibleOrder.length || toVisible < 0 || toVisible >= visibleOrder.length || fromVisible === toVisible) {
-    return null;
-  }
-  const nextVisible = visibleOrder.slice();
-  const [moved] = nextVisible.splice(fromVisible, 1);
-  nextVisible.splice(toVisible, 0, moved);
-  let vi = 0;
-  return order.map((key) => isVisible(key) ? nextVisible[vi++] : key);
-}
-
-// remote-card/src/remote-card-compat.ts
-function hubVersionFromState(remoteState) {
-  return String(remoteState?.attributes?.hub_version || "").toUpperCase();
-}
-function hubVersionFor(hass, entityId) {
-  const resolved = String(entityId || "").trim();
-  if (!resolved) return "";
-  return hubVersionFromState(hass?.states?.[resolved]);
-}
-function isX2Hub(hubVersion, hubIntegration) {
-  if (hubIntegration) return true;
-  return hubVersion.includes("X2");
-}
-function supportsUnicodeCommandNames(hubVersion, hubIntegration) {
-  return isX2Hub(hubVersion, hubIntegration) || hubVersion.includes("X1S");
-}
-function selectItemTagName() {
-  return customElements.get("ha-dropdown-item") ? "ha-dropdown-item" : "mwc-list-item";
-}
-function selectOpenEvents() {
-  return customElements.get("ha-dropdown-item") ? ["wa-open"] : ["opened"];
-}
-function selectCloseEvents() {
-  return customElements.get("ha-dropdown-item") ? ["wa-close"] : ["closed"];
-}
-function selectValueCompat(value, options = []) {
-  const resolvedValue = String(value ?? "");
-  const useDropdownItems = Boolean(customElements.get("ha-dropdown-item"));
-  if (!useDropdownItems) return resolvedValue;
-  const selectedOption = options.find(
-    (option) => String(option?.value ?? "") === resolvedValue
-  );
-  return selectedOption ? String(selectedOption.label ?? selectedOption.value ?? "") : resolvedValue;
-}
-async function ensureHaElements() {
-  const dropdownItemTag = selectItemTagName();
-  await Promise.all([
-    customElements.whenDefined("ha-icon"),
-    customElements.whenDefined("ha-select"),
-    customElements.whenDefined(dropdownItemTag).catch(() => {
-    })
-    // optional
-  ]);
-}
-
-// remote-card/src/remote-web-config.ts
-var DROPPED_KEYS = /* @__PURE__ */ new Set(["type", "entity", "theme", "show_automation_assist", "preview_activity"]);
-var DROPPED_FAVORITE_KEYS = /* @__PURE__ */ new Set(["action", "tap_action", "hold_action", "double_tap_action"]);
-function isPlainObject2(value) {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-function webRemoteConfigFromCardConfig(config) {
-  const out = {};
-  if (!isPlainObject2(config)) return out;
-  for (const [key, value] of Object.entries(config)) {
-    if (DROPPED_KEYS.has(key) || value === void 0) continue;
-    if (key === "custom_favorites" && Array.isArray(value)) {
-      const kept = value.filter((item) => isPlainObject2(item) && item.command_id != null && item.device_id != null).map((item) => {
-        const favorite = {};
-        for (const [k2, v3] of Object.entries(item)) {
-          if (!DROPPED_FAVORITE_KEYS.has(k2)) favorite[k2] = v3;
-        }
-        return favorite;
-      });
-      if (kept.length) out.custom_favorites = kept;
-      continue;
-    }
-    out[key] = value;
-  }
-  return out;
 }
 
 // remote-card/src/remote-card-styles.ts
@@ -2616,2012 +2982,6 @@ var REMOTE_CARD_CSS = `
         text-decoration: underline;
       }
     `;
-var REMOTE_CARD_EDITOR_CSS = `
-          .sb-modal { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; background: rgba(0, 0, 0, 0.45); z-index: 9999; }
-          .sb-modal.open { display: flex; }
-          .sb-modal__dialog { width: min(560px, 92vw); max-height: 90vh; overflow: auto; background: var(--ha-card-background, var(--card-background-color, var(--primary-background-color))); color: var(--primary-text-color); border-radius: 16px; border: 1px solid var(--divider-color); padding: 16px; display: grid; gap: 12px; box-shadow: 0 18px 40px rgba(0, 0, 0, 0.35); }
-          .sb-modal__header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-          .sb-modal__title { font-weight: 700; font-size: 18px; }
-          .sb-modal__close { border: none; background: transparent; color: inherit; cursor: pointer; font-size: 22px; line-height: 1; }
-          .sb-modal__text { font-size: 15px; line-height: 1.5; opacity: 0.95; }
-          .sb-modal__optout { display: flex; align-items: center; gap: 8px; font-size: 14px; }
-          .sb-modal__actions { display: flex; gap: 8px; justify-content: flex-end; }
-          .sb-exp { border: 1px solid var(--divider-color); border-radius: 12px; overflow: visible; }
-          .sb-exp-hdr { width: 100%; display:flex; align-items:center; justify-content:space-between; gap: 10px; padding: 12px; background: var(--ha-card-background, transparent); border: 0; cursor: pointer; transition: background-color 120ms ease; }
-          .sb-exp-hdr-left { display:flex; align-items:center; gap: 10px; min-width: 0; }
-          .sb-exp-title { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-          .sb-exp-body { padding: 8px 12px 12px 12px; }
-          .sb-exp-collapsed .sb-exp-body { display: none; }
-          .sb-exp:not(.sb-exp-collapsed) > .sb-exp-hdr { background: var(--secondary-background-color, var(--ha-card-background, var(--card-background-color))); border-radius: 12px 12px 0 0; }
-                    
-          .sb-layout-title { font-weight: 600; margin: 10px 0 6px; }
-          .sb-layout-card { border: 1px solid var(--divider-color); border-radius: 12px; padding: 10px; }
-          .sb-layout-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 6px 0; }
-          .sb-layout-row-order { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; align-items: center; gap: 10px; }
-          /* The two "Default ... layout" entries act as section heads in the
-             layout selector: a tinted background plus a colored bottom
-             border split the list into its activity and device sections.
-             The items are our own slotted children of ha-select, so this
-             document-level background overrides the component's :host hover
-             style \u2014 define hover/selected explicitly to keep them alive. */
-          .sb-option-default {
-            background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.06);
-            background: color-mix(in srgb, var(--primary-color) 6%, transparent);
-            border-bottom: 2px solid rgba(var(--rgb-primary-color, 3, 169, 244), 0.45);
-            border-bottom: 2px solid color-mix(in srgb, var(--primary-color) 45%, transparent);
-          }
-          .sb-option-default:hover {
-            background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.14);
-            background: color-mix(in srgb, var(--primary-color) 14%, transparent);
-          }
-          .sb-option-default[selected],
-          .sb-option-default[activated] {
-            background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.18);
-            background: color-mix(in srgb, var(--primary-color) 18%, transparent);
-          }
-          .sb-layout-row + .sb-layout-row { border-top: 1px solid var(--divider-color); }
-          .sb-layout-actions { display: inline-flex; align-items:center; gap: 10px; }
-          .sb-layout-actions-full { flex: 1; }
-          .sb-layout-actions-full ha-select { width: 100%; }
-          .sb-layout-note { font-size: 12px; opacity: 0.7; text-align: end; padding: 2px 0 6px; }
-          .sb-icon-btn { width: 32px; height: 32px; border-radius: 10px; border: 1px solid var(--divider-color); background: var(--ha-card-background, transparent); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; padding: 0; }
-          .sb-icon-btn[disabled] { opacity: 0.4; cursor: default; }
-          .sb-layout-footer { margin-top: 10px; display:flex; justify-content:flex-end; }
-          .sb-reset-btn { border: 1px solid var(--divider-color); border-radius: 10px; padding: 6px 10px; background: transparent; cursor:pointer; }
-          .sb-switch { display:flex; align-items:center; }
-          .sb-styling-wrap { padding: 0 0 12px 0; }
-          .sb-layout-switch-item { display:flex; align-items:center; gap:8px; min-width: 0; }
-          .sb-layout-switch-item.is-disabled { opacity: 0.45; pointer-events: none; }
-          .sb-layout-switch-item-empty { visibility: hidden; }
-          .sb-layout-switch-label { font-size: 13px; opacity: 0.9; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-          .sb-mf-rows-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; background: rgba(var(--rgb-primary-text-color, 0, 0, 0), 0.04); border: 1px solid var(--divider-color); border-radius: 10px; padding: 8px 12px; margin: 8px 0; }
-          /* This label explains the switch next to it \u2014 translations can be long, so wrap instead of ellipsing. */
-          .sb-mf-rows-row .sb-layout-switch-label { white-space: normal; overflow: visible; text-overflow: clip; }
-          .sb-mf-rows-row + .sb-layout-row { border-top: 0; }
-          .sb-mf-rows-stepper-item { gap: 10px; justify-self: end; }
-          .sb-mf-rows-stepper-item.is-disabled { opacity: 0.45; pointer-events: none; }
-          .sb-rows-stepper { display: inline-flex; align-items: center; gap: 6px; }
-          .sb-rows-stepper .sb-icon-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-          .sb-rows-value { min-width: 24px; text-align: center; font-variant-numeric: tabular-nums; font-size: 14px; font-weight: 600; }
-          .sb-move-wrap { display:flex; flex-direction:row; align-items:center; gap:6px; justify-self: end; }
-          .sb-drag-handle { width: 32px; height: 32px; display: inline-flex; align-items: center; justify-content: center; justify-self: end; color: var(--secondary-text-color); cursor: grab; touch-action: none; }
-          .sb-drag-handle:active { cursor: grabbing; }
-          .sb-drag-handle ha-icon { --mdc-icon-size: 20px; }
-          /* Shortcuts slot editing on the group-order row: the three mini
-             slot buttons fill the row's second cell; the open slot's panel
-             drops out inside the row, spanning its grid (never a popover \u2014
-             the panel's icon picker and command select open popup menus of
-             their own, and nested popups fight outside-click detection).
-             The caret rides on the open slot, so it stays anchored to the
-             button that opened the panel. */
-          .sb-shortcut-strip { display: inline-flex; gap: 8px; min-width: 0; }
-          .sb-shortcut-slot { position: relative; width: 40px; height: 30px; border: 1px dashed var(--secondary-text-color, var(--divider-color)); border-radius: 8px; background: rgba(var(--rgb-primary-text-color, 0, 0, 0), 0.05); background: color-mix(in srgb, var(--primary-text-color) 5%, transparent); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; padding: 0; color: var(--primary-color); flex: 0 1 auto; min-width: 26px; }
-          .sb-shortcut-slot.is-configured { background: var(--ha-card-background, transparent); }
-          .sb-shortcut-slot ha-icon { --mdc-icon-size: 18px; }
-          .sb-shortcut-slot.is-configured { border-style: solid; }
-          .sb-shortcut-slot.is-open { border-color: var(--primary-color); box-shadow: 0 0 0 1px var(--primary-color) inset; }
-          .sb-shortcut-slot.is-open::after { content: ""; position: absolute; top: 100%; left: 50%; transform: translateX(-50%); border: 5px solid transparent; border-top-color: var(--primary-color); pointer-events: none; }
-          .sb-shortcut-panel { grid-column: 1 / -1; display: flex; flex-direction: column; gap: 10px; margin: 2px 0 4px; border: 1px solid var(--divider-color); border-radius: 10px; padding: 10px 12px; background: rgba(var(--rgb-primary-text-color, 0, 0, 0), 0.04); }
-          .sb-shortcut-panel ha-form { display: block; }
-          .sb-shortcut-panel-footer { display: flex; justify-content: flex-end; }
-          .sb-shortcut-note { font-size: 12px; color: var(--secondary-text-color); line-height: 1.35; }
-          .sb-layout-row-order.sortable-ghost { opacity: 0.35; }
-          .sb-layout-row-order.sortable-chosen { background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.06); background: color-mix(in srgb, var(--primary-color) 6%, transparent); }
-          /* General Options rows: label + description with the switch at the
-             end; a row's sub-controls (ha-form) sit below, indented to the
-             label column. Rows are separated by the divider line. */
-          .sb-opt-list { display: flex; flex-direction: column; }
-          .sb-opt-row { padding: 8px 0; }
-          .sb-opt-row + .sb-opt-row { border-top: 1px solid var(--divider-color); }
-          .sb-opt-head { display:flex; align-items:flex-start; justify-content:space-between; gap: 12px; }
-          .sb-opt-main { display:flex; flex-direction:column; gap: 4px; flex: 1; min-width: 0; }
-          .sb-opt-label-wrap { display:flex; align-items:center; gap: 6px; font-size: 14px; font-weight: 600; cursor: pointer; }
-          .sb-opt-label { line-height: 1.2; }
-          .sb-opt-desc { font-size: 13px; color: var(--secondary-text-color); line-height: 1.3; }
-          .sb-opt-link { color: var(--secondary-text-color); display:flex; align-items:center; justify-content:center; text-decoration:none; opacity: 0.85; }
-          .sb-opt-link:hover { color: var(--primary-color); opacity: 1; }
-          .sb-opt-link ha-icon { --mdc-icon-size: 16px; }
-          .sb-opt-row--form ha-form { display: block; }
-          .sb-opt-sub { padding: 10px 0 2px; }
-          .sb-opt-sub ha-form { display: block; }
-          /* Sub-option label + checkbox list (long press buttons): the label
-             sits in the row's label column at description size, the
-             checkboxes are indented beneath it. The checkbox labels take
-             their size from HA's component vars, not from inherited
-             font-size: web-awesome ha-checkbox reads --wa-font-size-m (HA
-             2026.x), the older MDC ha-formfield reads the typography var,
-             so pin all of them to the description size. */
-          .sb-opt-sub-label { font-size: 13px; font-weight: 500; line-height: 1.3; }
-          .sb-opt-sub--list ha-form {
-            padding-inline-start: 12px;
-            font-size: 13px;
-            --wa-font-size-m: 13px;
-            --mdc-typography-body2-font-size: 13px;
-            --mdc-typography-body2-line-height: 1.3;
-            --ha-font-size-m: 13px;
-          }
-          .sb-command-sync-row { margin: 0 0 12px; border: 1px solid var(--divider-color); border-radius: 12px; padding: 10px 12px; display:flex; align-items:center; justify-content:space-between; gap: 10px; }
-          .sb-command-sync-row-running { border-color: var(--primary-color); background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.10); background: color-mix(in srgb, var(--primary-color) 10%, transparent); }
-          .sb-command-sync-row-error { border-color: var(--error-color); background: rgba(var(--rgb-error-color, 219, 68, 55), 0.10); background: color-mix(in srgb, var(--error-color) 10%, transparent); }
-          .sb-command-sync-row-ok { border-color: var(--success-color, #22c55e); border-color: color-mix(in srgb, var(--success-color, #22c55e) 70%, var(--divider-color)); background: rgba(34, 197, 94, 0.12); background: color-mix(in srgb, var(--success-color, #22c55e) 12%, transparent); }
-          .sb-command-sync-message-wrap { display:flex; align-items:center; gap: 8px; min-width: 0; }
-          .sb-command-sync-message-wrap ha-icon { --mdc-icon-size: 18px; color: var(--secondary-text-color); }
-          .sb-command-sync-row-ok .sb-command-sync-message-wrap ha-icon { color: var(--success-color, #22c55e); }
-          .sb-command-sync-row-error .sb-command-sync-message-wrap ha-icon { color: var(--error-color); }
-          .sb-command-sync-row-running .sb-command-sync-message-wrap ha-icon { color: var(--primary-color); }
-          .sb-command-sync-message { font-size: 13px; color: var(--secondary-text-color); }
-          .sb-command-sync-btn { border: 1px solid var(--primary-color); border-radius: 10px; min-height: 34px; padding: 0 12px; background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.18); background: color-mix(in srgb, var(--primary-color) 18%, transparent); color: var(--primary-text-color); cursor: pointer; white-space: nowrap; transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease, transform 80ms ease; }
-          .sb-command-sync-btn:hover { background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.28); background: color-mix(in srgb, var(--primary-color) 28%, transparent); border-color: var(--primary-color); border-color: color-mix(in srgb, var(--primary-color) 85%, #000); }
-          .sb-command-sync-btn:active { transform: translateY(1px); }
-          .sb-command-sync-btn:focus-visible { outline: none; box-shadow: 0 0 0 2px rgba(var(--rgb-primary-color, 3, 169, 244), 0.45); box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary-color) 45%, transparent); }
-          .sb-command-sync-btn[disabled],
-          .sb-command-sync-btn.sb-command-sync-btn-static { opacity: 0.6; cursor: default; transform: none; pointer-events: none; }
-          .sb-command-sync-btn.sb-command-sync-btn-static { display: inline-flex; align-items: center; }
-          .sb-command-grid { display:grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-          .sb-command-slot-btn { position: relative; border: 1px solid var(--divider-color); border-radius: 12px; min-height: 108px; cursor: pointer; padding: 0; text-align: start; display:flex; flex-direction:column; overflow: hidden; background: var(--ha-card-background, var(--card-background-color)); }
-          .sb-command-slot-btn:hover { border-color: var(--primary-color); }
-          .sb-command-slot-main { position: relative; display:flex; align-items:flex-start; gap: 8px; padding: 14px 12px 10px; min-width: 0; }
-                    .sb-command-slot-icon-wrap { width: 20px; min-width: 20px; min-height: 20px; display:flex; align-items:center; justify-content:center; }
-          .sb-command-slot-icon-wrap ha-icon { --mdc-icon-size: 20px; color: var(--state-icon-color); }
-          .sb-command-slot-name { font-weight: 700; font-size: 16px; line-height: 1.15; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--primary-text-color); }
-          .sb-command-slot-meta { margin-top: 3px; font-size: 12px; color: var(--secondary-text-color); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; display:flex; align-items:center; gap: 4px; }
-          .sb-command-slot-favorite { color: var(--error-color); display:inline-flex; }
-          .sb-command-slot-favorite ha-icon { --mdc-icon-size: 14px; }
-          .sb-command-slot-meta-icon { color: var(--state-icon-color); display:inline-flex; }
-          .sb-command-slot-meta-icon ha-icon { --mdc-icon-size: 14px; }
-          .sb-command-slot-text-wrap { min-width: 0; padding-top: 1px; flex: 1; }
-          .sb-command-slot-clear { position: absolute; top: 8px; inset-inline-end: 8px; width: 26px; height: 26px; min-width: 26px; border-radius: 8px; border: 1px solid var(--divider-color); background: var(--ha-card-background, var(--card-background-color)); color: var(--secondary-text-color); display:inline-flex; align-items:center; justify-content:center; padding: 0; cursor: pointer; z-index: 1; opacity: 0.9; }
-          .sb-command-slot-clear:hover { opacity: 1; border-color: var(--primary-color); }
-          .sb-command-slot-clear ha-icon { --mdc-icon-size: 16px; }
-          .sb-command-slot-action-btn { margin: 0 10px 10px; border: 1px solid var(--divider-color); border-radius: 10px; min-height: 44px; width: auto; background: var(--secondary-background-color, var(--ha-card-background, var(--card-background-color))); color: var(--primary-text-color); font-size: 14px; font-weight: 500; line-height: 1.2; text-align: start; padding: 10px 12px; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transition: background-color 120ms ease, border-color 120ms ease, box-shadow 120ms ease, transform 80ms ease; }
-          .sb-command-slot-action-btn:hover { border-color: var(--primary-color); background: var(--ha-card-background, var(--card-background-color)); }
-          .sb-command-slot-action-btn:active { transform: translateY(1px); }
-          .sb-command-slot-action-btn:focus-visible { outline: none; box-shadow: 0 0 0 2px var(--primary-color); }
-          .sb-command-slot-confirm { padding: 14px 12px 10px; display:flex; flex-direction:column; }
-          .sb-command-slot-confirm-title { font-weight: 700; font-size: 16px; line-height: 1.15; color: var(--primary-text-color); }
-          .sb-command-slot-confirm-sub { margin-top: 1px; font-size: 12px; color: var(--secondary-text-color); }
-          .sb-command-slot-confirm-actions { display:grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 0 10px 10px; }
-          .sb-command-slot-confirm-actions .sb-command-slot-action-btn { margin: 0; text-align: center; justify-content: center; display:flex; align-items:center; }
-          .sb-command-slot-empty { border-color: var(--divider-color); background: var(--secondary-background-color, var(--ha-card-background, var(--card-background-color))); }
-          .sb-command-slot-empty .sb-command-slot-main { gap: 12px; align-items: center; justify-content: center; flex-direction: column; }
-          .sb-command-slot-empty .sb-command-slot-empty-text { font-size: 64px; line-height: 1; color: var(--secondary-text-color); display:inline-flex; align-items:center; justify-content:center; opacity: 0.8; }
-          .sb-command-slot-empty .sb-command-slot-name { font-size: 18px; font-weight: 500; text-align: center; color: var(--secondary-text-color); }
-          .sb-command-modal { position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,0.52); display:none; align-items:center; justify-content:center; padding: 18px; }
-          .sb-command-modal.open { display:flex; }
-          .sb-command-dialog { width: min(640px, 100%); max-height: min(680px, 100%); background: var(--ha-card-background, var(--card-background-color, var(--primary-background-color))); color: var(--primary-text-color); border-radius: 16px; border: 1px solid var(--divider-color); display:flex; flex-direction:column; overflow:hidden; box-shadow: var(--ha-card-box-shadow, 0 8px 28px rgba(0,0,0,0.28)); }
-          .sb-command-dialog-header { display:flex; align-items:center; justify-content:space-between; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--divider-color); }
-          .sb-command-dialog-title { font-size: 16px; font-weight: 700; }
-          .sb-command-dialog-close { border: 0; background: transparent; cursor: pointer; color: inherit; display:flex; align-items:center; justify-content:center; }
-          .sb-command-dialog-body { padding: 16px; display:flex; flex-direction:column; gap: 12px; overflow:auto; }
-          .sb-command-dialog-footer { display:flex; align-items:center; justify-content:space-between; gap: 10px; padding: 12px 16px; border-top: 1px solid var(--divider-color); }
-          .sb-command-dialog-footer-note { font-size: 13px; color: var(--error-color); text-align: start; }
-          .sb-command-dialog-footer-actions { display:flex; align-items:center; justify-content:flex-end; gap: 8px; margin-inline-start: auto; }
-          .sb-command-dialog-btn { border: 1px solid var(--divider-color); border-radius: 10px; min-height: 36px; padding: 0 12px; background: var(--ha-card-background, var(--card-background-color)); color: var(--primary-text-color); cursor: pointer; font-size: 14px; }
-          .sb-command-dialog-btn:hover { border-color: var(--primary-color); }
-          .sb-command-dialog-btn-primary { border-color: var(--primary-color); background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.18); background: color-mix(in srgb, var(--primary-color) 18%, transparent); }
-          .sb-hub-version-warn-btn { all: unset; cursor: pointer; text-decoration: underline; display: block; }
-          .sb-hub-version-chip-row { display: flex; gap: 8px; flex-wrap: wrap; }
-          .sb-hub-version-chip { border: 1px solid var(--divider-color); border-radius: 20px; padding: 4px 14px; background: transparent; color: var(--primary-text-color); cursor: pointer; font-size: 13px; }
-          .sb-hub-version-chip.active { border-color: var(--primary-color); background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.18); background: color-mix(in srgb, var(--primary-color) 18%, transparent); }
-          .sb-command-dialog-note { border: 1px solid var(--divider-color); border: 1px solid color-mix(in srgb, var(--info-color, var(--primary-color)) 42%, var(--divider-color)); border-radius: 12px; padding: 12px; background: var(--ha-card-background, var(--card-background-color)); background: color-mix(in srgb, var(--info-color, var(--primary-color)) 12%, var(--ha-card-background, var(--card-background-color))); color: var(--primary-text-color); font-size: 13px; line-height: 1.45; display:flex; align-items:flex-start; gap:10px; }
-          .sb-command-dialog-note::before { content: ""; width: 18px; height: 18px; border-radius: 50%; background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.22); background: color-mix(in srgb, var(--info-color, var(--primary-color)) 22%, transparent); flex: 0 0 18px; margin-top: 1px; }
-          .sb-command-config-block { border: 1px solid var(--divider-color); border-radius: 12px; padding: 12px; display:flex; flex-direction:column; gap:12px; }
-          .sb-command-input-row { display:flex; flex-direction:column; gap:6px; }
-          .sb-command-input-label { font-size: 12px; opacity: 0.78; }
-          .sb-command-name-field { width: 100%; }
-          .sb-command-input-select { border: 1px solid var(--divider-color); border-radius: 999px; background: var(--ha-card-background, transparent); color: inherit; min-height: 40px; padding: 6px 12px; }
-          .sb-command-checkbox { width: 100%; border: 0; background: transparent; padding: 0; display:flex; align-items:center; justify-content:space-between; gap:10px; font-size: 13px; cursor: pointer; color: inherit; }
-          .sb-command-checkbox-icon { width: 26px; height: 26px; border-radius: 50%; border: 1px solid var(--divider-color); background: var(--ha-card-background, rgba(0, 0, 0, 0.12)); background: color-mix(in srgb, var(--ha-card-background, transparent) 88%, #000); display:flex; align-items:center; justify-content:center; transition: background-color 120ms ease, border-color 120ms ease; }
-          .sb-command-checkbox-icon ha-icon { --mdc-icon-size: 16px; }
-          .sb-command-checkbox-left { display:flex; align-items:center; gap:10px; }
-          .sb-command-checkbox.sb-command-favorite-active .sb-command-checkbox-icon { border-color: var(--primary-color); background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.20); background: color-mix(in srgb, var(--primary-color) 20%, transparent); }
-          .sb-command-helper { font-size: 12px; opacity: 0.8; margin-top: 2px; }
-          .sb-command-activity-chip-row { display:flex; flex-wrap:wrap; gap:8px; }
-          .sb-command-activity-chip { border: 1px solid var(--divider-color); border-radius: 999px; background: var(--ha-card-background, rgba(0, 0, 0, 0.1)); background: color-mix(in srgb, var(--ha-card-background, transparent) 90%, #000); color: inherit; padding: 6px 12px; cursor: pointer; }
-          .sb-command-activity-chip.active { background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.20); background: color-mix(in srgb, var(--primary-color) 20%, transparent); border-color: var(--primary-color); }
-          .sb-command-action-wrap { display:flex; flex-direction:column; gap:8px; }
-          .sb-command-action-tabs { display:flex; gap:8px; }
-          .sb-command-action-tab { border: 1px solid var(--divider-color); border-radius: 999px; background: var(--ha-card-background, rgba(0, 0, 0, 0.1)); background: color-mix(in srgb, var(--ha-card-background, transparent) 90%, #000); color: inherit; padding: 8px 12px; cursor:pointer; font: inherit; }
-          .sb-command-action-tab.active { border-color: var(--primary-color); background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.18); background: color-mix(in srgb, var(--primary-color) 18%, transparent); }
-          .sb-command-dialog-body ha-textfield,
-          .sb-command-dialog-body ha-selector { width: 100%; }
-          @media (max-width: 760px) {
-            .sb-command-grid { grid-template-columns: 1fr; }
-          }
-          @media (max-width: 700px) {
-            .sb-command-modal { padding: max(env(safe-area-inset-top), 8px) 0 0; align-items: flex-start; }
-            .sb-command-dialog { width: 100%; max-height: 100%; border-radius: 0 0 16px 16px; }
-            .sb-command-dialog-footer { padding-bottom: max(env(safe-area-inset-bottom), 12px); }
-          }
-        `;
-
-// remote-card/src/remote-card-shared.ts
-var CARD_NAME = "Sofabaton Virtual Remote";
-var CARD_VERSION = "0.2.3";
-var KEY_CAPTURE_HELP_URL = "https://github.com/m3tac0de/sofabaton-virtual-remote/blob/main/docs/keycapture.md";
-var LOG_ONCE_KEY = `__${CARD_NAME}_logged__`;
-var AUTOMATION_ASSIST_SESSION_KEY = "__sofabatonAutomationAssistSession__";
-var PREVIEW_ACTIVITY_CACHE_KEY = "__sofabatonPreviewActivityCache__";
-var TYPE = "sofabaton-virtual-remote";
-var EDITOR = "sofabaton-virtual-remote-editor";
-var previewCache = () => {
-  if (typeof window === "undefined") return null;
-  const cache = window[PREVIEW_ACTIVITY_CACHE_KEY];
-  return cache && typeof cache === "object" ? cache : null;
-};
-var readPreviewActivity = (entityId) => {
-  if (!entityId) return null;
-  const cache = previewCache();
-  if (!cache) return null;
-  return cache[String(entityId)] ?? null;
-};
-var writePreviewActivity = (entityId, value) => {
-  if (!entityId || typeof window === "undefined") return;
-  const cache = previewCache() ?? {};
-  cache[String(entityId)] = value == null ? "" : String(value);
-  window[PREVIEW_ACTIVITY_CACHE_KEY] = cache;
-};
-function logPillsOnce() {
-  const win2 = window;
-  if (win2[LOG_ONCE_KEY]) return;
-  win2[LOG_ONCE_KEY] = true;
-  const base = "padding:2px 10px;border-radius:999px;font-weight:700;font-size:12px;line-height:18px;";
-  const red = base + "background:#ef4444;color:#fff;";
-  const green = base + "background:#22c55e;color:#062b12;";
-  const yellow = base + "background:#facc15;color:#111827;";
-  const blue = base + "background:#3b82f6;color:#fff;";
-  const gap = "color:transparent;";
-  console.log(
-    `%cSofabaton%c %c Virtual %c %c  Remote  %c %c   ${CARD_VERSION}   `,
-    red,
-    gap,
-    green,
-    gap,
-    yellow,
-    gap,
-    blue
-  );
-}
-function stableJsonSignature(value) {
-  if (value == null) return "";
-  try {
-    return JSON.stringify(value);
-  } catch (_err) {
-    return String(value);
-  }
-}
-
-// remote-card/src/remote-card-long-press.ts
-var LONG_PRESS_GROUPS = ["volume", "channel", "dpad"];
-var LONG_PRESS_GROUP_FOR_KEY = {
-  volup: "volume",
-  voldn: "volume",
-  chup: "channel",
-  chdn: "channel",
-  up: "dpad",
-  down: "dpad",
-  left: "dpad",
-  right: "dpad"
-};
-function longPressBlock(config) {
-  const block = config?.hold_repeat;
-  return block && typeof block === "object" ? block : {};
-}
-function longPressSettings(config) {
-  const block = longPressBlock(config);
-  const enabled = block.enabled === true;
-  return {
-    enabled,
-    volume: enabled && block.volume !== false,
-    channel: enabled && block.channel !== false,
-    dpad: enabled && block.dpad !== false
-  };
-}
-function longPressGroupForKey(key) {
-  return LONG_PRESS_GROUP_FOR_KEY[String(key ?? "")] ?? null;
-}
-function longPressEnabledForKey(config, key) {
-  const group = longPressGroupForKey(key);
-  if (!group) return false;
-  return longPressSettings(config)[group];
-}
-function longPressSelectedGroups(config) {
-  const settings = longPressSettings(config);
-  return LONG_PRESS_GROUPS.filter((group) => settings[group]);
-}
-function longPressEnabledPatch(enabled) {
-  return enabled ? { enabled: true } : void 0;
-}
-function longPressGroupsPatch(current, selected) {
-  const wanted = new Set(
-    (Array.isArray(selected) ? selected : []).map((value) => String(value)).filter(
-      (value) => LONG_PRESS_GROUPS.includes(value)
-    )
-  );
-  const next = { ...current, enabled: true };
-  for (const group of LONG_PRESS_GROUPS) {
-    if (wanted.has(group)) {
-      delete next[group];
-    } else {
-      next[group] = false;
-    }
-  }
-  return next;
-}
-function hubLongPressBinding(attributes, scopeId, buttonId) {
-  if (scopeId == null || buttonId == null) return null;
-  const scope = Number(scopeId);
-  const button = Number(buttonId);
-  if (!Number.isFinite(scope) || !Number.isFinite(button)) return null;
-  const map = attributes?.long_press_keys;
-  if (!map || typeof map !== "object") return null;
-  const page = map[String(scope)];
-  if (!page || typeof page !== "object" || Array.isArray(page)) return null;
-  const raw = page[String(button)];
-  if (!raw || typeof raw !== "object") return null;
-  const device = Number(raw.device_id);
-  const command = Number(raw.command_id);
-  if (!Number.isFinite(device) || device < 1) return null;
-  if (!Number.isFinite(command) || command < 1) return null;
-  return { device_id: device, command_id: command };
-}
-
-// remote-card/src/editor-sections/expander.ts
-function renderEditorExpander(params) {
-  const toggle = (ev) => {
-    ev.preventDefault();
-    ev.stopPropagation();
-    params.onToggle();
-  };
-  return b2`
-    <div class="sb-exp${params.expanded ? "" : " sb-exp-collapsed"}">
-      <button
-        type="button"
-        class="sb-exp-hdr"
-        aria-expanded=${String(params.expanded)}
-        @click=${toggle}
-      >
-        <div class="sb-exp-hdr-left">
-          <ha-icon icon=${params.icon}></ha-icon>
-          <div class="sb-exp-title">${params.title}</div>
-        </div>
-        <ha-icon
-          class="sb-exp-chevron"
-          icon=${params.expanded ? "mdi:chevron-up" : "mdi:chevron-down"}
-        ></ha-icon>
-      </button>
-      <div class="sb-exp-body">${params.body}</div>
-    </div>
-  `;
-}
-
-// remote-card/src/editor-sections/option-row.ts
-function renderOptionRow(params) {
-  const onSwitchChange = (ev) => {
-    ev.preventDefault();
-    ev.stopPropagation();
-    const target = ev.target;
-    params.onSet(!!target.checked);
-  };
-  const onLabelClick = (ev) => {
-    ev.preventDefault();
-    ev.stopPropagation();
-    params.onSet(!params.checked);
-  };
-  return b2`
-    <div class="sb-opt-row ${params.className ?? ""}">
-      <label class="sb-opt-head">
-        <div class="sb-opt-main">
-          <div class="sb-opt-label-wrap" @click=${onLabelClick}>
-            <span class="sb-opt-label">${params.label}</span>
-            ${params.link ? b2`
-                  <a
-                    class="sb-opt-link"
-                    href=${params.link.href}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    title=${params.link.title}
-                    aria-label=${params.link.ariaLabel}
-                    @click=${(ev) => ev.stopPropagation()}
-                  >
-                    <ha-icon icon="mdi:help-circle-outline"></ha-icon>
-                  </a>
-                ` : A}
-          </div>
-          ${params.description ? b2`<div class="sb-opt-desc">${params.description}</div>` : A}
-        </div>
-        <ha-switch .checked=${params.checked} @change=${onSwitchChange}></ha-switch>
-      </label>
-      ${params.sub ?? A}
-    </div>
-  `;
-}
-function renderFormRow(form, className = "") {
-  return b2`<div class="sb-opt-row sb-opt-row--form ${className}">${form}</div>`;
-}
-
-// remote-card/src/editor-sections/general-options.ts
-var INITIAL_VIEW_FIELD = "open_device";
-var LONG_PRESS_BUTTONS_FIELD = "long_press_buttons";
-var computeSubFormLabel = (schema) => {
-  if (schema.name === INITIAL_VIEW_FIELD) return str().editor.initialView;
-  if (schema.name === LONG_PRESS_BUTTONS_FIELD) return "";
-  return schema.name;
-};
-var computeSubFormHelper = (schema) => schema.name === INITIAL_VIEW_FIELD ? str().editor.initialViewHelper : void 0;
-function longPressGroupLabel(group) {
-  if (group === "volume") return str().editor.volume;
-  if (group === "channel") return str().editor.channel;
-  if (group === "dpad") return str().groups.dpad || group;
-  return group;
-}
-function renderGeneralOptionsSection(params) {
-  const keyCaptureRow = renderOptionRow({
-    className: "sb-opt-key-capture",
-    label: str().editor.keyCapture,
-    description: str().editor.keyCaptureDescription,
-    checked: params.automationAssistEnabled,
-    onSet: params.onSetAutomationAssist,
-    link: {
-      href: KEY_CAPTURE_HELP_URL,
-      title: str().editor.keyCaptureLearnMore,
-      ariaLabel: str().editor.keyCaptureDocsAria
-    }
-  });
-  const deviceMode = params.deviceMode;
-  const deviceModeRow = deviceMode ? renderOptionRow({
-    className: "sb-opt-device-mode",
-    label: str().editor.enableDeviceMode,
-    description: str().editor.deviceModeDescription,
-    checked: deviceMode.enabled,
-    onSet: deviceMode.onSetEnabled,
-    sub: deviceMode.enabled ? b2`
-              <div class="sb-opt-sub">
-                <ha-form
-                  .hass=${params.hass}
-                  .schema=${[
-      {
-        name: INITIAL_VIEW_FIELD,
-        required: true,
-        selector: {
-          select: { mode: "dropdown", options: deviceMode.options }
-        }
-      }
-    ]}
-                  .data=${{ [INITIAL_VIEW_FIELD]: deviceMode.openDevice }}
-                  .computeLabel=${computeSubFormLabel}
-                  .computeHelper=${computeSubFormHelper}
-                  @value-changed=${(ev) => {
-      ev.stopPropagation();
-      deviceMode.onSetOpenDevice(
-        String(ev.detail?.value?.[INITIAL_VIEW_FIELD] ?? "")
-      );
-    }}
-                ></ha-form>
-              </div>
-            ` : A
-  }) : A;
-  const longPress = params.longPress;
-  const longPressRow = renderOptionRow({
-    className: "sb-opt-long-press",
-    label: str().editor.longPress,
-    description: str().editor.longPressDescription,
-    checked: longPress.enabled,
-    onSet: longPress.onSetEnabled,
-    sub: longPress.enabled ? b2`
-          <div class="sb-opt-sub sb-opt-sub--list">
-            <div class="sb-opt-sub-label">${str().editor.longPressButtons}</div>
-            <ha-form
-              .hass=${params.hass}
-              .schema=${[
-      {
-        name: LONG_PRESS_BUTTONS_FIELD,
-        selector: {
-          select: {
-            multiple: true,
-            mode: "list",
-            options: LONG_PRESS_GROUPS.map((group) => ({
-              value: group,
-              label: longPressGroupLabel(group)
-            }))
-          }
-        }
-      }
-    ]}
-              .data=${{ [LONG_PRESS_BUTTONS_FIELD]: longPress.selected }}
-              .computeLabel=${computeSubFormLabel}
-              @value-changed=${(ev) => {
-      ev.stopPropagation();
-      const raw = ev.detail?.value?.[LONG_PRESS_BUTTONS_FIELD];
-      longPress.onSetSelected(
-        Array.isArray(raw) ? raw.map((value) => String(value)) : []
-      );
-    }}
-            ></ha-form>
-          </div>
-        ` : A
-  });
-  const body = b2`
-    <div class="sb-opt-list">${keyCaptureRow}${deviceModeRow}${longPressRow}</div>
-  `;
-  return renderEditorExpander({
-    expanded: params.expanded,
-    icon: "mdi:tune",
-    title: str().editor.generalOptionsTitle,
-    onToggle: params.onToggleExpanded,
-    body
-  });
-}
-
-// remote-card/src/editor-sections/shortcuts.ts
-var SHORTCUT_ICON_FIELD = "icon";
-var SHORTCUT_COMMAND_FIELD = "command";
-function slotLabel(slot) {
-  if (slot === "left") return str().editor.shortcutSlotLeft;
-  if (slot === "middle") return str().editor.shortcutSlotMiddle;
-  return str().editor.shortcutSlotRight;
-}
-var computeShortcutFieldLabel = (schema) => {
-  if (schema.name === SHORTCUT_ICON_FIELD) return str().editor.shortcutIcon;
-  if (schema.name === SHORTCUT_COMMAND_FIELD) return str().editor.shortcutCommand;
-  return schema.name;
-};
-function renderShortcutsSlotStrip(params) {
-  return b2`
-    <div class="sb-shortcut-strip">
-      ${params.slots.map((view) => {
-    const isOpen = params.openSlot === view.slot;
-    const configured = view.icon != null;
-    const className = [
-      "sb-shortcut-slot",
-      ...configured ? ["is-configured"] : [],
-      ...isOpen ? ["is-open"] : []
-    ].join(" ");
-    return b2`
-          <button
-            type="button"
-            class=${className}
-            aria-label=${slotLabel(view.slot)}
-            aria-expanded=${isOpen ? "true" : "false"}
-            @click=${(ev) => {
-      ev.preventDefault();
-      ev.stopPropagation();
-      params.onToggleSlot(view.slot);
-    }}
-          >
-            ${configured ? b2`<ha-icon icon=${view.icon}></ha-icon>` : A}
-          </button>
-        `;
-  })}
-    </div>
-  `;
-}
-function renderShortcutsRowPanel(params) {
-  if (params.commandsStatus === "loading") {
-    return b2`
-      <div class="sb-shortcut-panel">
-        <div class="sb-shortcut-note">${str().editor.shortcutsCommandsLoading}</div>
-      </div>
-    `;
-  }
-  if (params.commandsStatus === "cache_miss") {
-    return b2`
-      <div class="sb-shortcut-panel">
-        <div class="sb-shortcut-note">${str().editor.shortcutsCommandsUnavailable}</div>
-      </div>
-    `;
-  }
-  if (params.commandsStatus === "error") {
-    return b2`
-      <div class="sb-shortcut-panel">
-        <div class="sb-shortcut-note">${str().editor.shortcutsCommandsError}</div>
-      </div>
-    `;
-  }
-  const options = params.commands.map((command) => ({
-    value: String(command.command_id),
-    label: command.name
-  }));
-  const draftCommand = params.draftCommandId != null ? String(params.draftCommandId) : "";
-  if (draftCommand && !options.some((option) => option.value === draftCommand)) {
-    options.push({
-      value: draftCommand,
-      label: str().editor.shortcutCommandMissing(draftCommand)
-    });
-  }
-  return b2`
-    <div class="sb-shortcut-panel">
-      <ha-form
-        .hass=${params.hass}
-        .schema=${[
-    {
-      name: SHORTCUT_ICON_FIELD,
-      required: true,
-      selector: { icon: {} }
-    },
-    {
-      name: SHORTCUT_COMMAND_FIELD,
-      required: true,
-      selector: { select: { mode: "dropdown", options } }
-    }
-  ]}
-        .data=${{
-    [SHORTCUT_ICON_FIELD]: params.draftIcon,
-    [SHORTCUT_COMMAND_FIELD]: draftCommand
-  }}
-        .computeLabel=${computeShortcutFieldLabel}
-        @value-changed=${(ev) => {
-    ev.stopPropagation();
-    const value = ev.detail?.value || {};
-    const icon = String(value[SHORTCUT_ICON_FIELD] ?? "");
-    const rawCommand = String(value[SHORTCUT_COMMAND_FIELD] ?? "");
-    const commandId = rawCommand !== "" && Number.isFinite(Number(rawCommand)) ? Number(rawCommand) : null;
-    params.onDraftChanged(icon, commandId);
-  }}
-      ></ha-form>
-      <div class="sb-shortcut-panel-footer">
-        <button
-          type="button"
-          class="sb-reset-btn"
-          @click=${(ev) => {
-    ev.preventDefault();
-    ev.stopPropagation();
-    params.onReset(params.openSlot);
-  }}
-        >
-          ${str().editor.shortcutReset}
-        </button>
-      </div>
-    </div>
-  `;
-}
-
-// remote-card/src/editor-sections/styling-options.ts
-var computeEditorFieldLabel = (schema) => str().editor.fieldLabels[schema.name] || schema.name;
-var DEFAULT_BACKGROUND_OVERRIDE = [255, 255, 255];
-function renderStylingOptionsSection(params) {
-  const config = params.config;
-  const overrideOn = !!params.config.use_background_override || !!params.config.background_override;
-  const onFormValueChanged = (ev) => {
-    ev.stopPropagation();
-    params.onValueChanged(ev.detail.value);
-  };
-  const fieldForm = (schema, data) => b2`
-    <ha-form
-      .hass=${params.hass}
-      .schema=${[schema]}
-      .data=${data}
-      .computeLabel=${computeEditorFieldLabel}
-      @value-changed=${onFormValueChanged}
-    ></ha-form>
-  `;
-  const themeRow = renderFormRow(
-    fieldForm({ name: "theme", selector: { theme: {} } }, { theme: config.theme || "" }),
-    "sb-opt-theme"
-  );
-  const maxWidthRow = renderFormRow(
-    fieldForm(
-      {
-        name: "max_width",
-        selector: {
-          number: { min: 230, max: 1200, step: 5, unit_of_measurement: "px" }
-        }
-      },
-      { max_width: config.max_width ?? 360 }
-    ),
-    "sb-opt-max-width"
-  );
-  const resolvedKeyStyle = keyStyleFromConfig(config);
-  const panelsOn = tintedPanelsFromConfig(config);
-  const legacyPanel = config.key_style === "panel";
-  const onKeyStyleChanged = (ev) => {
-    ev.stopPropagation();
-    const value = { ...ev.detail.value };
-    if (legacyPanel) value.tinted_panels = true;
-    params.onValueChanged(value);
-  };
-  const keyStyleRow = renderFormRow(
-    b2`
-      <ha-form
-        .hass=${params.hass}
-        .schema=${[
-      {
-        name: "key_style",
-        required: true,
-        selector: {
-          select: {
-            mode: "dropdown",
-            options: [
-              { value: "flat", label: str().editor.keyStyleFlat },
-              { value: "tinted", label: str().editor.keyStyleTinted },
-              { value: "elevated", label: str().editor.keyStyleElevated },
-              { value: "glossy", label: str().editor.keyStyleGlossy }
-            ]
-          }
-        }
-      }
-    ]}
-        .data=${{ key_style: resolvedKeyStyle }}
-        .computeLabel=${computeEditorFieldLabel}
-        @value-changed=${onKeyStyleChanged}
-      ></ha-form>
-    `,
-    "sb-opt-key-style"
-  );
-  const panelsRow = renderOptionRow({
-    className: "sb-opt-tinted-panels",
-    label: str().editor.tintedPanels,
-    description: str().editor.tintedPanelsDescription,
-    checked: panelsOn,
-    onSet: (enabled) => {
-      params.onValueChanged(
-        legacyPanel ? { key_style: resolvedKeyStyle, tinted_panels: enabled } : { tinted_panels: enabled }
-      );
-    }
-  });
-  const backgroundRow = renderOptionRow({
-    className: "sb-opt-background",
-    label: str().editor.fieldLabels.use_background_override,
-    checked: overrideOn,
-    onSet: (enabled) => {
-      params.onValueChanged(
-        enabled ? {
-          use_background_override: true,
-          background_override: config.background_override ?? DEFAULT_BACKGROUND_OVERRIDE
-        } : { use_background_override: false }
-      );
-    },
-    sub: overrideOn ? b2`
-          <div class="sb-opt-sub">
-            ${fieldForm(
-      { name: "background_override", selector: { color_rgb: {} } },
-      { background_override: config.background_override ?? DEFAULT_BACKGROUND_OVERRIDE }
-    )}
-          </div>
-        ` : A
-  });
-  const body = b2`<div class="sb-opt-list">${themeRow}${maxWidthRow}${keyStyleRow}${panelsRow}${backgroundRow}</div>`;
-  return renderEditorExpander({
-    expanded: params.expanded,
-    icon: "mdi:palette",
-    title: str().editor.stylingOptions,
-    onToggle: params.onToggleExpanded,
-    body
-  });
-}
-
-// node_modules/lit-html/static.js
-var a3 = /* @__PURE__ */ Symbol.for("");
-var o5 = (t5) => {
-  if (t5?.r === a3) return t5?._$litStatic$;
-};
-var s4 = (t5) => ({ _$litStatic$: t5, r: a3 });
-var l3 = /* @__PURE__ */ new Map();
-var n4 = (t5) => (r6, ...e6) => {
-  const a4 = e6.length;
-  let s7, i7;
-  const n7 = [], u6 = [];
-  let c7, $3 = 0, f4 = false;
-  for (; $3 < a4; ) {
-    for (c7 = r6[$3]; $3 < a4 && void 0 !== (i7 = e6[$3], s7 = o5(i7)); ) c7 += s7 + r6[++$3], f4 = true;
-    $3 !== a4 && u6.push(i7), n7.push(c7), $3++;
-  }
-  if ($3 === a4 && n7.push(r6[a4]), f4) {
-    const t6 = n7.join("$$lit$$");
-    void 0 === (r6 = l3.get(t6)) && (n7.raw = n7, l3.set(t6, r6 = n7)), e6 = u6;
-  }
-  return t5(r6, ...e6);
-};
-var u3 = n4(b2);
-var c4 = n4(w);
-var $2 = n4(T);
-
-// node_modules/lit-html/directive-helpers.js
-var { I: t3 } = j;
-var i5 = (o8) => o8;
-var r4 = (o8) => void 0 === o8.strings;
-var s5 = () => document.createComment("");
-var v2 = (o8, n7, e6) => {
-  const l4 = o8._$AA.parentNode, d3 = void 0 === n7 ? o8._$AB : n7._$AA;
-  if (void 0 === e6) {
-    const i7 = l4.insertBefore(s5(), d3), n8 = l4.insertBefore(s5(), d3);
-    e6 = new t3(i7, n8, o8, o8.options);
-  } else {
-    const t5 = e6._$AB.nextSibling, n8 = e6._$AM, c7 = n8 !== o8;
-    if (c7) {
-      let t6;
-      e6._$AQ?.(o8), e6._$AM = o8, void 0 !== e6._$AP && (t6 = o8._$AU) !== n8._$AU && e6._$AP(t6);
-    }
-    if (t5 !== d3 || c7) {
-      let o9 = e6._$AA;
-      for (; o9 !== t5; ) {
-        const t6 = i5(o9).nextSibling;
-        i5(l4).insertBefore(o9, d3), o9 = t6;
-      }
-    }
-  }
-  return e6;
-};
-var u4 = (o8, t5, i7 = o8) => (o8._$AI(t5, i7), o8);
-var m2 = {};
-var p3 = (o8, t5 = m2) => o8._$AH = t5;
-var M2 = (o8) => o8._$AH;
-var h3 = (o8) => {
-  o8._$AR(), o8._$AA.remove();
-};
-
-// node_modules/lit-html/directive.js
-var t4 = { ATTRIBUTE: 1, CHILD: 2, PROPERTY: 3, BOOLEAN_ATTRIBUTE: 4, EVENT: 5, ELEMENT: 6 };
-var e4 = (t5) => (...e6) => ({ _$litDirective$: t5, values: e6 });
-var i6 = class {
-  constructor(t5) {
-  }
-  get _$AU() {
-    return this._$AM._$AU;
-  }
-  _$AT(t5, e6, i7) {
-    this._$Ct = t5, this._$AM = e6, this._$Ci = i7;
-  }
-  _$AS(t5, e6) {
-    return this.update(t5, e6);
-  }
-  update(t5, e6) {
-    return this.render(...e6);
-  }
-};
-
-// node_modules/lit-html/async-directive.js
-var s6 = (i7, t5) => {
-  const e6 = i7._$AN;
-  if (void 0 === e6) return false;
-  for (const i8 of e6) i8._$AO?.(t5, false), s6(i8, t5);
-  return true;
-};
-var o6 = (i7) => {
-  let t5, e6;
-  do {
-    if (void 0 === (t5 = i7._$AM)) break;
-    e6 = t5._$AN, e6.delete(i7), i7 = t5;
-  } while (0 === e6?.size);
-};
-var r5 = (i7) => {
-  for (let t5; t5 = i7._$AM; i7 = t5) {
-    let e6 = t5._$AN;
-    if (void 0 === e6) t5._$AN = e6 = /* @__PURE__ */ new Set();
-    else if (e6.has(i7)) break;
-    e6.add(i7), c5(t5);
-  }
-};
-function h4(i7) {
-  void 0 !== this._$AN ? (o6(this), this._$AM = i7, r5(this)) : this._$AM = i7;
-}
-function n5(i7, t5 = false, e6 = 0) {
-  const r6 = this._$AH, h6 = this._$AN;
-  if (void 0 !== h6 && 0 !== h6.size) if (t5) if (Array.isArray(r6)) for (let i8 = e6; i8 < r6.length; i8++) s6(r6[i8], false), o6(r6[i8]);
-  else null != r6 && (s6(r6, false), o6(r6));
-  else s6(this, i7);
-}
-var c5 = (i7) => {
-  i7.type == t4.CHILD && (i7._$AP ?? (i7._$AP = n5), i7._$AQ ?? (i7._$AQ = h4));
-};
-var f3 = class extends i6 {
-  constructor() {
-    super(...arguments), this._$AN = void 0;
-  }
-  _$AT(i7, t5, e6) {
-    super._$AT(i7, t5, e6), r5(this), this.isConnected = i7._$AU;
-  }
-  _$AO(i7, t5 = true) {
-    i7 !== this.isConnected && (this.isConnected = i7, i7 ? this.reconnected?.() : this.disconnected?.()), t5 && (s6(this, i7), o6(this));
-  }
-  setValue(t5) {
-    if (r4(this._$Ct)) this._$Ct._$AI(t5, this);
-    else {
-      const i7 = [...this._$Ct._$AH];
-      i7[this._$Ci] = t5, this._$Ct._$AI(i7, this, 0);
-    }
-  }
-  disconnected() {
-  }
-  reconnected() {
-  }
-};
-
-// node_modules/lit-html/directives/ref.js
-var e5 = () => new h5();
-var h5 = class {
-};
-var o7 = /* @__PURE__ */ new WeakMap();
-var n6 = e4(class extends f3 {
-  render(i7) {
-    return A;
-  }
-  update(i7, [s7]) {
-    const e6 = s7 !== this.G;
-    return e6 && void 0 !== this.G && this.rt(void 0), (e6 || this.lt !== this.ct) && (this.G = s7, this.ht = i7.options?.host, this.rt(this.ct = i7.element)), A;
-  }
-  rt(t5) {
-    if (this.isConnected || (t5 = void 0), "function" == typeof this.G) {
-      const i7 = this.ht ?? globalThis;
-      let s7 = o7.get(i7);
-      void 0 === s7 && (s7 = /* @__PURE__ */ new WeakMap(), o7.set(i7, s7)), void 0 !== s7.get(this.G) && this.G.call(this.ht, void 0), s7.set(this.G, t5), void 0 !== t5 && this.G.call(this.ht, t5);
-    } else this.G.value = t5;
-  }
-  get lt() {
-    return "function" == typeof this.G ? o7.get(this.ht ?? globalThis)?.get(this.G) : this.G?.value;
-  }
-  disconnected() {
-    this.lt === this.ct && this.rt(void 0);
-  }
-  reconnected() {
-    this.rt(this.ct);
-  }
-});
-
-// remote-card/src/editor-sections/group-order.ts
-var stopEvent = (ev) => {
-  ev.preventDefault();
-  ev.stopPropagation();
-};
-var containSortableEvent = (ev) => {
-  ev.stopPropagation();
-  if (typeof ev.stopImmediatePropagation === "function") {
-    ev.stopImmediatePropagation();
-  }
-};
-var containSelectCloseEvents = (el) => {
-  if (!el) return;
-  const flagged = el;
-  if (flagged.__sbCloseContained) return;
-  flagged.__sbCloseContained = true;
-  selectCloseEvents().forEach((eventName) => {
-    el.addEventListener(eventName, (ev) => ev.stopPropagation());
-  });
-};
-function renderSwitchItem(text, checked, onSet, disabled = false) {
-  const onChange = (ev) => {
-    stopEvent(ev);
-    if (disabled) return;
-    const target = ev.target;
-    onSet(!!target.checked);
-  };
-  return b2`
-    <div class="sb-layout-switch-item${disabled ? " is-disabled" : ""}">
-      <ha-switch .checked=${checked} .disabled=${disabled} @change=${onChange}></ha-switch>
-      <div class="sb-layout-switch-label">${text}</div>
-    </div>
-  `;
-}
-var emptySlot = b2`
-  <div class="sb-layout-switch-item sb-layout-switch-item-empty" aria-hidden="true"></div>
-`;
-function renderIconButton(icon, aria, disabled, onClick) {
-  return b2`
-    <button
-      type="button"
-      class="sb-icon-btn"
-      .disabled=${disabled}
-      aria-label=${aria}
-      @click=${(ev) => {
-    stopEvent(ev);
-    if (disabled) return;
-    onClick();
-  }}
-    >
-      <ha-icon icon=${icon}></ha-icon>
-    </button>
-  `;
-}
-function renderGroupOrderSection(params) {
-  const selectionValues = new Set(params.selectionOptions.map((o8) => o8.value));
-  const handleLayoutSelect = (ev) => {
-    ev.preventDefault();
-    ev.stopPropagation();
-    ev.stopImmediatePropagation?.();
-    const detailValue = ev.detail?.value;
-    const targetValue = ev.target?.value;
-    const selected = detailValue ?? targetValue ?? "";
-    params.onSelectLayout(selectionValues.has(selected) ? selected : "default");
-  };
-  const itemTag = s4(selectItemTagName());
-  const layoutSelect = b2`
-    <ha-select
-      .fixedMenuPosition=${true}
-      .label=${str().editor.layoutSelectLabel}
-      .hass=${params.hass}
-      .value=${selectValueCompat(params.selection, params.selectionOptions)}
-      @selected=${handleLayoutSelect}
-      @change=${handleLayoutSelect}
-      ${n6(containSelectCloseEvents)}
-    >
-      ${params.selectionOptions.map(
-    (option) => u3`
-          <${itemTag}
-            class=${option.kind === "default" ? "sb-option-default" : ""}
-            .value=${option.value}
-          >${option.label}</${itemTag}>
-        `
-  )}
-    </ha-select>
-  `;
-  const stepButton = (icon, delta) => {
-    const disabled = !params.asRows || delta < 0 && params.visibleRows <= MIN_ROW_VISIBLE_ROWS || delta > 0 && params.visibleRows >= MAX_ROW_VISIBLE_ROWS;
-    return b2`
-      <button
-        type="button"
-        class="sb-icon-btn"
-        .disabled=${disabled}
-        @click=${(ev) => {
-      stopEvent(ev);
-      if (disabled) return;
-      const next = Math.max(
-        MIN_ROW_VISIBLE_ROWS,
-        Math.min(MAX_ROW_VISIBLE_ROWS, params.visibleRows + delta)
-      );
-      if (next === params.visibleRows) return;
-      params.onSetMfRowVisibleRows(next);
-    }}
-      >
-        <ha-icon icon=${icon}></ha-icon>
-      </button>
-    `;
-  };
-  const mfRow = b2`
-    <div class="sb-layout-row sb-mf-rows-row">
-      <div class="sb-layout-switch-item">
-        <ha-switch
-          .checked=${params.asRows}
-          @change=${(ev) => {
-    stopEvent(ev);
-    const target = ev.target;
-    params.onSetMfAsRows(!!target.checked);
-  }}
-        ></ha-switch>
-        <div class="sb-layout-switch-label">
-          ${params.isDeviceSelection ? str().editor.commandsAsRows : str().editor.macrosFavoritesAsRows}
-        </div>
-      </div>
-      <div
-        class="sb-layout-switch-item sb-mf-rows-stepper-item${params.asRows ? "" : " is-disabled"}"
-      >
-        <div class="sb-layout-switch-label">${str().editor.visibleRows}</div>
-        <div class="sb-rows-stepper">
-          ${stepButton("mdi:minus", -1)}
-          <div class="sb-rows-value">${String(params.visibleRows)}</div>
-          ${stepButton("mdi:plus", 1)}
-        </div>
-      </div>
-    </div>
-  `;
-  const moveControl = (key, index) => {
-    if (params.sortableReady) {
-      return b2`
-        <div class="sb-drag-handle" aria-hidden="true">
-          <ha-icon icon="mdi:drag-vertical-variant"></ha-icon>
-        </div>
-      `;
-    }
-    return b2`
-      <div class="sb-move-wrap">
-        ${renderIconButton(
-      "mdi:chevron-up",
-      str().editor.moveGroupUp(params.groupLabel(key)),
-      index === 0,
-      () => params.onMoveGroupByKey(key, -1)
-    )}
-        ${renderIconButton(
-      "mdi:chevron-down",
-      str().editor.moveGroupDown(params.groupLabel(key)),
-      index === params.visibleOrder.length - 1,
-      () => params.onMoveGroupByKey(key, 1)
-    )}
-      </div>
-    `;
-  };
-  const orderRow = (key, index) => {
-    let cells = A;
-    if (key === "activity" && params.showDeviceModeSwitch) {
-      const activityOn = params.isGroupEnabled(key);
-      cells = b2`
-        ${renderSwitchItem(
-        params.groupLabel(key),
-        activityOn,
-        (val) => params.onSetGroupEnabled(key, val)
-      )}
-        ${renderSwitchItem(
-        str().editor.modeToggle,
-        activityOn && params.deviceModeEnabled,
-        params.onSetDeviceMode,
-        !activityOn
-      )}
-      `;
-    } else if (params.isDeviceSelection && (key === "macro_favorites" || key === "macros_row")) {
-      cells = b2`
-        ${renderSwitchItem(str().editor.commands, params.commandsEnabled, params.onSetCommands)}
-        ${renderSwitchItem(str().editor.power, params.powerEnabled, params.onSetPower)}
-      `;
-    } else if (key === "macro_favorites") {
-      cells = b2`
-        ${renderSwitchItem(str().editor.macros, params.macroEnabled, params.onSetMacro)}
-        ${renderSwitchItem(str().editor.favorites, params.favoritesEnabled, params.onSetFavorites)}
-      `;
-    } else if (key === "macros_row") {
-      cells = b2`
-        ${renderSwitchItem(str().editor.macros, params.macroEnabled, params.onSetMacro)}
-        ${emptySlot}
-      `;
-    } else if (key === "favorites_row") {
-      cells = b2`
-        ${renderSwitchItem(str().editor.favorites, params.favoritesEnabled, params.onSetFavorites)}
-        ${emptySlot}
-      `;
-    } else if (key === "mid") {
-      cells = b2`
-        ${renderSwitchItem(str().editor.volume, params.volumeEnabled, params.onSetVolume)}
-        ${renderSwitchItem(str().editor.channel, params.channelEnabled, params.onSetChannel)}
-      `;
-    } else if (key === "media") {
-      cells = b2`
-        ${renderSwitchItem(str().editor.mediaControls, params.mediaEnabled, params.onSetMedia)}
-        ${params.isEditorX2 ? renderSwitchItem(str().editor.dvr, params.dvrEnabled, params.onSetDvr) : emptySlot}
-      `;
-    } else if (key === "shortcuts") {
-      cells = b2`
-        ${renderSwitchItem(
-        params.groupLabel(key),
-        params.isGroupEnabled(key),
-        (val) => params.onSetGroupEnabled(key, val)
-      )}
-        ${params.shortcutsStrip === A ? emptySlot : params.shortcutsStrip}
-      `;
-      return b2`
-        <div class="sb-layout-row sb-layout-row-order">
-          ${cells}${moveControl(key, index)}${params.shortcutsPanel}
-        </div>
-      `;
-    } else {
-      cells = b2`
-        ${renderSwitchItem(
-        params.groupLabel(key),
-        params.isGroupEnabled(key),
-        (val) => params.onSetGroupEnabled(key, val)
-      )}
-        ${emptySlot}
-      `;
-    }
-    return b2`
-      <div class="sb-layout-row sb-layout-row-order">${cells}${moveControl(key, index)}</div>
-    `;
-  };
-  const rowsHost = b2`
-    <div class="sb-layout-rows">${params.visibleOrder.map(orderRow)}</div>
-  `;
-  const rows = params.sortableReady ? b2`
-        <ha-sortable
-          draggable-selector=".sb-layout-row-order"
-          handle-selector=".sb-drag-handle"
-          animation="180"
-          @item-added=${containSortableEvent}
-          @item-removed=${containSortableEvent}
-          @drag-start=${containSortableEvent}
-          @drag-end=${containSortableEvent}
-          @item-moved=${(ev) => {
-    containSortableEvent(ev);
-    const oldIndex = Number(ev.detail?.oldIndex);
-    const newIndex = Number(ev.detail?.newIndex);
-    if (!Number.isInteger(oldIndex) || !Number.isInteger(newIndex)) return;
-    params.onMoveGroupByVisibleIndex(oldIndex, newIndex);
-  }}
-        >
-          ${rowsHost}
-        </ha-sortable>
-      ` : rowsHost;
-  const body = b2`
-    <div class="sb-layout-card">
-      <div class="sb-layout-row">
-        <div class="sb-layout-actions sb-layout-actions-full">${layoutSelect}</div>
-      </div>
-      <div class="sb-layout-note">${params.selectionNote}</div>
-      ${rows}
-      ${mfRow}
-      <div class="sb-layout-footer">
-        <button
-          type="button"
-          class="sb-reset-btn"
-          @click=${(ev) => {
-    stopEvent(ev);
-    params.onResetGroupOrder();
-  }}
-        >
-          ${str().editor.resetDefaultLayout}
-        </button>
-      </div>
-    </div>
-  `;
-  return renderEditorExpander({
-    expanded: params.expanded,
-    icon: "mdi:sort",
-    title: str().editor.layoutOptions,
-    onToggle: params.onToggleExpanded,
-    body
-  });
-}
-
-// remote-card/src/remote-card-editor-element.ts
-var CARD_SETTING_DEFAULTS = {
-  theme: "",
-  max_width: 360,
-  shrink: 0,
-  show_automation_assist: false,
-  background_override: null,
-  key_style: "flat",
-  tinted_panels: false
-};
-var ENTITY_FORM_SCHEMA = [
-  {
-    name: "entity",
-    selector: {
-      entity: {
-        filter: [
-          { domain: "remote", integration: "sofabaton_x1s" },
-          { domain: "remote", integration: "sofabaton_hub" }
-        ]
-      }
-    },
-    required: true
-  }
-];
-var OPEN_WITH_CURRENT = "current";
-var SofabatonRemoteCardEditor = class extends i4 {
-  constructor() {
-    super(...arguments);
-    this._hass = null;
-    this._config = { entity: "" };
-    this._configInitialized = false;
-    this._previewActivity = null;
-    this._layoutSelection = "default";
-    this._generalExpanded = false;
-    this._stylingExpanded = false;
-    this._layoutExpanded = false;
-    this._editorIntegrationDomain = null;
-    this._editorIntegrationEntityId = null;
-    this._editorIntegrationDetectingFor = null;
-    this._sortableDefinePending = false;
-    // Shortcuts slot editor state (shortcuts-row-plan.md §4.2/§4.3). The open
-    // slot's draft lives here, NOT in config: a slot is written only once both
-    // icon and command are valid, so config never holds a half-configured slot.
-    this._shortcutOpenSlot = null;
-    this._shortcutDraftIcon = "";
-    this._shortcutDraftCommand = null;
-    /** Editor-lifetime keymap cache, keyed by device id. */
-    this._editorKeymaps = {};
-  }
-  // ---------- shortcuts (device selections only) ----------
-  /**
-   * Fetch one device's commands for the shortcut command select — the same
-   * cache-first WS the card uses; the editor never invalidates it.
-   */
-  _ensureEditorKeymap(deviceId) {
-    const key = String(deviceId);
-    if (this._editorKeymaps[key]) return;
-    const entityId = String(this._config?.entity || "");
-    const remoteState = entityId ? this._hass?.states?.[entityId] : null;
-    const entryId = String(
-      remoteState?.attributes?.entry_id ?? ""
-    );
-    if (!entryId || !this._hass?.callWS) return;
-    this._editorKeymaps[key] = { status: "loading", commands: [] };
-    void this._hass.callWS({
-      type: "sofabaton_x1s/device/keymap",
-      entry_id: entryId,
-      device_id: deviceId
-    }).then((response) => {
-      const keymap = response?.keymap;
-      if (!keymap) {
-        this._editorKeymaps[key] = { status: "cache_miss", commands: [] };
-        return;
-      }
-      const commands = (Array.isArray(keymap.commands) ? keymap.commands : []).map((command) => ({
-        command_id: Number(command?.command_id),
-        name: String(command?.name ?? "")
-      })).filter((command) => Number.isFinite(command.command_id) && command.name).sort((a4, b3) => a4.name.localeCompare(b3.name));
-      this._editorKeymaps[key] = { status: "ready", commands };
-    }).catch(() => {
-      this._editorKeymaps[key] = { status: "error", commands: [] };
-    }).then(() => this.requestUpdate());
-  }
-  _clearShortcutPanel() {
-    this._shortcutOpenSlot = null;
-    this._shortcutDraftIcon = "";
-    this._shortcutDraftCommand = null;
-  }
-  _toggleShortcutSlot(slot) {
-    if (this._shortcutOpenSlot === slot) {
-      this._clearShortcutPanel();
-    } else {
-      this._shortcutOpenSlot = slot;
-      const deviceId = parseDeviceLayoutKey(this._layoutSelectionKey());
-      const stored = deviceShortcutsFromConfig(this._config, deviceId)[slot];
-      this._shortcutDraftIcon = stored?.icon ?? "";
-      this._shortcutDraftCommand = stored?.command_id ?? null;
-    }
-    this.requestUpdate();
-  }
-  /**
-   * Draft edit: config is written (and the preview updates) the moment both
-   * fields are valid; an incomplete draft leaves the stored slot untouched.
-   */
-  _onShortcutDraftChanged(icon, commandId) {
-    this._shortcutDraftIcon = icon;
-    this._shortcutDraftCommand = commandId;
-    const deviceId = parseDeviceLayoutKey(this._layoutSelectionKey());
-    const slot = this._shortcutOpenSlot;
-    if (deviceId != null && slot && icon.trim() && commandId != null) {
-      const { nextConfig } = applyShortcutSlotPatch(this._config, deviceId, slot, {
-        icon: icon.trim(),
-        command_id: commandId
-      });
-      if (JSON.stringify(nextConfig) !== JSON.stringify(this._config)) {
-        this._config = nextConfig;
-        this._fireChanged();
-      }
-    }
-    this.requestUpdate();
-  }
-  _resetShortcutSlot(slot) {
-    const deviceId = parseDeviceLayoutKey(this._layoutSelectionKey());
-    if (deviceId == null) return;
-    const { nextConfig } = applyShortcutSlotPatch(this._config, deviceId, slot, null);
-    this._config = nextConfig;
-    this._shortcutDraftIcon = "";
-    this._shortcutDraftCommand = null;
-    this._fireChanged();
-    this.requestUpdate();
-  }
-  // ---------- integration detection (x1s vs hub) ----------
-  async _ensureEditorIntegration() {
-    if (!this._hass?.callWS || !this._config?.entity) return;
-    const entityId = String(this._config.entity);
-    if (this._editorIntegrationEntityId === entityId && this._editorIntegrationDomain)
-      return;
-    if (this._editorIntegrationDetectingFor === entityId) return;
-    this._editorIntegrationDetectingFor = entityId;
-    try {
-      const entry = await this._hass.callWS({
-        type: "config/entity_registry/get",
-        entity_id: entityId
-      });
-      this._editorIntegrationDomain = String(entry?.platform || "");
-      this._editorIntegrationEntityId = entityId;
-    } catch (e6) {
-      this._editorIntegrationDomain = null;
-      this._editorIntegrationEntityId = entityId;
-    } finally {
-      this._editorIntegrationDetectingFor = null;
-    }
-    this.requestUpdate();
-  }
-  _isHubIntegrationForEditor() {
-    return String(this._editorIntegrationDomain || "") === "sofabaton_hub";
-  }
-  /**
-   * Positive x1s check for every device-mode affordance: an unknown or
-   * undetected integration gets NO device UI (leakage prevention), not just
-   * the official hub integration.
-   */
-  _isX1sIntegrationForEditor() {
-    return String(this._editorIntegrationDomain || "") === "sofabaton_x1s";
-  }
-  _deviceModeEnabled() {
-    return deviceModeEnabledInConfig(this._config);
-  }
-  /** Write back the device_mode block, dropping it entirely when empty. */
-  _withDeviceModeBlock(mutate) {
-    const next = { ...this._config };
-    const block = { ...next.device_mode || {} };
-    mutate(block);
-    if (Object.keys(block).length) {
-      next.device_mode = block;
-    } else {
-      delete next.device_mode;
-    }
-    return next;
-  }
-  _setDeviceModeEnabled(enabled) {
-    this._config = this._withDeviceModeBlock((block) => {
-      if (enabled) {
-        delete block.enabled;
-      } else {
-        block.enabled = false;
-        delete block.open_device;
-      }
-    });
-    if (!enabled && isDeviceLayoutKey(this._layoutSelection)) {
-      this._layoutSelection = "default";
-      this._setPreviewActivityForSelection("default");
-    }
-    this._fireChanged();
-    this.requestUpdate();
-  }
-  _setOpenDevice(value) {
-    if (value !== "" && !Number.isFinite(Number(value))) return;
-    const next = this._withDeviceModeBlock((block) => {
-      if (value === "") {
-        delete block.open_device;
-      } else {
-        block.open_device = Number(value);
-      }
-    });
-    if (JSON.stringify(next) === JSON.stringify(this._config)) return;
-    this._config = next;
-    this._fireChanged();
-    this.requestUpdate();
-  }
-  /** Initial-view select (General Options): the sentinel clears open_device. */
-  _onInitialViewChanged(raw) {
-    this._setOpenDevice(
-      raw == null || raw === "" || raw === OPEN_WITH_CURRENT ? "" : String(raw)
-    );
-  }
-  // ---------- long press ----------
-  /** Write back the hold_repeat block, dropping it entirely when disabled. */
-  _setLongPressEnabled(enabled) {
-    if (enabled === longPressSettings(this._config).enabled) return;
-    const next = { ...this._config };
-    const block = longPressEnabledPatch(enabled);
-    if (block) {
-      next.hold_repeat = block;
-    } else {
-      delete next.hold_repeat;
-    }
-    this._config = next;
-    this._fireChanged();
-    this.requestUpdate();
-  }
-  _setLongPressGroups(selected) {
-    const next = {
-      ...this._config,
-      hold_repeat: longPressGroupsPatch(longPressBlock(this._config), selected)
-    };
-    if (JSON.stringify(next) === JSON.stringify(this._config)) return;
-    this._config = next;
-    this._fireChanged();
-    this.requestUpdate();
-  }
-  _isEditorX2() {
-    return isX2Hub(
-      hubVersionFor(this._hass, this._config?.entity),
-      this._isHubIntegrationForEditor()
-    );
-  }
-  // ---------- HA wiring ----------
-  set hass(hass) {
-    this._hass = hass;
-    const language = hass?.locale?.language ?? hass?.language;
-    setRemoteCardLanguage(language);
-    this.lang = remoteCardLanguage();
-    this.dir = remoteCardDirection();
-    const entityId = String(this._config?.entity || "").trim();
-    if (entityId) {
-      if (this._editorIntegrationEntityId !== entityId && this._editorIntegrationDetectingFor !== entityId) {
-        void this._ensureEditorIntegration();
-      }
-    }
-    this.requestUpdate();
-  }
-  get hass() {
-    return this._hass;
-  }
-  setConfig(config) {
-    const incomingConfig = { ...config || {} };
-    const isInitialEditorConfig = !this._configInitialized;
-    this._configInitialized = true;
-    if ("preview_activity" in incomingConfig) {
-      delete incomingConfig.preview_activity;
-    }
-    if (Object.prototype.hasOwnProperty.call(config, "preview_activity")) {
-      this._previewActivity = String(config?.preview_activity ?? "");
-      writePreviewActivity(config?.entity, this._previewActivity);
-    } else if (this._previewActivity == null) {
-      const cached = readPreviewActivity(config?.entity);
-      this._previewActivity = cached ?? "";
-    }
-    if (isInitialEditorConfig) {
-      this._layoutSelection = "default";
-      this._previewActivity = "";
-      writePreviewActivity(config?.entity, "");
-      window.dispatchEvent(
-        new CustomEvent("sofabaton-preview-activity", {
-          detail: { entity: config?.entity, previewActivity: "" }
-        })
-      );
-    }
-    const nextEntity = String(incomingConfig?.entity || "");
-    if (nextEntity !== String(this._editorIntegrationEntityId || "")) {
-      this._editorIntegrationEntityId = null;
-      this._editorIntegrationDomain = null;
-      this._editorIntegrationDetectingFor = null;
-      this._editorKeymaps = {};
-      this._clearShortcutPanel();
-    }
-    if ("commands" in incomingConfig) delete incomingConfig.commands;
-    const configUnchanged = !isInitialEditorConfig && JSON.stringify(this._config || {}) === JSON.stringify(incomingConfig);
-    this._config = incomingConfig;
-    if (configUnchanged) return;
-    if (!isInitialEditorConfig) {
-      this._syncLayoutSelectionWithPreview();
-    }
-    this.requestUpdate();
-  }
-  // ---------- config mutation plumbing ----------
-  _fireChanged() {
-    const finalConfig = { ...this._config };
-    delete finalConfig.use_background_override;
-    delete finalConfig.preview_activity;
-    delete finalConfig.commands;
-    this.dispatchEvent(
-      new CustomEvent("config-changed", {
-        detail: { config: finalConfig },
-        bubbles: true,
-        composed: true
-      })
-    );
-  }
-  /** Merge handler shared by the entity form and the styling form. */
-  _mergeFormValue(value) {
-    const newValue = { ...this._config, ...value };
-    const entityChanged = newValue.entity !== this._config.entity;
-    if (newValue.use_background_override === false) {
-      delete newValue.background_override;
-    }
-    for (const [key, defaultValue] of Object.entries(CARD_SETTING_DEFAULTS)) {
-      if (newValue[key] === defaultValue) delete newValue[key];
-    }
-    if (JSON.stringify(this._config) === JSON.stringify(newValue)) return;
-    if (entityChanged) {
-      const prevConfig = this._config;
-      this._config = { ...prevConfig, entity: newValue.entity };
-      this._layoutSelection = "default";
-      this._setPreviewActivityForSelection("default");
-      this._config = prevConfig;
-      if (prevConfig?.entity) {
-        writePreviewActivity(prevConfig.entity, "");
-        window.dispatchEvent(
-          new CustomEvent("sofabaton-preview-activity", {
-            detail: { entity: prevConfig.entity, previewActivity: "" }
-          })
-        );
-      }
-    }
-    this._config = newValue;
-    this._fireChanged();
-    this.requestUpdate();
-  }
-  _updateLayoutConfig(patch) {
-    const selection = this._layoutSelectionKey();
-    const { nextConfig } = applyLayoutConfigPatch(this._config, selection, patch);
-    this._config = nextConfig;
-    this._fireChanged();
-    this.requestUpdate();
-  }
-  _setAutomationAssistEnabled(enabled) {
-    const next = { ...this._config };
-    if (enabled) {
-      next.show_automation_assist = true;
-    } else {
-      delete next.show_automation_assist;
-    }
-    this._config = next;
-    this._fireChanged();
-    this.requestUpdate();
-  }
-  // ---------- layout selection / preview ----------
-  _layoutSelectionKey() {
-    return this._layoutSelection ?? "default";
-  }
-  _syncLayoutSelectionWithPreview() {
-    const preview = this._previewActivity;
-    if (preview == null || preview === "" || preview === "powered_off") {
-      this._layoutSelection = "default";
-      return;
-    }
-    this._layoutSelection = String(preview);
-  }
-  _setPreviewActivityForSelection(selection) {
-    const nextPreview = selection === "default" ? "" : String(selection);
-    if (this._previewActivity === nextPreview) return;
-    this._previewActivity = nextPreview;
-    writePreviewActivity(this._config?.entity, nextPreview);
-    window.dispatchEvent(
-      new CustomEvent("sofabaton-preview-activity", {
-        detail: { entity: this._config?.entity, previewActivity: nextPreview }
-      })
-    );
-  }
-  _onSelectLayout(selection) {
-    if (selection === this._layoutSelectionKey()) return;
-    this._layoutSelection = selection;
-    this._clearShortcutPanel();
-    this._setPreviewActivityForSelection(selection);
-    this.requestUpdate();
-  }
-  // ---------- group order ----------
-  _isEditorGroupVisible(key, isEditorX2) {
-    if (!isEditorX2 && key === "abc") return false;
-    const selection = this._layoutSelectionKey();
-    if (key === "shortcuts") return isDeviceLayoutKey(selection);
-    const asRows = mfAsRowsForEditor(this._config, selection);
-    if (isDeviceLayoutKey(selection)) {
-      if (key === "macro_favorites") return !asRows;
-      if (key === "macros_row") return asRows;
-      if (key === "favorites_row") return false;
-      return true;
-    }
-    if (key === "macro_favorites") return !asRows;
-    if (key === "macros_row" || key === "favorites_row") return asRows;
-    return true;
-  }
-  _moveGroupByVisibleIndex(fromVisible, toVisible) {
-    const isEditorX2 = this._isEditorX2();
-    const next = moveVisibleGroup(
-      groupOrderListForEditor(this._config, this._layoutSelectionKey()),
-      (key) => this._isEditorGroupVisible(key, isEditorX2),
-      fromVisible,
-      toVisible
-    );
-    if (next) this._updateLayoutConfig({ group_order: next });
-  }
-  _moveGroupByKey(groupKey, delta) {
-    const isEditorX2 = this._isEditorX2();
-    const order = groupOrderListForEditor(this._config, this._layoutSelectionKey());
-    const visibleOrder = order.filter(
-      (key) => this._isEditorGroupVisible(key, isEditorX2)
-    );
-    const fromVisible = visibleOrder.indexOf(String(groupKey));
-    if (fromVisible < 0) return;
-    const toVisible = fromVisible + Number(delta);
-    if (toVisible < 0 || toVisible >= visibleOrder.length) return;
-    const toKey = visibleOrder[toVisible];
-    const from = order.indexOf(String(groupKey));
-    const to = order.indexOf(toKey);
-    if (from < 0 || to < 0) return;
-    const next = order.slice();
-    const tmp = next[from];
-    next[from] = next[to];
-    next[to] = tmp;
-    this._updateLayoutConfig({ group_order: next });
-  }
-  _resetGroupOrder() {
-    const selection = this._layoutSelectionKey();
-    let next;
-    if (isDeviceLayoutKey(selection)) {
-      next = this._withDeviceModeBlock((block) => {
-        const layouts = {
-          ...block.layouts || {}
-        };
-        delete layouts[deviceStoredLayerKey(selection)];
-        if (Object.keys(layouts).length) {
-          block.layouts = layouts;
-        } else {
-          delete block.layouts;
-        }
-      });
-    } else if (selection !== "default") {
-      next = { ...this._config };
-      const layouts = { ...next.layouts || {} };
-      delete layouts[selection];
-      if (Number.isFinite(Number(selection))) {
-        delete layouts[String(Number(selection))];
-      }
-      if (Object.keys(layouts).length) {
-        next.layouts = layouts;
-      } else {
-        delete next.layouts;
-      }
-    } else {
-      next = { ...this._config };
-      for (const key of LAYOUT_KEYS) {
-        delete next[key];
-      }
-      if (next.layouts && typeof next.layouts === "object") {
-        const layouts = { ...next.layouts };
-        delete layouts.default;
-        if (Object.keys(layouts).length) {
-          next.layouts = layouts;
-        } else {
-          delete next.layouts;
-        }
-      }
-    }
-    this._config = next;
-    this._fireChanged();
-    this.requestUpdate();
-  }
-  /**
-   * Copy this card's config as the JSON document the web remote takes
-   * (docs/internal/web-remote-plan.md, section 7): the same keys minus
-   * entity, theme and Home Assistant actions.
-   */
-  async _copyWebRemoteConfig() {
-    const document2 = webRemoteConfigFromCardConfig(this._config);
-    const text = JSON.stringify(document2, null, 2);
-    let message = str().editor.copiedConfigJson;
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch (_err) {
-      message = str().editor.copyConfigJsonFailed;
-    }
-    this.dispatchEvent(
-      new CustomEvent("hass-notification", {
-        detail: { message },
-        bubbles: true,
-        composed: true
-      })
-    );
-  }
-  // ---------- render ----------
-  render() {
-    if (!this._hass) return A;
-    const selection = this._layoutSelectionKey();
-    const entityId = this._config?.entity;
-    const remoteState = entityId && this._hass ? this._hass?.states?.[entityId] : null;
-    const activities = remoteState ? editorActivitiesFromState(remoteState) : [];
-    const deviceCapable = Boolean(remoteState) && this._isX1sIntegrationForEditor() && editorDevicesFromState(remoteState).length > 0;
-    const deviceModeEnabled = this._deviceModeEnabled();
-    const devices = deviceCapable && deviceModeEnabled ? editorDevicesFromState(remoteState) : [];
-    const openDevice = openDeviceFromConfig(this._config);
-    const initialViewOptions = [
-      { value: OPEN_WITH_CURRENT, label: str().editor.openOnCurrentActivity },
-      ...devices.map((device) => ({
-        value: String(device.id),
-        label: device.name
-      }))
-    ];
-    const longPress = longPressSettings(this._config);
-    const selectionOptions = [
-      {
-        value: "default",
-        label: str().editor.defaultLayoutOption,
-        kind: "default"
-      },
-      ...activities.map((activity) => ({
-        value: String(activity.id),
-        label: activity.name
-      })),
-      ...devices.length ? [
-        {
-          value: "device:default",
-          label: str().editor.allDevicesOption,
-          kind: "default"
-        },
-        ...devices.map((device) => ({
-          value: `device:${device.id}`,
-          label: device.name
-        }))
-      ] : []
-    ];
-    if (!selectionOptions.some((option) => option.value === selection)) {
-      this._layoutSelection = "default";
-    }
-    const isEditorX2 = this._isEditorX2();
-    const layoutCfg = layoutConfigForSelection(this._config, this._layoutSelectionKey());
-    const order = groupOrderListForEditor(this._config, this._layoutSelectionKey());
-    const visibleOrder = order.filter(
-      (key) => this._isEditorGroupVisible(key, isEditorX2)
-    );
-    const sortableReady = Boolean(customElements.get("ha-sortable"));
-    if (!sortableReady && !this._sortableDefinePending) {
-      this._sortableDefinePending = true;
-      void customElements.whenDefined("ha-sortable").then(() => {
-        this._sortableDefinePending = false;
-        this.requestUpdate();
-      });
-    }
-    const shortcutDeviceId = parseDeviceLayoutKey(this._layoutSelectionKey());
-    let shortcutsStrip = A;
-    let shortcutsPanel = A;
-    if (shortcutDeviceId != null && devices.some((device) => Number(device.id) === shortcutDeviceId)) {
-      this._ensureEditorKeymap(shortcutDeviceId);
-      const keymap = this._editorKeymaps[String(shortcutDeviceId)];
-      const stored = deviceShortcutsFromConfig(this._config, shortcutDeviceId);
-      shortcutsStrip = renderShortcutsSlotStrip({
-        slots: SHORTCUT_SLOTS.map((slot) => ({
-          slot,
-          icon: stored[slot]?.icon ?? null
-        })),
-        openSlot: this._shortcutOpenSlot,
-        onToggleSlot: (slot) => this._toggleShortcutSlot(slot)
-      });
-      if (this._shortcutOpenSlot) {
-        shortcutsPanel = renderShortcutsRowPanel({
-          hass: this._hass,
-          openSlot: this._shortcutOpenSlot,
-          draftIcon: this._shortcutDraftIcon,
-          draftCommandId: this._shortcutDraftCommand,
-          commandsStatus: keymap?.status ?? "loading",
-          commands: keymap?.commands ?? [],
-          onDraftChanged: (icon, commandId) => this._onShortcutDraftChanged(icon, commandId),
-          onReset: (slot) => this._resetShortcutSlot(slot)
-        });
-      }
-    }
-    const entityFormData = {
-      entity: this._config.entity || ""
-    };
-    return b2`
-      <div style="padding: 12px 0;">
-        <ha-form
-          .hass=${this._hass}
-          .schema=${ENTITY_FORM_SCHEMA}
-          .data=${entityFormData}
-          .computeLabel=${computeEditorFieldLabel}
-          @value-changed=${(ev) => {
-      ev.stopPropagation();
-      this._mergeFormValue(ev.detail.value);
-    }}
-        ></ha-form>
-        <div style="padding: 8px 0 0; display: flex; justify-content: flex-end;">
-          <button
-            type="button"
-            class="sb-copy-web-config"
-            style="font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--divider-color); background: transparent; color: var(--primary-color); cursor: pointer;"
-            title=${str().editor.copyConfigJson}
-            @click=${() => void this._copyWebRemoteConfig()}
-          >${str().editor.copyConfigJson}</button>
-        </div>
-      </div>
-      <div class="sb-general-wrap" style="padding: 0 0 12px 0;">
-        ${renderGeneralOptionsSection({
-      hass: this._hass,
-      expanded: this._generalExpanded,
-      onToggleExpanded: () => {
-        this._generalExpanded = !this._generalExpanded;
-        this.requestUpdate();
-      },
-      automationAssistEnabled: !!this._config.show_automation_assist,
-      onSetAutomationAssist: (enabled) => this._setAutomationAssistEnabled(enabled),
-      deviceMode: deviceCapable ? {
-        enabled: deviceModeEnabled,
-        openDevice: openDevice != null ? String(openDevice) : OPEN_WITH_CURRENT,
-        options: initialViewOptions,
-        onSetEnabled: (enabled) => this._setDeviceModeEnabled(enabled),
-        onSetOpenDevice: (value) => this._onInitialViewChanged(value)
-      } : null,
-      longPress: {
-        enabled: longPress.enabled,
-        selected: longPressSelectedGroups(this._config),
-        onSetEnabled: (enabled) => this._setLongPressEnabled(enabled),
-        onSetSelected: (selected) => this._setLongPressGroups(selected)
-      }
-    })}
-      </div>
-      <div class="sb-styling-wrap" style="padding: 0 0 12px 0;">
-        ${renderStylingOptionsSection({
-      hass: this._hass,
-      config: this._config,
-      expanded: this._stylingExpanded,
-      onToggleExpanded: () => {
-        this._stylingExpanded = !this._stylingExpanded;
-        this.requestUpdate();
-      },
-      onValueChanged: (value) => this._mergeFormValue(value)
-    })}
-      </div>
-      <div class="sb-layout-wrap" style="padding: 0 0 12px 0;">
-        ${renderGroupOrderSection({
-      hass: this._hass,
-      expanded: this._layoutExpanded,
-      selection: this._layoutSelectionKey(),
-      selectionOptions,
-      selectionNote: layoutSelectionNote(this._config, this._layoutSelectionKey()),
-      visibleOrder,
-      isEditorX2,
-      asRows: mfAsRowsForEditor(this._config, this._layoutSelectionKey()),
-      visibleRows: mfRowVisibleRowsForEditor(this._config, this._layoutSelectionKey()),
-      sortableReady,
-      macroEnabled: macrosButtonEnabled(layoutCfg),
-      favoritesEnabled: favoritesButtonEnabled(layoutCfg),
-      volumeEnabled: volumeGroupEnabled(layoutCfg),
-      channelEnabled: channelGroupEnabled(layoutCfg),
-      mediaEnabled: mediaGroupEnabled(layoutCfg),
-      dvrEnabled: dvrGroupEnabled(layoutCfg),
-      isDeviceSelection: isDeviceLayoutKey(this._layoutSelectionKey()),
-      shortcutsStrip,
-      shortcutsPanel,
-      commandsEnabled: commandsEnabled(this._config, this._layoutSelectionKey()),
-      powerEnabled: powerEnabled(this._config, this._layoutSelectionKey()),
-      showDeviceModeSwitch: devices.length > 0,
-      deviceModeEnabled: deviceToggleEnabledForEditor(
-        this._config,
-        this._layoutSelectionKey()
-      ),
-      isGroupEnabled: (key) => isGroupEnabled(this._config, this._layoutSelectionKey(), key),
-      groupLabel: (key) => groupLabel(key),
-      onToggleExpanded: () => {
-        this._layoutExpanded = !this._layoutExpanded;
-        this.requestUpdate();
-      },
-      onSelectLayout: (value) => this._onSelectLayout(value),
-      onSetMacro: (v3) => this._updateLayoutConfig(macroTogglePatch(v3)),
-      onSetFavorites: (v3) => this._updateLayoutConfig(favoritesTogglePatch(v3)),
-      onSetCommands: (v3) => this._updateLayoutConfig(commandsTogglePatch(v3)),
-      onSetPower: (v3) => this._updateLayoutConfig(powerTogglePatch(v3)),
-      onSetDeviceMode: (v3) => this._updateLayoutConfig(deviceTogglePatch(v3)),
-      onSetVolume: (v3) => this._updateLayoutConfig(volumeTogglePatch(v3)),
-      onSetChannel: (v3) => this._updateLayoutConfig(channelTogglePatch(v3)),
-      onSetMedia: (v3) => {
-        const patch = groupEnabledPatch("media", v3);
-        if (patch) this._updateLayoutConfig(patch);
-      },
-      onSetDvr: (v3) => this._updateLayoutConfig(dvrTogglePatch(v3)),
-      onSetGroupEnabled: (key, v3) => {
-        const patch = groupEnabledPatch(key, v3);
-        if (patch) this._updateLayoutConfig(patch);
-      },
-      onSetMfAsRows: (v3) => this._updateLayoutConfig(mfAsRowsPatch(v3)),
-      onSetMfRowVisibleRows: (v3) => this._updateLayoutConfig(mfRowVisibleRowsPatch(v3)),
-      onMoveGroupByKey: (key, delta) => this._moveGroupByKey(key, delta),
-      onMoveGroupByVisibleIndex: (from, to) => this._moveGroupByVisibleIndex(from, to),
-      onResetGroupOrder: () => this._resetGroupOrder()
-    })}
-      </div>
-    `;
-  }
-};
-SofabatonRemoteCardEditor.styles = r(REMOTE_CARD_EDITOR_CSS);
-
-// node_modules/lit-html/directives/repeat.js
-var u5 = (e6, s7, t5) => {
-  const r6 = /* @__PURE__ */ new Map();
-  for (let l4 = s7; l4 <= t5; l4++) r6.set(e6[l4], l4);
-  return r6;
-};
-var c6 = e4(class extends i6 {
-  constructor(e6) {
-    if (super(e6), e6.type !== t4.CHILD) throw Error("repeat() can only be used in text expressions");
-  }
-  dt(e6, s7, t5) {
-    let r6;
-    void 0 === t5 ? t5 = s7 : void 0 !== s7 && (r6 = s7);
-    const l4 = [], o8 = [];
-    let i7 = 0;
-    for (const s8 of e6) l4[i7] = r6 ? r6(s8, i7) : i7, o8[i7] = t5(s8, i7), i7++;
-    return { values: o8, keys: l4 };
-  }
-  render(e6, s7, t5) {
-    return this.dt(e6, s7, t5).values;
-  }
-  update(s7, [t5, r6, c7]) {
-    const d3 = M2(s7), { values: p4, keys: a4 } = this.dt(t5, r6, c7);
-    if (!Array.isArray(d3)) return this.ut = a4, p4;
-    const h6 = this.ut ?? (this.ut = []), v3 = [];
-    let m3, y3, x2 = 0, j2 = d3.length - 1, k2 = 0, w2 = p4.length - 1;
-    for (; x2 <= j2 && k2 <= w2; ) if (null === d3[x2]) x2++;
-    else if (null === d3[j2]) j2--;
-    else if (h6[x2] === a4[k2]) v3[k2] = u4(d3[x2], p4[k2]), x2++, k2++;
-    else if (h6[j2] === a4[w2]) v3[w2] = u4(d3[j2], p4[w2]), j2--, w2--;
-    else if (h6[x2] === a4[w2]) v3[w2] = u4(d3[x2], p4[w2]), v2(s7, v3[w2 + 1], d3[x2]), x2++, w2--;
-    else if (h6[j2] === a4[k2]) v3[k2] = u4(d3[j2], p4[k2]), v2(s7, d3[x2], d3[j2]), j2--, k2++;
-    else if (void 0 === m3 && (m3 = u5(a4, k2, w2), y3 = u5(h6, x2, j2)), m3.has(h6[x2])) if (m3.has(h6[j2])) {
-      const e6 = y3.get(a4[k2]), t6 = void 0 !== e6 ? d3[e6] : null;
-      if (null === t6) {
-        const e7 = v2(s7, d3[x2]);
-        u4(e7, p4[k2]), v3[k2] = e7;
-      } else v3[k2] = u4(t6, p4[k2]), v2(s7, d3[x2], t6), d3[e6] = null;
-      k2++;
-    } else h3(d3[j2]), j2--;
-    else h3(d3[x2]), x2++;
-    for (; k2 <= w2; ) {
-      const e6 = v2(s7, v3[w2 + 1]);
-      u4(e6, p4[k2]), v3[k2++] = e6;
-    }
-    for (; x2 <= j2; ) {
-      const e6 = d3[x2++];
-      null !== e6 && h3(e6);
-    }
-    return this.ut = a4, p3(s7, v3), E;
-  }
-});
 
 // remote-card/src/remote-card-ui-helpers.ts
 function automationAssistLabelForKey(key, label) {
@@ -4758,6 +3118,57 @@ function drawerVisibilityState({
     nextActiveDrawer,
     closedByVisibility: Boolean(activeDrawer && !nextActiveDrawer)
   };
+}
+
+// remote-card/src/remote-card-long-press.ts
+var LONG_PRESS_GROUP_FOR_KEY = {
+  volup: "volume",
+  voldn: "volume",
+  chup: "channel",
+  chdn: "channel",
+  up: "dpad",
+  down: "dpad",
+  left: "dpad",
+  right: "dpad"
+};
+function longPressBlock(config) {
+  const block = config?.hold_repeat;
+  return block && typeof block === "object" ? block : {};
+}
+function longPressSettings(config) {
+  const block = longPressBlock(config);
+  const enabled = block.enabled === true;
+  return {
+    enabled,
+    volume: enabled && block.volume !== false,
+    channel: enabled && block.channel !== false,
+    dpad: enabled && block.dpad !== false
+  };
+}
+function longPressGroupForKey(key) {
+  return LONG_PRESS_GROUP_FOR_KEY[String(key ?? "")] ?? null;
+}
+function longPressEnabledForKey(config, key) {
+  const group = longPressGroupForKey(key);
+  if (!group) return false;
+  return longPressSettings(config)[group];
+}
+function hubLongPressBinding(attributes, scopeId, buttonId) {
+  if (scopeId == null || buttonId == null) return null;
+  const scope = Number(scopeId);
+  const button = Number(buttonId);
+  if (!Number.isFinite(scope) || !Number.isFinite(button)) return null;
+  const map = attributes?.long_press_keys;
+  if (!map || typeof map !== "object") return null;
+  const page = map[String(scope)];
+  if (!page || typeof page !== "object" || Array.isArray(page)) return null;
+  const raw = page[String(button)];
+  if (!raw || typeof raw !== "object") return null;
+  const device = Number(raw.device_id);
+  const command = Number(raw.command_id);
+  if (!Number.isFinite(device) || device < 1) return null;
+  if (!Number.isFinite(command) || command < 1) return null;
+  return { device_id: device, command_id: command };
 }
 
 // remote-card/src/remote-card-gestures.ts
@@ -5363,6 +3774,61 @@ function customFavoritesSignature(items) {
     return `${n7}|${ic}|${cmd}|${dev}|${act}`;
   });
   return `${parts.length}:${parts.join(";;")}`;
+}
+
+// remote-card/src/remote-card-shared.ts
+var CARD_NAME = "Sofabaton Virtual Remote";
+var CARD_VERSION = "0.2.3";
+var LOG_ONCE_KEY = `__${CARD_NAME}_logged__`;
+var AUTOMATION_ASSIST_SESSION_KEY = "__sofabatonAutomationAssistSession__";
+var PREVIEW_ACTIVITY_CACHE_KEY = "__sofabatonPreviewActivityCache__";
+var TYPE = "sofabaton-virtual-remote";
+var EDITOR = "sofabaton-virtual-remote-editor";
+var previewCache = () => {
+  if (typeof window === "undefined") return null;
+  const cache = window[PREVIEW_ACTIVITY_CACHE_KEY];
+  return cache && typeof cache === "object" ? cache : null;
+};
+var readPreviewActivity = (entityId) => {
+  if (!entityId) return null;
+  const cache = previewCache();
+  if (!cache) return null;
+  return cache[String(entityId)] ?? null;
+};
+var writePreviewActivity = (entityId, value) => {
+  if (!entityId || typeof window === "undefined") return;
+  const cache = previewCache() ?? {};
+  cache[String(entityId)] = value == null ? "" : String(value);
+  window[PREVIEW_ACTIVITY_CACHE_KEY] = cache;
+};
+function logPillsOnce() {
+  const win = window;
+  if (win[LOG_ONCE_KEY]) return;
+  win[LOG_ONCE_KEY] = true;
+  const base = "padding:2px 10px;border-radius:999px;font-weight:700;font-size:12px;line-height:18px;";
+  const red = base + "background:#ef4444;color:#fff;";
+  const green = base + "background:#22c55e;color:#062b12;";
+  const yellow = base + "background:#facc15;color:#111827;";
+  const blue = base + "background:#3b82f6;color:#fff;";
+  const gap = "color:transparent;";
+  console.log(
+    `%cSofabaton%c %c Virtual %c %c  Remote  %c %c   ${CARD_VERSION}   `,
+    red,
+    gap,
+    green,
+    gap,
+    yellow,
+    gap,
+    blue
+  );
+}
+function stableJsonSignature(value) {
+  if (value == null) return "";
+  try {
+    return JSON.stringify(value);
+  } catch (_err) {
+    return String(value);
+  }
 }
 
 // remote-card/src/backend/ha-backend.ts
@@ -6685,15 +5151,15 @@ var AutomationAssistController = class {
   }
   // ---------- session (per-tab, shared across card instances) ----------
   sessionState() {
-    const win2 = window;
-    if (!win2[AUTOMATION_ASSIST_SESSION_KEY]) {
-      win2[AUTOMATION_ASSIST_SESSION_KEY] = {
+    const win = window;
+    if (!win[AUTOMATION_ASSIST_SESSION_KEY]) {
+      win[AUTOMATION_ASSIST_SESSION_KEY] = {
         hideMqttModal: false,
         discoveryDeviceIds: /* @__PURE__ */ new Set(),
         activityTriggersCreated: false
       };
     }
-    return win2[AUTOMATION_ASSIST_SESSION_KEY];
+    return win[AUTOMATION_ASSIST_SESSION_KEY];
   }
   activityTriggersCreatedInSession() {
     return this.sessionState().activityTriggersCreated;
@@ -7340,9 +5806,35 @@ var AutomationAssistController = class {
   }
 };
 
+// node_modules/lit-html/static.js
+var a3 = /* @__PURE__ */ Symbol.for("");
+var o7 = (t5) => {
+  if (t5?.r === a3) return t5?._$litStatic$;
+};
+var s6 = (t5) => ({ _$litStatic$: t5, r: a3 });
+var l3 = /* @__PURE__ */ new Map();
+var n6 = (t5) => (r6, ...e6) => {
+  const a4 = e6.length;
+  let s7, i7;
+  const n7 = [], u6 = [];
+  let c7, $3 = 0, f4 = false;
+  for (; $3 < a4; ) {
+    for (c7 = r6[$3]; $3 < a4 && void 0 !== (i7 = e6[$3], s7 = o7(i7)); ) c7 += s7 + r6[++$3], f4 = true;
+    $3 !== a4 && u6.push(i7), n7.push(c7), $3++;
+  }
+  if ($3 === a4 && n7.push(r6[a4]), f4) {
+    const t6 = n7.join("$$lit$$");
+    void 0 === (r6 = l3.get(t6)) && (n7.raw = n7, l3.set(t6, r6 = n7)), e6 = u6;
+  }
+  return t5(r6, ...e6);
+};
+var u5 = n6(b2);
+var c6 = n6(w);
+var $2 = n6(T);
+
 // remote-card/src/sections/wire.ts
 function primaryActionRef(handler) {
-  return n6((el) => {
+  return n5((el) => {
     if (!el) return;
     const node = el;
     node.__sbTrigger = handler;
@@ -7366,7 +5858,7 @@ function primaryActionRef(handler) {
   });
 }
 function listenersRef(wire) {
-  return n6((el) => {
+  return n5((el) => {
     if (!el) return;
     const node = el;
     if (node.__sbListenersWired) return;
@@ -7377,7 +5869,7 @@ function listenersRef(wire) {
 
 // remote-card/src/sections/activity-row.ts
 function renderActivityRow(params) {
-  const itemTag = s4(selectItemTagName());
+  const itemTag = s6(selectItemTagName());
   const options = params.unavailable ? [] : params.options;
   const optionObjects = options.map(
     (opt) => typeof opt === "string" ? { value: opt, label: opt } : opt
@@ -7414,7 +5906,7 @@ function renderActivityRow(params) {
     <div
       class="activityRow${params.modeToggle ? " activityRow--with-toggle" : ""}${params.menuOpen ? " activityRow--menu-open" : ""}"
       style=${params.visible ? "" : "display: none !important;"}
-      ${params.rowRef ? n6(params.rowRef) : A}
+      ${params.rowRef ? n5(params.rowRef) : A}
     >
       ${toggle}
       <ha-select
@@ -7425,17 +5917,17 @@ function renderActivityRow(params) {
         .disabled=${params.unavailable || params.disabled}
         ${wireSelectEvents}
       >
-        ${c6(
+        ${c4(
     optionObjects,
     (option) => option.value,
-    (option) => u3`
+    (option) => u5`
             <${itemTag} .value=${option.value}>${option.label}</${itemTag}>
           `
   )}
       </ha-select>
       <div
         class="loadIndicator${params.loading ? " is-loading" : ""}"
-        ${params.loadIndicatorRef ? n6(params.loadIndicatorRef) : A}
+        ${params.loadIndicatorRef ? n5(params.loadIndicatorRef) : A}
       ></div>
     </div>
   `;
@@ -8057,7 +6549,7 @@ function withUniqueKeys(entries) {
 }
 function renderDrawerItems(params, items, type) {
   const entries = withUniqueKeys(items.map((item) => ({ kind: type, item })));
-  return b2`${c6(
+  return b2`${c4(
     entries,
     (entry) => entry.key,
     (entry) => renderDrawerButton(params, entry.item, type)
@@ -8068,7 +6560,7 @@ function renderFavoritesItems(params) {
     ...params.customFavorites.map((item) => ({ kind: "custom", item })),
     ...params.favorites.map((item) => ({ kind: "favorite", item }))
   ]);
-  return b2`${c6(
+  return b2`${c4(
     items,
     (entry) => entry.key,
     (entry) => entry.kind === "custom" ? renderCustomFavoriteButton(params, entry.item) : renderDrawerButton(params, entry.item, "favorites")
@@ -8111,7 +6603,7 @@ function renderMacroFavorites(params) {
   const isMacro = params.activeDrawer === "macros";
   const isFav = params.activeDrawer === "favorites";
   const anyOpen = isMacro || isFav;
-  const setRef = (r6) => r6 ? n6(r6) : A;
+  const setRef = (r6) => r6 ? n5(r6) : A;
   return b2`
     <div
       class="mf-container${params.drawerUp ? " drawer-up" : ""}"
@@ -8244,14 +6736,14 @@ function renderCommandButton(params, command) {
   `;
 }
 function renderCommandsItems(params) {
-  return b2`${c6(
+  return b2`${c4(
     params.commands,
     (command) => `${command.command_id}:${command.name}`,
     (command) => renderCommandButton(params, command)
   )}`;
 }
 function renderCommandsDrawer(params) {
-  const setRef = (r6) => r6 ? n6(r6) : A;
+  const setRef = (r6) => r6 ? n5(r6) : A;
   return b2`
     <div
       class="commands-row${params.power ? " commands-row--power" : ""}"
@@ -9208,11 +7700,11 @@ var SofabatonRemoteCard = class extends i4 {
     const noticeTone = deviceMode && !derived.isUnavailable && derived.keymapEntry?.status === "error" ? "error" : "warning";
     const assistEnabled = store.automationAssistEnabled();
     return b2`
-      <ha-card ${n6(this._cardRef)}>
+      <ha-card ${n5(this._cardRef)}>
         ${assistEnabled ? renderAssistModal({ visible: true, controller: this._assist }) : A}
-        <div class=${wrapClass} ${n6(this._wrapRef)}>
+        <div class=${wrapClass} ${n5(this._wrapRef)}>
           ${assistEnabled ? renderAssistRow({ visible: true, controller: this._assist }) : A}
-          <div class="layout-container" ${n6(this._layoutContainerRef)}>
+          <div class="layout-container" ${n5(this._layoutContainerRef)}>
             ${noticeText ? b2`<div
                   class="sb-notice sb-notice--${noticeTone}"
                   role="status"
@@ -9223,7 +7715,7 @@ var SofabatonRemoteCard = class extends i4 {
                   ></ha-icon>
                   <span class="sb-notice__text">${noticeText}</span>
                 </div>` : A}
-            ${c6(
+            ${c4(
       order.filter((key) => key in groupTemplates),
       (key) => key,
       (key) => groupTemplates[key]()
@@ -9328,6 +7820,1174 @@ SofabatonRemoteCard.styles = [
       }
     `
 ];
+
+// remote-card/src/remote-web-config.ts
+var DROPPED_KEYS = /* @__PURE__ */ new Set(["type", "entity", "theme", "show_automation_assist", "preview_activity"]);
+var DROPPED_FAVORITE_KEYS = /* @__PURE__ */ new Set(["action", "tap_action", "hold_action", "double_tap_action"]);
+function isPlainObject2(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+function webRemoteConfigFromCardConfig(config) {
+  const out = {};
+  if (!isPlainObject2(config)) return out;
+  for (const [key, value] of Object.entries(config)) {
+    if (DROPPED_KEYS.has(key) || value === void 0) continue;
+    if (key === "custom_favorites" && Array.isArray(value)) {
+      const kept = value.filter((item) => isPlainObject2(item) && item.command_id != null && item.device_id != null).map((item) => {
+        const favorite = {};
+        for (const [k2, v3] of Object.entries(item)) {
+          if (!DROPPED_FAVORITE_KEYS.has(k2)) favorite[k2] = v3;
+        }
+        return favorite;
+      });
+      if (kept.length) out.custom_favorites = kept;
+      continue;
+    }
+    out[key] = value;
+  }
+  return out;
+}
+function parseWebRemoteParams(search, navigatorLanguage) {
+  const params = new URLSearchParams(search);
+  const device = Number(params.get("device"));
+  const zoom = Number(params.get("zoom"));
+  const theme = params.get("theme");
+  return {
+    hub: (params.get("hub") ?? "").trim(),
+    lang: (params.get("lang") ?? navigatorLanguage ?? "").trim() || void 0,
+    device: params.has("device") && Number.isFinite(device) ? device : null,
+    zoom: params.has("zoom") && Number.isFinite(zoom) && zoom > 0 ? zoom : null,
+    theme: theme === "light" || theme === "dark" ? theme : null
+  };
+}
+function cardConfigForWebRemote(hubId, document2, options = {}) {
+  const base = webRemoteConfigFromCardConfig(document2);
+  const config = { ...base, entity: hubId };
+  if (options.openDevice != null) {
+    const deviceMode = isPlainObject2(config.device_mode) ? { ...config.device_mode } : {};
+    deviceMode.open_device = options.openDevice;
+    config.device_mode = deviceMode;
+  }
+  return config;
+}
+
+// remote-card/src/shims/ha-card.ts
+var SbHaCard = class extends HTMLElement {
+  constructor() {
+    super();
+    const shadow = this.attachShadow({ mode: "open" });
+    shadow.innerHTML = `
+      <style>
+        :host {
+          display: block;
+          position: relative;
+          box-sizing: border-box;
+          background: var(--ha-card-background, var(--card-background-color, #fff));
+          -webkit-backdrop-filter: var(--ha-card-backdrop-filter, none);
+          backdrop-filter: var(--ha-card-backdrop-filter, none);
+          border-radius: var(--ha-card-border-radius, 12px);
+          border-width: var(--ha-card-border-width, 1px);
+          border-style: solid;
+          border-color: var(--ha-card-border-color, var(--divider-color, #e0e0e0));
+          box-shadow: var(--ha-card-box-shadow, none);
+          color: var(--primary-text-color);
+          transition: all 0.3s ease-out;
+        }
+        :host([raised]) {
+          border: none;
+          box-shadow: var(--ha-card-box-shadow, 0px 2px 1px -1px rgba(0, 0, 0, 0.2), 0px 1px 1px 0px rgba(0, 0, 0, 0.14), 0px 1px 3px 0px rgba(0, 0, 0, 0.12));
+        }
+      </style>
+      <slot></slot>
+    `;
+  }
+};
+function defineHaCardShim() {
+  if (!customElements.get("ha-card")) customElements.define("ha-card", SbHaCard);
+}
+
+// node_modules/@mdi/js/mdi.js
+var mdiAccount = "M12,4A4,4 0 0,1 16,8A4,4 0 0,1 12,12A4,4 0 0,1 8,8A4,4 0 0,1 12,4M12,14C16.42,14 20,15.79 20,18V20H4V18C4,15.79 7.58,14 12,14Z";
+var mdiAccountGroup = "M12,5.5A3.5,3.5 0 0,1 15.5,9A3.5,3.5 0 0,1 12,12.5A3.5,3.5 0 0,1 8.5,9A3.5,3.5 0 0,1 12,5.5M5,8C5.56,8 6.08,8.15 6.53,8.42C6.38,9.85 6.8,11.27 7.66,12.38C7.16,13.34 6.16,14 5,14A3,3 0 0,1 2,11A3,3 0 0,1 5,8M19,8A3,3 0 0,1 22,11A3,3 0 0,1 19,14C17.84,14 16.84,13.34 16.34,12.38C17.2,11.27 17.62,9.85 17.47,8.42C17.92,8.15 18.44,8 19,8M5.5,18.25C5.5,16.18 8.41,14.5 12,14.5C15.59,14.5 18.5,16.18 18.5,18.25V20H5.5V18.25M0,20V18.5C0,17.11 1.89,15.94 4.45,15.6C3.86,16.28 3.5,17.22 3.5,18.25V20H0M24,20H20.5V18.25C20.5,17.22 20.14,16.28 19.55,15.6C22.11,15.94 24,17.11 24,18.5V20Z";
+var mdiAirConditioner = "M6.59,0.66C8.93,-1.15 11.47,1.06 12.04,4.5C12.47,4.5 12.89,4.62 13.27,4.84C13.79,4.24 14.25,3.42 14.07,2.5C13.65,0.35 16.06,-1.39 18.35,1.58C20.16,3.92 17.95,6.46 14.5,7.03C14.5,7.46 14.39,7.89 14.16,8.27C14.76,8.78 15.58,9.24 16.5,9.06C18.63,8.64 20.38,11.04 17.41,13.34C15.07,15.15 12.53,12.94 11.96,9.5C11.53,9.5 11.11,9.37 10.74,9.15C10.22,9.75 9.75,10.58 9.93,11.5C10.35,13.64 7.94,15.39 5.65,12.42C3.83,10.07 6.05,7.53 9.5,6.97C9.5,6.54 9.63,6.12 9.85,5.74C9.25,5.23 8.43,4.76 7.5,4.94C5.37,5.36 3.62,2.96 6.59,0.66M5,16H7A2,2 0 0,1 9,18V24H7V22H5V24H3V18A2,2 0 0,1 5,16M5,18V20H7V18H5M12.93,16H15L12.07,24H10L12.93,16M18,16H21V18H18V22H21V24H18A2,2 0 0,1 16,22V18A2,2 0 0,1 18,16Z";
+var mdiAlarmLight = "M6,6.9L3.87,4.78L5.28,3.37L7.4,5.5L6,6.9M13,1V4H11V1H13M20.13,4.78L18,6.9L16.6,5.5L18.72,3.37L20.13,4.78M4.5,10.5V12.5H1.5V10.5H4.5M19.5,10.5H22.5V12.5H19.5V10.5M6,20H18A2,2 0 0,1 20,22H4A2,2 0 0,1 6,20M12,5A6,6 0 0,1 18,11V19H6V11A6,6 0 0,1 12,5Z";
+var mdiAlbum = "M12,11A1,1 0 0,0 11,12A1,1 0 0,0 12,13A1,1 0 0,0 13,12A1,1 0 0,0 12,11M12,16.5C9.5,16.5 7.5,14.5 7.5,12C7.5,9.5 9.5,7.5 12,7.5C14.5,7.5 16.5,9.5 16.5,12C16.5,14.5 14.5,16.5 12,16.5M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z";
+var mdiAlert = "M13 14H11V9H13M13 18H11V16H13M1 21H23L12 2L1 21Z";
+var mdiAlertCircle = "M13,13H11V7H13M13,17H11V15H13M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z";
+var mdiAlertCircleOutline = "M11,15H13V17H11V15M11,7H13V13H11V7M12,2C6.47,2 2,6.5 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M12,20A8,8 0 0,1 4,12A8,8 0 0,1 12,4A8,8 0 0,1 20,12A8,8 0 0,1 12,20Z";
+var mdiAlertOutline = "M12,2L1,21H23M12,6L19.53,19H4.47M11,10V14H13V10M11,16V18H13V16";
+var mdiAlphaACircleOutline = "M11,7H13A2,2 0 0,1 15,9V17H13V13H11V17H9V9A2,2 0 0,1 11,7M11,9V11H13V9H11M12,20A8,8 0 0,0 20,12A8,8 0 0,0 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2Z";
+var mdiAlphaBCircleOutline = "M15,10.5C15,11.3 14.3,12 13.5,12C14.3,12 15,12.7 15,13.5V15A2,2 0 0,1 13,17H9V7H13A2,2 0 0,1 15,9V10.5M13,15V13H11V15H13M13,11V9H11V11H13M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2M12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20A8,8 0 0,0 20,12A8,8 0 0,0 12,4Z";
+var mdiAlphaCCircleOutline = "M11,7H13A2,2 0 0,1 15,9V10H13V9H11V15H13V14H15V15A2,2 0 0,1 13,17H11A2,2 0 0,1 9,15V9A2,2 0 0,1 11,7M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2M12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20A8,8 0 0,0 20,12A8,8 0 0,0 12,4Z";
+var mdiAmplifier = "M10,2H14A1,1 0 0,1 15,3H21V21H19A1,1 0 0,1 18,22A1,1 0 0,1 17,21H7A1,1 0 0,1 6,22A1,1 0 0,1 5,21H3V3H9A1,1 0 0,1 10,2M5,5V9H19V5H5M7,6A1,1 0 0,1 8,7A1,1 0 0,1 7,8A1,1 0 0,1 6,7A1,1 0 0,1 7,6M12,6H14V7H12V6M15,6H16V8H15V6M17,6H18V8H17V6M12,11A4,4 0 0,0 8,15A4,4 0 0,0 12,19A4,4 0 0,0 16,15A4,4 0 0,0 12,11M10,6A1,1 0 0,1 11,7A1,1 0 0,1 10,8A1,1 0 0,1 9,7A1,1 0 0,1 10,6Z";
+var mdiApple = "M18.71,19.5C17.88,20.74 17,21.95 15.66,21.97C14.32,22 13.89,21.18 12.37,21.18C10.84,21.18 10.37,21.95 9.1,22C7.79,22.05 6.8,20.68 5.96,19.47C4.25,17 2.94,12.45 4.7,9.39C5.57,7.87 7.13,6.91 8.82,6.88C10.1,6.86 11.32,7.75 12.11,7.75C12.89,7.75 14.37,6.68 15.92,6.84C16.57,6.87 18.39,7.1 19.56,8.82C19.47,8.88 17.39,10.1 17.41,12.63C17.44,15.65 20.06,16.66 20.09,16.67C20.06,16.74 19.67,18.11 18.71,19.5M13,3.5C13.73,2.67 14.94,2.04 15.94,2C16.07,3.17 15.6,4.35 14.9,5.19C14.21,6.04 13.07,6.7 11.95,6.61C11.8,5.46 12.36,4.26 13,3.5Z";
+var mdiArrowDown = "M11,4H13V16L18.5,10.5L19.92,11.92L12,19.84L4.08,11.92L5.5,10.5L11,16V4Z";
+var mdiArrowDownBold = "M9,4H15V12H19.84L12,19.84L4.16,12H9V4Z";
+var mdiArrowLeft = "M20,11V13H8L13.5,18.5L12.08,19.92L4.16,12L12.08,4.08L13.5,5.5L8,11H20Z";
+var mdiArrowLeftBold = "M20,9V15H12V19.84L4.16,12L12,4.16V9H20Z";
+var mdiArrowLeftTop = "M20 13.5V20H18V13.5C18 11 16 9 13.5 9H7.83L10.91 12.09L9.5 13.5L4 8L9.5 2.5L10.92 3.91L7.83 7H13.5C17.09 7 20 9.91 20 13.5Z";
+var mdiArrowRight = "M4,11V13H16L10.5,18.5L11.92,19.92L19.84,12L11.92,4.08L10.5,5.5L16,11H4Z";
+var mdiArrowRightBold = "M4,15V9H12V4.16L19.84,12L12,19.84V15H4Z";
+var mdiArrowULeftTop = "M20 13.5C20 17.09 17.09 20 13.5 20H6V18H13.5C16 18 18 16 18 13.5S16 9 13.5 9H7.83L10.91 12.09L9.5 13.5L4 8L9.5 2.5L10.92 3.91L7.83 7H13.5C17.09 7 20 9.91 20 13.5Z";
+var mdiArrowUp = "M13,20H11V8L5.5,13.5L4.08,12.08L12,4.16L19.92,12.08L18.5,13.5L13,8V20Z";
+var mdiArrowUpBold = "M15,20H9V12H4.16L12,4.16L19.84,12H15V20Z";
+var mdiAudioVideo = "M20,7H4A2,2 0 0,0 2,9V15A2,2 0 0,0 4,17H5V18C5,18.6 5.4,19 6,19H8C8.6,19 9,18.6 9,18V17H15V18C15,18.6 15.4,19 16,19H18C18.6,19 19,18.6 19,18V17H20A2,2 0 0,0 22,15V9A2,2 0 0,0 20,7M14,12H4V10H14V12M18,13A2,2 0 0,1 16,11A2,2 0 0,1 18,9A2,2 0 0,1 20,11A2,2 0 0,1 18,13M6,15H4V14H6V15M10,15H8V14H10V15M14,15H12V14H14V15Z";
+var mdiAudioVideoOff = "M22.1 21.5L2.4 1.7L1.1 3L5.1 7H4C2.9 7 2 7.9 2 9V15C2 16.1 2.9 17 4 17H5V18C5 18.6 5.4 19 6 19H8C8.6 19 9 18.6 9 18V17H15V18C15 18.6 15.4 19 16 19H17.1L20.8 22.7L22.1 21.5M6 15H4V14H6V15M4 12V10H8.1L10.1 12H4M10 15H8V14H10V15M12 15V14H12.1L13.1 15H12M14 10V10.8L20.2 17C21.2 16.9 22 16.1 22 15V9C22 7.9 21.1 7 20 7H10.2L13.2 10H14M18 9C19.1 9 20 9.9 20 11S19.1 13 18 13 16 12.1 16 11 16.9 9 18 9Z";
+var mdiBackspace = "M22,3H7C6.31,3 5.77,3.35 5.41,3.88L0,12L5.41,20.11C5.77,20.64 6.31,21 7,21H22A2,2 0 0,0 24,19V5A2,2 0 0,0 22,3M19,15.59L17.59,17L14,13.41L10.41,17L9,15.59L12.59,12L9,8.41L10.41,7L14,10.59L17.59,7L19,8.41L15.41,12";
+var mdiBed = "M19,7H11V14H3V5H1V20H3V17H21V20H23V11A4,4 0 0,0 19,7M7,13A3,3 0 0,0 10,10A3,3 0 0,0 7,7A3,3 0 0,0 4,10A3,3 0 0,0 7,13Z";
+var mdiBedOutline = "M7 14C8.66 14 10 12.66 10 11C10 9.34 8.66 8 7 8C5.34 8 4 9.34 4 11C4 12.66 5.34 14 7 14M7 10C7.55 10 8 10.45 8 11C8 11.55 7.55 12 7 12C6.45 12 6 11.55 6 11C6 10.45 6.45 10 7 10M19 7H11V15H3V5H1V20H3V17H21V20H23V11C23 8.79 21.21 7 19 7M21 15H13V9H19C20.1 9 21 9.9 21 11Z";
+var mdiBell = "M21,19V20H3V19L5,17V11C5,7.9 7.03,5.17 10,4.29C10,4.19 10,4.1 10,4A2,2 0 0,1 12,2A2,2 0 0,1 14,4C14,4.1 14,4.19 14,4.29C16.97,5.17 19,7.9 19,11V17L21,19M14,21A2,2 0 0,1 12,23A2,2 0 0,1 10,21";
+var mdiBellOff = "M20.84,22.73L18.11,20H3V19L5,17V11C5,9.86 5.29,8.73 5.83,7.72L1.11,3L2.39,1.73L22.11,21.46L20.84,22.73M19,15.8V11C19,7.9 16.97,5.17 14,4.29C14,4.19 14,4.1 14,4A2,2 0 0,0 12,2A2,2 0 0,0 10,4C10,4.1 10,4.19 10,4.29C9.39,4.47 8.8,4.74 8.26,5.09L19,15.8M12,23A2,2 0 0,0 14,21H10A2,2 0 0,0 12,23Z";
+var mdiBellRing = "M21,19V20H3V19L5,17V11C5,7.9 7.03,5.17 10,4.29C10,4.19 10,4.1 10,4A2,2 0 0,1 12,2A2,2 0 0,1 14,4C14,4.1 14,4.19 14,4.29C16.97,5.17 19,7.9 19,11V17L21,19M14,21A2,2 0 0,1 12,23A2,2 0 0,1 10,21M19.75,3.19L18.33,4.61C20.04,6.3 21,8.6 21,11H23C23,8.07 21.84,5.25 19.75,3.19M1,11H3C3,8.6 3.96,6.3 5.67,4.61L4.25,3.19C2.16,5.25 1,8.07 1,11Z";
+var mdiBlinds = "M3,2H21A1,1 0 0,1 22,3V5A1,1 0 0,1 21,6H20V13A1,1 0 0,1 19,14H13V16.17C14.17,16.58 15,17.69 15,19A3,3 0 0,1 12,22A3,3 0 0,1 9,19C9,17.69 9.83,16.58 11,16.17V14H5A1,1 0 0,1 4,13V6H3A1,1 0 0,1 2,5V3A1,1 0 0,1 3,2M12,18A1,1 0 0,0 11,19A1,1 0 0,0 12,20A1,1 0 0,0 13,19A1,1 0 0,0 12,18Z";
+var mdiBlindsOpen = "M3 2H21C21.55 2 22 2.45 22 3V5C22 5.55 21.55 6 21 6H20V7C20 7.55 19.55 8 19 8H13V10.17C14.17 10.58 15 11.7 15 13C15 14.66 13.66 16 12 16C10.34 16 9 14.66 9 13C9 11.69 9.84 10.58 11 10.17V8H5C4.45 8 4 7.55 4 7V6H3C2.45 6 2 5.55 2 5V3C2 2.45 2.45 2 3 2M12 12C11.45 12 11 12.45 11 13C11 13.55 11.45 14 12 14C12.55 14 13 13.55 13 13C13 12.45 12.55 12 12 12Z";
+var mdiBluetooth = "M14.88,16.29L13,18.17V14.41M13,5.83L14.88,7.71L13,9.58M17.71,7.71L12,2H11V9.58L6.41,5L5,6.41L10.59,12L5,17.58L6.41,19L11,14.41V22H12L17.71,16.29L13.41,12L17.71,7.71Z";
+var mdiBluetoothOff = "M13,5.83L14.88,7.71L13.28,9.31L14.69,10.72L17.71,7.7L12,2H11V7.03L13,9.03M5.41,4L4,5.41L10.59,12L5,17.59L6.41,19L11,14.41V22H12L16.29,17.71L18.59,20L20,18.59M13,18.17V14.41L14.88,16.29";
+var mdiBookmark = "M17,3H7A2,2 0 0,0 5,5V21L12,18L19,21V5C19,3.89 18.1,3 17,3Z";
+var mdiBookmarkOutline = "M17,18L12,15.82L7,18V5H17M17,3H7A2,2 0 0,0 5,5V21L12,18L19,21V5C19,3.89 18.1,3 17,3Z";
+var mdiBrightness1 = "M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2Z";
+var mdiBrightness2 = "M10,2C8.18,2 6.47,2.5 5,3.35C8,5.08 10,8.3 10,12C10,15.7 8,18.92 5,20.65C6.47,21.5 8.18,22 10,22A10,10 0 0,0 20,12A10,10 0 0,0 10,2Z";
+var mdiBrightness3 = "M9,2C7.95,2 6.95,2.16 6,2.46C10.06,3.73 13,7.5 13,12C13,16.5 10.06,20.27 6,21.54C6.95,21.84 7.95,22 9,22A10,10 0 0,0 19,12A10,10 0 0,0 9,2Z";
+var mdiBrightness4 = "M12,18C11.11,18 10.26,17.8 9.5,17.45C11.56,16.5 13,14.42 13,12C13,9.58 11.56,7.5 9.5,6.55C10.26,6.2 11.11,6 12,6A6,6 0 0,1 18,12A6,6 0 0,1 12,18M20,8.69V4H15.31L12,0.69L8.69,4H4V8.69L0.69,12L4,15.31V20H8.69L12,23.31L15.31,20H20V15.31L23.31,12L20,8.69Z";
+var mdiBrightness5 = "M12,18A6,6 0 0,1 6,12A6,6 0 0,1 12,6A6,6 0 0,1 18,12A6,6 0 0,1 12,18M20,15.31L23.31,12L20,8.69V4H15.31L12,0.69L8.69,4H4V8.69L0.69,12L4,15.31V20H8.69L12,23.31L15.31,20H20V15.31Z";
+var mdiBrightness6 = "M12,18V6A6,6 0 0,1 18,12A6,6 0 0,1 12,18M20,15.31L23.31,12L20,8.69V4H15.31L12,0.69L8.69,4H4V8.69L0.69,12L4,15.31V20H8.69L12,23.31L15.31,20H20V15.31Z";
+var mdiBrightness7 = "M12,8A4,4 0 0,0 8,12A4,4 0 0,0 12,16A4,4 0 0,0 16,12A4,4 0 0,0 12,8M12,18A6,6 0 0,1 6,12A6,6 0 0,1 12,6A6,6 0 0,1 18,12A6,6 0 0,1 12,18M20,8.69V4H15.31L12,0.69L8.69,4H4V8.69L0.69,12L4,15.31V20H8.69L12,23.31L15.31,20H20V15.31L23.31,12L20,8.69Z";
+var mdiBroom = "M19.36,2.72L20.78,4.14L15.06,9.85C16.13,11.39 16.28,13.24 15.38,14.44L9.06,8.12C10.26,7.22 12.11,7.37 13.65,8.44L19.36,2.72M5.93,17.57C3.92,15.56 2.69,13.16 2.35,10.92L7.23,8.83L14.67,16.27L12.58,21.15C10.34,20.81 7.94,19.58 5.93,17.57Z";
+var mdiCamera = "M4,4H7L9,2H15L17,4H20A2,2 0 0,1 22,6V18A2,2 0 0,1 20,20H4A2,2 0 0,1 2,18V6A2,2 0 0,1 4,4M12,7A5,5 0 0,0 7,12A5,5 0 0,0 12,17A5,5 0 0,0 17,12A5,5 0 0,0 12,7M12,9A3,3 0 0,1 15,12A3,3 0 0,1 12,15A3,3 0 0,1 9,12A3,3 0 0,1 12,9Z";
+var mdiCameraOff = "M1.2,4.47L2.5,3.2L20,20.72L18.73,22L16.73,20H4A2,2 0 0,1 2,18V6C2,5.78 2.04,5.57 2.1,5.37L1.2,4.47M7,4L9,2H15L17,4H20A2,2 0 0,1 22,6V18C22,18.6 21.74,19.13 21.32,19.5L16.33,14.5C16.76,13.77 17,12.91 17,12A5,5 0 0,0 12,7C11.09,7 10.23,7.24 9.5,7.67L5.82,4H7M7,12A5,5 0 0,0 12,17C12.5,17 13.03,16.92 13.5,16.77L11.72,15C10.29,14.85 9.15,13.71 9,12.28L7.23,10.5C7.08,10.97 7,11.5 7,12M12,9A3,3 0 0,1 15,12C15,12.35 14.94,12.69 14.83,13L11,9.17C11.31,9.06 11.65,9 12,9Z";
+var mdiCancel = "M12 2C17.5 2 22 6.5 22 12S17.5 22 12 22 2 17.5 2 12 6.5 2 12 2M12 4C10.1 4 8.4 4.6 7.1 5.7L18.3 16.9C19.3 15.5 20 13.8 20 12C20 7.6 16.4 4 12 4M16.9 18.3L5.7 7.1C4.6 8.4 4 10.1 4 12C4 16.4 7.6 20 12 20C13.9 20 15.6 19.4 16.9 18.3Z";
+var mdiCar = "M5,11L6.5,6.5H17.5L19,11M17.5,16A1.5,1.5 0 0,1 16,14.5A1.5,1.5 0 0,1 17.5,13A1.5,1.5 0 0,1 19,14.5A1.5,1.5 0 0,1 17.5,16M6.5,16A1.5,1.5 0 0,1 5,14.5A1.5,1.5 0 0,1 6.5,13A1.5,1.5 0 0,1 8,14.5A1.5,1.5 0 0,1 6.5,16M18.92,6C18.72,5.42 18.16,5 17.5,5H6.5C5.84,5 5.28,5.42 5.08,6L3,12V20A1,1 0 0,0 4,21H5A1,1 0 0,0 6,20V19H18V20A1,1 0 0,0 19,21H20A1,1 0 0,0 21,20V12L18.92,6Z";
+var mdiCarKey = "M9 0C7.3 0 6 1.3 6 3S7.3 6 9 6C10.3 6 11.4 5.2 11.8 4H14V6H16V4H18V2H11.8C11.4 .8 10.3 0 9 0M9 2C9.6 2 10 2.4 10 3S9.6 4 9 4 8 3.6 8 3 8.4 2 9 2M6.5 8C5.8 8 5.3 8.4 5.1 9L3 15V23C3 23.6 3.4 24 4 24H5C5.6 24 6 23.6 6 23V22H18V23C18 23.6 18.4 24 19 24H20C20.6 24 21 23.6 21 23V15L18.9 9C18.7 8.4 18.1 8 17.5 8H6.5M6.5 9.5H17.5L19 14H5L6.5 9.5M6.5 16C7.3 16 8 16.7 8 17.5S7.3 19 6.5 19 5 18.3 5 17.5 5.7 16 6.5 16M17.5 16C18.3 16 19 16.7 19 17.5S18.3 19 17.5 19 16 18.3 16 17.5 16.7 16 17.5 16Z";
+var mdiCast = "M1,10V12A9,9 0 0,1 10,21H12C12,14.92 7.07,10 1,10M1,14V16A5,5 0 0,1 6,21H8A7,7 0 0,0 1,14M1,18V21H4A3,3 0 0,0 1,18M21,3H3C1.89,3 1,3.89 1,5V8H3V5H21V19H14V21H21A2,2 0 0,0 23,19V5C23,3.89 22.1,3 21,3Z";
+var mdiCastConnected = "M21,3H3C1.89,3 1,3.89 1,5V8H3V5H21V19H14V21H21A2,2 0 0,0 23,19V5C23,3.89 22.1,3 21,3M1,10V12A9,9 0 0,1 10,21H12C12,14.92 7.07,10 1,10M19,7H5V8.63C8.96,9.91 12.09,13.04 13.37,17H19M1,14V16A5,5 0 0,1 6,21H8A7,7 0 0,0 1,14M1,18V21H4A3,3 0 0,0 1,18Z";
+var mdiCastOff = "M1.6,1.27L0.25,2.75L1.41,3.8C1.16,4.13 1,4.55 1,5V8H3V5.23L18.2,19H14V21H20.41L22.31,22.72L23.65,21.24M6.5,3L8.7,5H21V16.14L23,17.95V5C23,3.89 22.1,3 21,3M1,10V12A9,9 0 0,1 10,21H12C12,14.92 7.08,10 1,10M1,14V16A5,5 0 0,1 6,21H8A7,7 0 0,0 1,14M1,18V21H4A3,3 0 0,0 1,18Z";
+var mdiCctv = "M6.03 12.03L8.03 15.5L5.5 18.68L2 12.62L6.03 12.03M17 18V15.29C17.88 14.9 18.5 14.03 18.5 13C18.5 12.43 18.3 11.9 17.97 11.5L19.94 10.35C20.95 9.76 21.3 8.47 20.71 7.46L19.33 5.06C18.74 4.05 17.45 3.7 16.44 4.28L8.31 9C7.36 9.53 7.03 10.75 7.58 11.71L9.08 14.31C9.63 15.26 10.86 15.59 11.81 15.04L13.69 13.96C13.94 14.55 14.41 15.03 15 15.29V18C15 19.1 15.9 20 17 20H22V18H17Z";
+var mdiCeilingLight = "M8,9H11V4H13V9H16L20,17H4L8,9M14,18A2,2 0 0,1 12,20A2,2 0 0,1 10,18H14Z";
+var mdiCellphone = "M17,19H7V5H17M17,1H7C5.89,1 5,1.89 5,3V21A2,2 0 0,0 7,23H17A2,2 0 0,0 19,21V3C19,1.89 18.1,1 17,1Z";
+var mdiCellphoneWireless = "M20.07,4.93C21.88,6.74 23,9.24 23,12C23,14.76 21.88,17.26 20.07,19.07L18.66,17.66C20.11,16.22 21,14.22 21,12C21,9.79 20.11,7.78 18.66,6.34L20.07,4.93M17.24,7.76C18.33,8.85 19,10.35 19,12C19,13.65 18.33,15.15 17.24,16.24L15.83,14.83C16.55,14.11 17,13.11 17,12C17,10.89 16.55,9.89 15.83,9.17L17.24,7.76M13,10A2,2 0 0,1 15,12A2,2 0 0,1 13,14A2,2 0 0,1 11,12A2,2 0 0,1 13,10M11.5,1A2.5,2.5 0 0,1 14,3.5V8H12V4H3V19H12V16H14V20.5A2.5,2.5 0 0,1 11.5,23H3.5A2.5,2.5 0 0,1 1,20.5V3.5A2.5,2.5 0 0,1 3.5,1H11.5Z";
+var mdiCheck = "M21,7L9,19L3.5,13.5L4.91,12.09L9,16.17L19.59,5.59L21,7Z";
+var mdiCheckBold = "M9,20.42L2.79,14.21L5.62,11.38L9,14.77L18.88,4.88L21.71,7.71L9,20.42Z";
+var mdiCheckCircle = "M12 2C6.5 2 2 6.5 2 12S6.5 22 12 22 22 17.5 22 12 17.5 2 12 2M10 17L5 12L6.41 10.59L10 14.17L17.59 6.58L19 8L10 17Z";
+var mdiCheckCircleOutline = "M12 2C6.5 2 2 6.5 2 12S6.5 22 12 22 22 17.5 22 12 17.5 2 12 2M12 20C7.59 20 4 16.41 4 12S7.59 4 12 4 20 7.59 20 12 16.41 20 12 20M16.59 7.58L10 14.17L7.41 11.59L6 13L10 17L18 9L16.59 7.58Z";
+var mdiChevronDoubleDown = "M16.59,5.59L18,7L12,13L6,7L7.41,5.59L12,10.17L16.59,5.59M16.59,11.59L18,13L12,19L6,13L7.41,11.59L12,16.17L16.59,11.59Z";
+var mdiChevronDoubleLeft = "M18.41,7.41L17,6L11,12L17,18L18.41,16.59L13.83,12L18.41,7.41M12.41,7.41L11,6L5,12L11,18L12.41,16.59L7.83,12L12.41,7.41Z";
+var mdiChevronDoubleRight = "M5.59,7.41L7,6L13,12L7,18L5.59,16.59L10.17,12L5.59,7.41M11.59,7.41L13,6L19,12L13,18L11.59,16.59L16.17,12L11.59,7.41Z";
+var mdiChevronDoubleUp = "M7.41,18.41L6,17L12,11L18,17L16.59,18.41L12,13.83L7.41,18.41M7.41,12.41L6,11L12,5L18,11L16.59,12.41L12,7.83L7.41,12.41Z";
+var mdiChevronDown = "M7.41,8.58L12,13.17L16.59,8.58L18,10L12,16L6,10L7.41,8.58Z";
+var mdiChevronDownCircleOutline = "M22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2A10,10 0 0,1 22,12M20,12A8,8 0 0,0 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20A8,8 0 0,0 20,12M6,10L12,16L18,10L16.6,8.6L12,13.2L7.4,8.6L6,10Z";
+var mdiChevronLeft = "M15.41,16.58L10.83,12L15.41,7.41L14,6L8,12L14,18L15.41,16.58Z";
+var mdiChevronRight = "M8.59,16.58L13.17,12L8.59,7.41L10,6L16,12L10,18L8.59,16.58Z";
+var mdiChevronUp = "M7.41,15.41L12,10.83L16.59,15.41L18,14L12,8L6,14L7.41,15.41Z";
+var mdiChevronUpCircleOutline = "M22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2A10,10 0 0,1 22,12M20,12A8,8 0 0,0 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20A8,8 0 0,0 20,12M7.4,15.4L12,10.8L16.6,15.4L18,14L12,8L6,14L7.4,15.4Z";
+var mdiCircle = "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z";
+var mdiCircleOutline = "M12,20A8,8 0 0,1 4,12A8,8 0 0,1 12,4A8,8 0 0,1 20,12A8,8 0 0,1 12,20M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z";
+var mdiClock = "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M16.2,16.2L11,13V7H12.5V12.2L17,14.9L16.2,16.2Z";
+var mdiClockOutline = "M12,20A8,8 0 0,0 20,12A8,8 0 0,0 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22C6.47,22 2,17.5 2,12A10,10 0 0,1 12,2M12.5,7V12.25L17,14.92L16.25,16.15L11,13V7H12.5Z";
+var mdiClose = "M19,6.41L17.59,5L12,10.59L6.41,5L5,6.41L10.59,12L5,17.59L6.41,19L12,13.41L17.59,19L19,17.59L13.41,12L19,6.41Z";
+var mdiCloseCircle = "M12,2C17.53,2 22,6.47 22,12C22,17.53 17.53,22 12,22C6.47,22 2,17.53 2,12C2,6.47 6.47,2 12,2M15.59,7L12,10.59L8.41,7L7,8.41L10.59,12L7,15.59L8.41,17L12,13.41L15.59,17L17,15.59L13.41,12L17,8.41L15.59,7Z";
+var mdiCloseCircleOutline = "M12,20C7.59,20 4,16.41 4,12C4,7.59 7.59,4 12,4C16.41,4 20,7.59 20,12C20,16.41 16.41,20 12,20M12,2C6.47,2 2,6.47 2,12C2,17.53 6.47,22 12,22C17.53,22 22,17.53 22,12C22,6.47 17.53,2 12,2M14.59,8L12,10.59L9.41,8L8,9.41L10.59,12L8,14.59L9.41,16L12,13.41L14.59,16L16,14.59L13.41,12L16,9.41L14.59,8Z";
+var mdiClosedCaption = "M18,11H16.5V10.5H14.5V13.5H16.5V13H18V14A1,1 0 0,1 17,15H14A1,1 0 0,1 13,14V10A1,1 0 0,1 14,9H17A1,1 0 0,1 18,10M11,11H9.5V10.5H7.5V13.5H9.5V13H11V14A1,1 0 0,1 10,15H7A1,1 0 0,1 6,14V10A1,1 0 0,1 7,9H10A1,1 0 0,1 11,10M19,4H5C3.89,4 3,4.89 3,6V18A2,2 0 0,0 5,20H19A2,2 0 0,0 21,18V6C21,4.89 20.1,4 19,4Z";
+var mdiClosedCaptionOutline = "M5,4C4.45,4 4,4.18 3.59,4.57C3.2,4.96 3,5.44 3,6V18C3,18.56 3.2,19.04 3.59,19.43C4,19.82 4.45,20 5,20H19C19.5,20 20,19.81 20.39,19.41C20.8,19 21,18.53 21,18V6C21,5.47 20.8,5 20.39,4.59C20,4.19 19.5,4 19,4H5M4.5,5.5H19.5V18.5H4.5V5.5M7,9C6.7,9 6.47,9.09 6.28,9.28C6.09,9.47 6,9.7 6,10V14C6,14.3 6.09,14.53 6.28,14.72C6.47,14.91 6.7,15 7,15H10C10.27,15 10.5,14.91 10.71,14.72C10.91,14.53 11,14.3 11,14V13H9.5V13.5H7.5V10.5H9.5V11H11V10C11,9.7 10.91,9.47 10.71,9.28C10.5,9.09 10.27,9 10,9H7M14,9C13.73,9 13.5,9.09 13.29,9.28C13.09,9.47 13,9.7 13,10V14C13,14.3 13.09,14.53 13.29,14.72C13.5,14.91 13.73,15 14,15H17C17.3,15 17.53,14.91 17.72,14.72C17.91,14.53 18,14.3 18,14V13H16.5V13.5H14.5V10.5H16.5V11H18V10C18,9.7 17.91,9.47 17.72,9.28C17.53,9.09 17.3,9 17,9H14Z";
+var mdiCoffee = "M2,21H20V19H2M20,8H18V5H20M20,3H4V13A4,4 0 0,0 8,17H14A4,4 0 0,0 18,13V10H20A2,2 0 0,0 22,8V5C22,3.89 21.1,3 20,3Z";
+var mdiCoffeeOutline = "M2,21V19H20V21H2M20,8V5H18V8H20M20,3A2,2 0 0,1 22,5V8A2,2 0 0,1 20,10H18V13A4,4 0 0,1 14,17H8A4,4 0 0,1 4,13V3H20M16,5H6V13A2,2 0 0,0 8,15H14A2,2 0 0,0 16,13V5Z";
+var mdiCog = "M12,15.5A3.5,3.5 0 0,1 8.5,12A3.5,3.5 0 0,1 12,8.5A3.5,3.5 0 0,1 15.5,12A3.5,3.5 0 0,1 12,15.5M19.43,12.97C19.47,12.65 19.5,12.33 19.5,12C19.5,11.67 19.47,11.34 19.43,11L21.54,9.37C21.73,9.22 21.78,8.95 21.66,8.73L19.66,5.27C19.54,5.05 19.27,4.96 19.05,5.05L16.56,6.05C16.04,5.66 15.5,5.32 14.87,5.07L14.5,2.42C14.46,2.18 14.25,2 14,2H10C9.75,2 9.54,2.18 9.5,2.42L9.13,5.07C8.5,5.32 7.96,5.66 7.44,6.05L4.95,5.05C4.73,4.96 4.46,5.05 4.34,5.27L2.34,8.73C2.21,8.95 2.27,9.22 2.46,9.37L4.57,11C4.53,11.34 4.5,11.67 4.5,12C4.5,12.33 4.53,12.65 4.57,12.97L2.46,14.63C2.27,14.78 2.21,15.05 2.34,15.27L4.34,18.73C4.46,18.95 4.73,19.03 4.95,18.95L7.44,17.94C7.96,18.34 8.5,18.68 9.13,18.93L9.5,21.58C9.54,21.82 9.75,22 10,22H14C14.25,22 14.46,21.82 14.5,21.58L14.87,18.93C15.5,18.67 16.04,18.34 16.56,17.94L19.05,18.95C19.27,19.03 19.54,18.95 19.66,18.73L21.66,15.27C21.78,15.05 21.73,14.78 21.54,14.63L19.43,12.97Z";
+var mdiCogOutline = "M12,8A4,4 0 0,1 16,12A4,4 0 0,1 12,16A4,4 0 0,1 8,12A4,4 0 0,1 12,8M12,10A2,2 0 0,0 10,12A2,2 0 0,0 12,14A2,2 0 0,0 14,12A2,2 0 0,0 12,10M10,22C9.75,22 9.54,21.82 9.5,21.58L9.13,18.93C8.5,18.68 7.96,18.34 7.44,17.94L4.95,18.95C4.73,19.03 4.46,18.95 4.34,18.73L2.34,15.27C2.21,15.05 2.27,14.78 2.46,14.63L4.57,12.97L4.5,12L4.57,11L2.46,9.37C2.27,9.22 2.21,8.95 2.34,8.73L4.34,5.27C4.46,5.05 4.73,4.96 4.95,5.05L7.44,6.05C7.96,5.66 8.5,5.32 9.13,5.07L9.5,2.42C9.54,2.18 9.75,2 10,2H14C14.25,2 14.46,2.18 14.5,2.42L14.87,5.07C15.5,5.32 16.04,5.66 16.56,6.05L19.05,5.05C19.27,4.96 19.54,5.05 19.66,5.27L21.66,8.73C21.79,8.95 21.73,9.22 21.54,9.37L19.43,11L19.5,12L19.43,13L21.54,14.63C21.73,14.78 21.79,15.05 21.66,15.27L19.66,18.73C19.54,18.95 19.27,19.04 19.05,18.95L16.56,17.95C16.04,18.34 15.5,18.68 14.87,18.93L14.5,21.58C14.46,21.82 14.25,22 14,22H10M11.25,4L10.88,6.61C9.68,6.86 8.62,7.5 7.85,8.39L5.44,7.35L4.69,8.65L6.8,10.2C6.4,11.37 6.4,12.64 6.8,13.8L4.68,15.36L5.43,16.66L7.86,15.62C8.63,16.5 9.68,17.14 10.87,17.38L11.24,20H12.76L13.13,17.39C14.32,17.14 15.37,16.5 16.14,15.62L18.57,16.66L19.32,15.36L17.2,13.81C17.6,12.64 17.6,11.37 17.2,10.2L19.31,8.65L18.56,7.35L16.15,8.39C15.38,7.5 14.32,6.86 13.12,6.62L12.75,4H11.25Z";
+var mdiCogs = "M15.9,18.45C17.25,18.45 18.35,17.35 18.35,16C18.35,14.65 17.25,13.55 15.9,13.55C14.54,13.55 13.45,14.65 13.45,16C13.45,17.35 14.54,18.45 15.9,18.45M21.1,16.68L22.58,17.84C22.71,17.95 22.75,18.13 22.66,18.29L21.26,20.71C21.17,20.86 21,20.92 20.83,20.86L19.09,20.16C18.73,20.44 18.33,20.67 17.91,20.85L17.64,22.7C17.62,22.87 17.47,23 17.3,23H14.5C14.32,23 14.18,22.87 14.15,22.7L13.89,20.85C13.46,20.67 13.07,20.44 12.71,20.16L10.96,20.86C10.81,20.92 10.62,20.86 10.54,20.71L9.14,18.29C9.05,18.13 9.09,17.95 9.22,17.84L10.7,16.68L10.65,16L10.7,15.31L9.22,14.16C9.09,14.05 9.05,13.86 9.14,13.71L10.54,11.29C10.62,11.13 10.81,11.07 10.96,11.13L12.71,11.84C13.07,11.56 13.46,11.32 13.89,11.15L14.15,9.29C14.18,9.13 14.32,9 14.5,9H17.3C17.47,9 17.62,9.13 17.64,9.29L17.91,11.15C18.33,11.32 18.73,11.56 19.09,11.84L20.83,11.13C21,11.07 21.17,11.13 21.26,11.29L22.66,13.71C22.75,13.86 22.71,14.05 22.58,14.16L21.1,15.31L21.15,16L21.1,16.68M6.69,8.07C7.56,8.07 8.26,7.37 8.26,6.5C8.26,5.63 7.56,4.92 6.69,4.92A1.58,1.58 0 0,0 5.11,6.5C5.11,7.37 5.82,8.07 6.69,8.07M10.03,6.94L11,7.68C11.07,7.75 11.09,7.87 11.03,7.97L10.13,9.53C10.08,9.63 9.96,9.67 9.86,9.63L8.74,9.18L8,9.62L7.81,10.81C7.79,10.92 7.7,11 7.59,11H5.79C5.67,11 5.58,10.92 5.56,10.81L5.4,9.62L4.64,9.18L3.5,9.63C3.41,9.67 3.3,9.63 3.24,9.53L2.34,7.97C2.28,7.87 2.31,7.75 2.39,7.68L3.34,6.94L3.31,6.5L3.34,6.06L2.39,5.32C2.31,5.25 2.28,5.13 2.34,5.03L3.24,3.47C3.3,3.37 3.41,3.33 3.5,3.37L4.63,3.82L5.4,3.38L5.56,2.19C5.58,2.08 5.67,2 5.79,2H7.59C7.7,2 7.79,2.08 7.81,2.19L8,3.38L8.74,3.82L9.86,3.37C9.96,3.33 10.08,3.37 10.13,3.47L11.03,5.03C11.09,5.13 11.07,5.25 11,5.32L10.03,6.06L10.06,6.5L10.03,6.94Z";
+var mdiControllerClassic = "M6,7H18A5,5 0 0,1 23,12A5,5 0 0,1 18,17C16.36,17 14.91,16.21 14,15H10C9.09,16.21 7.64,17 6,17A5,5 0 0,1 1,12A5,5 0 0,1 6,7M19.75,9.5A1.25,1.25 0 0,0 18.5,10.75A1.25,1.25 0 0,0 19.75,12A1.25,1.25 0 0,0 21,10.75A1.25,1.25 0 0,0 19.75,9.5M17.25,12A1.25,1.25 0 0,0 16,13.25A1.25,1.25 0 0,0 17.25,14.5A1.25,1.25 0 0,0 18.5,13.25A1.25,1.25 0 0,0 17.25,12M5,9V11H3V13H5V15H7V13H9V11H7V9H5Z";
+var mdiControllerClassicOutline = "M17.5,7A5.5,5.5 0 0,1 23,12.5A5.5,5.5 0 0,1 17.5,18C15.79,18 14.27,17.22 13.26,16H10.74C9.73,17.22 8.21,18 6.5,18A5.5,5.5 0 0,1 1,12.5A5.5,5.5 0 0,1 6.5,7H17.5M6.5,9A3.5,3.5 0 0,0 3,12.5A3.5,3.5 0 0,0 6.5,16C7.9,16 9.1,15.18 9.66,14H14.34C14.9,15.18 16.1,16 17.5,16A3.5,3.5 0 0,0 21,12.5A3.5,3.5 0 0,0 17.5,9H6.5M5.75,10.25H7.25V11.75H8.75V13.25H7.25V14.75H5.75V13.25H4.25V11.75H5.75V10.25M16.75,12.5A1,1 0 0,1 17.75,13.5A1,1 0 0,1 16.75,14.5A1,1 0 0,1 15.75,13.5A1,1 0 0,1 16.75,12.5M18.75,10.5A1,1 0 0,1 19.75,11.5A1,1 0 0,1 18.75,12.5A1,1 0 0,1 17.75,11.5A1,1 0 0,1 18.75,10.5Z";
+var mdiCurtains = "M23 3H1V1H23V3M2 22H6C6 19 4 17 4 17C10 13 11 4 11 4H2V22M22 4H13C13 4 14 13 20 17C20 17 18 19 18 22H22V4Z";
+var mdiCurtainsClosed = "M23 3H1V1H23V3M2 22H11V4H2V22M22 4H13V22H22V4Z";
+var mdiDesktopTower = "M8,2H16A2,2 0 0,1 18,4V20A2,2 0 0,1 16,22H8A2,2 0 0,1 6,20V4A2,2 0 0,1 8,2M8,4V6H16V4H8M16,8H8V10H16V8M16,18H14V20H16V18Z";
+var mdiDisc = "M12,14C10.89,14 10,13.1 10,12C10,10.89 10.89,10 12,10C13.11,10 14,10.89 14,12A2,2 0 0,1 12,14M12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20A8,8 0 0,0 20,12A8,8 0 0,0 12,4Z";
+var mdiDiscPlayer = "M14.5,10.37C15.54,10.37 16.38,9.53 16.38,8.5C16.38,7.46 15.54,6.63 14.5,6.63C13.46,6.63 12.63,7.46 12.63,8.5A1.87,1.87 0 0,0 14.5,10.37M14.5,1A7.5,7.5 0 0,1 22,8.5C22,10.67 21.08,12.63 19.6,14H9.4C7.93,12.63 7,10.67 7,8.5C7,4.35 10.36,1 14.5,1M6,21V22H4V21H2V15H22V21H20V22H18V21H6M4,18V19H13V18H4M15,17V19H17V17H15M19,17A1,1 0 0,0 18,18A1,1 0 0,0 19,19A1,1 0 0,0 20,18A1,1 0 0,0 19,17Z";
+var mdiDishwasher = "M18,2H6A2,2 0 0,0 4,4V20A2,2 0 0,0 6,22H18A2,2 0 0,0 20,20V4A2,2 0 0,0 18,2M10,4A1,1 0 0,1 11,5A1,1 0 0,1 10,6A1,1 0 0,1 9,5A1,1 0 0,1 10,4M7,4A1,1 0 0,1 8,5A1,1 0 0,1 7,6A1,1 0 0,1 6,5A1,1 0 0,1 7,4M18,20H6V8H18V20M14.67,15.33C14.69,16.03 14.41,16.71 13.91,17.21C12.86,18.26 11.15,18.27 10.09,17.21C9.59,16.71 9.31,16.03 9.33,15.33C9.4,14.62 9.63,13.94 10,13.33C10.37,12.5 10.81,11.73 11.33,11L12,10C13.79,12.59 14.67,14.36 14.67,15.33";
+var mdiDoor = "M8,3C6.89,3 6,3.89 6,5V21H18V5C18,3.89 17.11,3 16,3H8M8,5H16V19H8V5M13,11V13H15V11H13Z";
+var mdiDoorClosed = "M16,11H18V13H16V11M12,3H19C20.11,3 21,3.89 21,5V19H22V21H2V19H10V5C10,3.89 10.89,3 12,3M12,5V19H19V5H12Z";
+var mdiDoorOpen = "M12,3C10.89,3 10,3.89 10,5H3V19H2V21H22V19H21V5C21,3.89 20.11,3 19,3H12M12,5H19V19H12V5M5,11H7V13H5V11Z";
+var mdiDoorbell = "M12 10C10.9 10 10 10.9 10 12S10.9 14 12 14 14 13.1 14 12 13.1 10 12 10M16 2H8C6.9 2 6 2.9 6 4V20C6 21.1 6.9 22 8 22H16C17.1 22 18 21.1 18 20V4C18 2.9 17.1 2 16 2M16 20H8V4H16V20Z";
+var mdiDotsHorizontal = "M16,12A2,2 0 0,1 18,10A2,2 0 0,1 20,12A2,2 0 0,1 18,14A2,2 0 0,1 16,12M10,12A2,2 0 0,1 12,10A2,2 0 0,1 14,12A2,2 0 0,1 12,14A2,2 0 0,1 10,12M4,12A2,2 0 0,1 6,10A2,2 0 0,1 8,12A2,2 0 0,1 6,14A2,2 0 0,1 4,12Z";
+var mdiDotsVertical = "M12,16A2,2 0 0,1 14,18A2,2 0 0,1 12,20A2,2 0 0,1 10,18A2,2 0 0,1 12,16M12,10A2,2 0 0,1 14,12A2,2 0 0,1 12,14A2,2 0 0,1 10,12A2,2 0 0,1 12,10M12,4A2,2 0 0,1 14,6A2,2 0 0,1 12,8A2,2 0 0,1 10,6A2,2 0 0,1 12,4Z";
+var mdiDragVerticalVariant = "M11 21H9V3H11V21M15 3H13V21H15V3Z";
+var mdiEye = "M12,9A3,3 0 0,0 9,12A3,3 0 0,0 12,15A3,3 0 0,0 15,12A3,3 0 0,0 12,9M12,17A5,5 0 0,1 7,12A5,5 0 0,1 12,7A5,5 0 0,1 17,12A5,5 0 0,1 12,17M12,4.5C7,4.5 2.73,7.61 1,12C2.73,16.39 7,19.5 12,19.5C17,19.5 21.27,16.39 23,12C21.27,7.61 17,4.5 12,4.5Z";
+var mdiEyeOff = "M11.83,9L15,12.16C15,12.11 15,12.05 15,12A3,3 0 0,0 12,9C11.94,9 11.89,9 11.83,9M7.53,9.8L9.08,11.35C9.03,11.56 9,11.77 9,12A3,3 0 0,0 12,15C12.22,15 12.44,14.97 12.65,14.92L14.2,16.47C13.53,16.8 12.79,17 12,17A5,5 0 0,1 7,12C7,11.21 7.2,10.47 7.53,9.8M2,4.27L4.28,6.55L4.73,7C3.08,8.3 1.78,10 1,12C2.73,16.39 7,19.5 12,19.5C13.55,19.5 15.03,19.2 16.38,18.66L16.81,19.08L19.73,22L21,20.73L3.27,3M12,7A5,5 0 0,1 17,12C17,12.64 16.87,13.26 16.64,13.82L19.57,16.75C21.07,15.5 22.27,13.86 23,12C21.27,7.61 17,4.5 12,4.5C10.6,4.5 9.26,4.75 8,5.2L10.17,7.35C10.74,7.13 11.35,7 12,7Z";
+var mdiFan = "M12,11A1,1 0 0,0 11,12A1,1 0 0,0 12,13A1,1 0 0,0 13,12A1,1 0 0,0 12,11M12.5,2C17,2 17.11,5.57 14.75,6.75C13.76,7.24 13.32,8.29 13.13,9.22C13.61,9.42 14.03,9.73 14.35,10.13C18.05,8.13 22.03,8.92 22.03,12.5C22.03,17 18.46,17.1 17.28,14.73C16.78,13.74 15.72,13.3 14.79,13.11C14.59,13.59 14.28,14 13.88,14.34C15.87,18.03 15.08,22 11.5,22C7,22 6.91,18.42 9.27,17.24C10.25,16.75 10.69,15.71 10.89,14.79C10.4,14.59 9.97,14.27 9.65,13.87C5.96,15.85 2,15.07 2,11.5C2,7 5.56,6.89 6.74,9.26C7.24,10.25 8.29,10.68 9.22,10.87C9.41,10.39 9.73,9.97 10.14,9.65C8.15,5.96 8.94,2 12.5,2Z";
+var mdiFanOff = "M12.5,2C9.64,2 8.57,4.55 9.29,7.47L15,13.16C15.87,13.37 16.81,13.81 17.28,14.73C18.46,17.1 22.03,17 22.03,12.5C22.03,8.92 18.05,8.13 14.35,10.13C14.03,9.73 13.61,9.42 13.13,9.22C13.32,8.29 13.76,7.24 14.75,6.75C17.11,5.57 17,2 12.5,2M3.28,4L2,5.27L4.47,7.73C3.22,7.74 2,8.87 2,11.5C2,15.07 5.96,15.85 9.65,13.87C9.97,14.27 10.4,14.59 10.89,14.79C10.69,15.71 10.25,16.75 9.27,17.24C6.91,18.42 7,22 11.5,22C13.8,22 14.94,20.36 14.94,18.21L18.73,22L20,20.72L3.28,4Z";
+var mdiFastForward = "M13,6V18L21.5,12M4,18L12.5,12L4,6V18Z";
+var mdiFilm = "M3.5,3H5V1.8C5,1.36 5.36,1 5.8,1H10.2C10.64,1 11,1.36 11,1.8V3H12.5A1.5,1.5 0 0,1 14,4.5V5H22V20H14V20.5A1.5,1.5 0 0,1 12.5,22H3.5A1.5,1.5 0 0,1 2,20.5V4.5A1.5,1.5 0 0,1 3.5,3M18,7V9H20V7H18M14,7V9H16V7H14M10,7V9H12V7H10M14,16V18H16V16H14M18,16V18H20V16H18M10,16V18H12V16H10Z";
+var mdiFilmstrip = "M18,9H16V7H18M18,13H16V11H18M18,17H16V15H18M8,9H6V7H8M8,13H6V11H8M8,17H6V15H8M18,3V5H16V3H8V5H6V3H4V21H6V19H8V21H16V19H18V21H20V3H18Z";
+var mdiFire = "M17.66 11.2C17.43 10.9 17.15 10.64 16.89 10.38C16.22 9.78 15.46 9.35 14.82 8.72C13.33 7.26 13 4.85 13.95 3C13 3.23 12.17 3.75 11.46 4.32C8.87 6.4 7.85 10.07 9.07 13.22C9.11 13.32 9.15 13.42 9.15 13.55C9.15 13.77 9 13.97 8.8 14.05C8.57 14.15 8.33 14.09 8.14 13.93C8.08 13.88 8.04 13.83 8 13.76C6.87 12.33 6.69 10.28 7.45 8.64C5.78 10 4.87 12.3 5 14.47C5.06 14.97 5.12 15.47 5.29 15.97C5.43 16.57 5.7 17.17 6 17.7C7.08 19.43 8.95 20.67 10.96 20.92C13.1 21.19 15.39 20.8 17.03 19.32C18.86 17.66 19.5 15 18.56 12.72L18.43 12.46C18.22 12 17.66 11.2 17.66 11.2M14.5 17.5C14.22 17.74 13.76 18 13.4 18.1C12.28 18.5 11.16 17.94 10.5 17.28C11.69 17 12.4 16.12 12.61 15.23C12.78 14.43 12.46 13.77 12.33 13C12.21 12.26 12.23 11.63 12.5 10.94C12.69 11.32 12.89 11.7 13.13 12C13.9 13 15.11 13.44 15.37 14.8C15.41 14.94 15.43 15.08 15.43 15.23C15.46 16.05 15.1 16.95 14.5 17.5H14.5Z";
+var mdiFireplace = "M22,22H2V20H22V22M22,6H2V3H22V6M20,7V19H17V11C17,11 14.5,10 12,10C9.5,10 7,11 7,11V19H4V7H20M14.5,14.67H14.47L14.81,15.22L14.87,15.34C15.29,16.35 15,17.5 14.21,18.24C13.5,18.9 12.5,19.07 11.58,18.95C10.71,18.84 9.9,18.29 9.45,17.53C9.3,17.3 9.19,17.03 9.13,16.77L9,16.11C8.96,15.15 9.34,14.14 10.06,13.54C9.73,14.26 9.81,15.16 10.3,15.79L10.36,15.87C10.44,15.94 10.55,15.97 10.64,15.92C10.73,15.89 10.8,15.8 10.8,15.7L10.76,15.56C10.23,14.17 10.68,12.55 11.79,11.63C12.1,11.38 12.5,11.15 12.87,11.05C12.46,11.87 12.61,12.93 13.25,13.57L14.14,14.3L14.5,14.67M13.11,17.44V17.44C13.37,17.2 13.53,16.8 13.5,16.44V16.25C13.38,15.65 12.85,15.46 12.5,15L12.26,14.55C12.13,14.85 12.12,15.13 12.17,15.46C12.23,15.8 12.37,16.09 12.29,16.44C12.2,16.83 11.9,17.22 11.37,17.35C11.67,17.64 12.15,17.87 12.64,17.71L13.11,17.44Z";
+var mdiFireplaceOff = "M22,22H2V20H22V22M22,6H2V3H22V6M20,7V19H17V11C17,11 14.5,10 12,10C9.5,10 7,11 7,11V19H4V7H20Z";
+var mdiFloorLamp = "M15,2L17,9H7L9,2M11,10H13V20H16V22H8V20H11V10Z";
+var mdiFormatColorFill = "M19,11.5C19,11.5 17,13.67 17,15A2,2 0 0,0 19,17A2,2 0 0,0 21,15C21,13.67 19,11.5 19,11.5M5.21,10L10,5.21L14.79,10M16.56,8.94L7.62,0L6.21,1.41L8.59,3.79L3.44,8.94C2.85,9.5 2.85,10.47 3.44,11.06L8.94,16.56C9.23,16.85 9.62,17 10,17C10.38,17 10.77,16.85 11.06,16.56L16.56,11.06C17.15,10.47 17.15,9.5 16.56,8.94Z";
+var mdiFridge = "M7,2H17A2,2 0 0,1 19,4V9H5V4A2,2 0 0,1 7,2M19,19A2,2 0 0,1 17,21V22H15V21H9V22H7V21A2,2 0 0,1 5,19V10H19V19M8,5V7H10V5H8M8,12V15H10V12H8Z";
+var mdiFullscreen = "M5,5H10V7H7V10H5V5M14,5H19V10H17V7H14V5M17,14H19V19H14V17H17V14M10,17V19H5V14H7V17H10Z";
+var mdiFullscreenExit = "M14,14H19V16H16V19H14V14M5,14H10V19H8V16H5V14M8,5H10V10H5V8H8V5M19,8V10H14V5H16V8H19Z";
+var mdiGamepad = "M16.5,9L13.5,12L16.5,15H22V9M9,16.5V22H15V16.5L12,13.5M7.5,9H2V15H7.5L10.5,12M15,7.5V2H9V7.5L12,10.5L15,7.5Z";
+var mdiGamepadVariant = "M7,6H17A6,6 0 0,1 23,12A6,6 0 0,1 17,18C15.22,18 13.63,17.23 12.53,16H11.47C10.37,17.23 8.78,18 7,18A6,6 0 0,1 1,12A6,6 0 0,1 7,6M6,9V11H4V13H6V15H8V13H10V11H8V9H6M15.5,12A1.5,1.5 0 0,0 14,13.5A1.5,1.5 0 0,0 15.5,15A1.5,1.5 0 0,0 17,13.5A1.5,1.5 0 0,0 15.5,12M18.5,9A1.5,1.5 0 0,0 17,10.5A1.5,1.5 0 0,0 18.5,12A1.5,1.5 0 0,0 20,10.5A1.5,1.5 0 0,0 18.5,9Z";
+var mdiGarage = "M19,20H17V11H7V20H5V9L12,5L19,9V20M8,12H16V14H8V12M8,15H16V17H8V15M16,18V20H8V18H16Z";
+var mdiGarageOpen = "M19,20H17V11H7V20H5V9L12,5L19,9V20M8,12H16V14H8V12Z";
+var mdiGestureDoubleTap = "M10,9A1,1 0 0,1 11,8A1,1 0 0,1 12,9V13.47L13.21,13.6L18.15,15.79C18.68,16.03 19,16.56 19,17.14V21.5C18.97,22.32 18.32,22.97 17.5,23H11C10.62,23 10.26,22.85 10,22.57L5.1,18.37L5.84,17.6C6.03,17.39 6.3,17.28 6.58,17.28H6.8L10,19V9M11,5A4,4 0 0,1 15,9C15,10.5 14.2,11.77 13,12.46V11.24C13.61,10.69 14,9.89 14,9A3,3 0 0,0 11,6A3,3 0 0,0 8,9C8,9.89 8.39,10.69 9,11.24V12.46C7.8,11.77 7,10.5 7,9A4,4 0 0,1 11,5M11,3A6,6 0 0,1 17,9C17,10.7 16.29,12.23 15.16,13.33L14.16,12.88C15.28,11.96 16,10.56 16,9A5,5 0 0,0 11,4A5,5 0 0,0 6,9C6,11.05 7.23,12.81 9,13.58V14.66C6.67,13.83 5,11.61 5,9A6,6 0 0,1 11,3Z";
+var mdiGestureSwipe = "M20.11,3.89L22,2V7H17L19.08,4.92C18.55,4.23 17.64,3.66 16.36,3.19C15.08,2.72 13.63,2.5 12,2.5C10.38,2.5 8.92,2.72 7.64,3.19C6.36,3.66 5.45,4.23 4.92,4.92L7,7H2V2L3.89,3.89C4.64,3 5.74,2.31 7.2,1.78C8.65,1.25 10.25,1 12,1C13.75,1 15.35,1.25 16.8,1.78C18.26,2.31 19.36,3 20.11,3.89M19.73,16.27V16.45L19,21.7C18.92,22.08 18.76,22.39 18.5,22.64C18.23,22.89 17.91,23 17.53,23H10.73C10.36,23 10,22.86 9.7,22.55L4.73,17.63L5.53,16.83C5.75,16.61 6,16.5 6.33,16.5H6.56L10,17.25V6.5C10,6.11 10.13,5.76 10.43,5.46C10.73,5.16 11.08,5 11.5,5C11.89,5 12.24,5.16 12.54,5.46C12.84,5.76 13,6.11 13,6.5V12.5H13.78C13.88,12.5 14.05,12.55 14.3,12.61L18.84,14.86C19.44,15.14 19.73,15.61 19.73,16.27Z";
+var mdiGestureTap = "M10,9A1,1 0 0,1 11,8A1,1 0 0,1 12,9V13.47L13.21,13.6L18.15,15.79C18.68,16.03 19,16.56 19,17.14V21.5C18.97,22.32 18.32,22.97 17.5,23H11C10.62,23 10.26,22.85 10,22.57L5.1,18.37L5.84,17.6C6.03,17.39 6.3,17.28 6.58,17.28H6.8L10,19V9M11,5A4,4 0 0,1 15,9C15,10.5 14.2,11.77 13,12.46V11.24C13.61,10.69 14,9.89 14,9A3,3 0 0,0 11,6A3,3 0 0,0 8,9C8,9.89 8.39,10.69 9,11.24V12.46C7.8,11.77 7,10.5 7,9A4,4 0 0,1 11,5Z";
+var mdiGestureTapButton = "M13 5C15.21 5 17 6.79 17 9C17 10.5 16.2 11.77 15 12.46V11.24C15.61 10.69 16 9.89 16 9C16 7.34 14.66 6 13 6S10 7.34 10 9C10 9.89 10.39 10.69 11 11.24V12.46C9.8 11.77 9 10.5 9 9C9 6.79 10.79 5 13 5M20 20.5C19.97 21.32 19.32 21.97 18.5 22H13C12.62 22 12.26 21.85 12 21.57L8 17.37L8.74 16.6C8.93 16.39 9.2 16.28 9.5 16.28H9.7L12 18V9C12 8.45 12.45 8 13 8S14 8.45 14 9V13.47L15.21 13.6L19.15 15.79C19.68 16.03 20 16.56 20 17.14V20.5M20 2H4C2.9 2 2 2.9 2 4V12C2 13.11 2.9 14 4 14H8V12L4 12L4 4H20L20 12H18V14H20V13.96L20.04 14C21.13 14 22 13.09 22 12V4C22 2.9 21.11 2 20 2Z";
+var mdiGlassCocktail = "M7.5,7L5.5,5H18.5L16.5,7M11,13V19H6V21H18V19H13V13L21,5V3H3V5L11,13Z";
+var mdiHeadphones = "M12,1C7,1 3,5 3,10V17A3,3 0 0,0 6,20H9V12H5V10A7,7 0 0,1 12,3A7,7 0 0,1 19,10V12H15V20H18A3,3 0 0,0 21,17V10C21,5 16.97,1 12,1Z";
+var mdiHeart = "M12,21.35L10.55,20.03C5.4,15.36 2,12.27 2,8.5C2,5.41 4.42,3 7.5,3C9.24,3 10.91,3.81 12,5.08C13.09,3.81 14.76,3 16.5,3C19.58,3 22,5.41 22,8.5C22,12.27 18.6,15.36 13.45,20.03L12,21.35Z";
+var mdiHeartOutline = "M12.1,18.55L12,18.65L11.89,18.55C7.14,14.24 4,11.39 4,8.5C4,6.5 5.5,5 7.5,5C9.04,5 10.54,6 11.07,7.36H12.93C13.46,6 14.96,5 16.5,5C18.5,5 20,6.5 20,8.5C20,11.39 16.86,14.24 12.1,18.55M16.5,3C14.76,3 13.09,3.81 12,5.08C10.91,3.81 9.24,3 7.5,3C4.42,3 2,5.41 2,8.5C2,12.27 5.4,15.36 10.55,20.03L12,21.35L13.45,20.03C18.6,15.36 22,12.27 22,8.5C22,5.41 19.58,3 16.5,3Z";
+var mdiHelpCircle = "M15.07,11.25L14.17,12.17C13.45,12.89 13,13.5 13,15H11V14.5C11,13.39 11.45,12.39 12.17,11.67L13.41,10.41C13.78,10.05 14,9.55 14,9C14,7.89 13.1,7 12,7A2,2 0 0,0 10,9H8A4,4 0 0,1 12,5A4,4 0 0,1 16,9C16,9.88 15.64,10.67 15.07,11.25M13,19H11V17H13M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12C22,6.47 17.5,2 12,2Z";
+var mdiHelpCircleOutline = "M11,18H13V16H11V18M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M12,20C7.59,20 4,16.41 4,12C4,7.59 7.59,4 12,4C16.41,4 20,7.59 20,12C20,16.41 16.41,20 12,20M12,6A4,4 0 0,0 8,10H10A2,2 0 0,1 12,8A2,2 0 0,1 14,10C14,12 11,11.75 11,15H13C13,12.75 16,12.5 16,10A4,4 0 0,0 12,6Z";
+var mdiHexagon = "M21,16.5C21,16.88 20.79,17.21 20.47,17.38L12.57,21.82C12.41,21.94 12.21,22 12,22C11.79,22 11.59,21.94 11.43,21.82L3.53,17.38C3.21,17.21 3,16.88 3,16.5V7.5C3,7.12 3.21,6.79 3.53,6.62L11.43,2.18C11.59,2.06 11.79,2 12,2C12.21,2 12.41,2.06 12.57,2.18L20.47,6.62C20.79,6.79 21,7.12 21,7.5V16.5Z";
+var mdiHexagonOutline = "M21,16.5C21,16.88 20.79,17.21 20.47,17.38L12.57,21.82C12.41,21.94 12.21,22 12,22C11.79,22 11.59,21.94 11.43,21.82L3.53,17.38C3.21,17.21 3,16.88 3,16.5V7.5C3,7.12 3.21,6.79 3.53,6.62L11.43,2.18C11.59,2.06 11.79,2 12,2C12.21,2 12.41,2.06 12.57,2.18L20.47,6.62C20.79,6.79 21,7.12 21,7.5V16.5M12,4.15L5,8.09V15.91L12,19.85L19,15.91V8.09L12,4.15Z";
+var mdiHome = "M10,20V14H14V20H19V12H22L12,3L2,12H5V20H10Z";
+var mdiHomeAssistant = "M21.8,13H20V21H13V17.67L15.79,14.88L16.5,15C17.66,15 18.6,14.06 18.6,12.9C18.6,11.74 17.66,10.8 16.5,10.8A2.1,2.1 0 0,0 14.4,12.9L14.5,13.61L13,15.13V9.65C13.66,9.29 14.1,8.6 14.1,7.8A2.1,2.1 0 0,0 12,5.7A2.1,2.1 0 0,0 9.9,7.8C9.9,8.6 10.34,9.29 11,9.65V15.13L9.5,13.61L9.6,12.9A2.1,2.1 0 0,0 7.5,10.8A2.1,2.1 0 0,0 5.4,12.9A2.1,2.1 0 0,0 7.5,15L8.21,14.88L11,17.67V21H4V13H2.25C1.83,13 1.42,13 1.42,12.79C1.43,12.57 1.85,12.15 2.28,11.72L11,3C11.33,2.67 11.67,2.33 12,2.33C12.33,2.33 12.67,2.67 13,3L17,7V6H19V9L21.78,11.78C22.18,12.18 22.59,12.59 22.6,12.8C22.6,13 22.2,13 21.8,13M7.5,12A0.9,0.9 0 0,1 8.4,12.9A0.9,0.9 0 0,1 7.5,13.8A0.9,0.9 0 0,1 6.6,12.9A0.9,0.9 0 0,1 7.5,12M16.5,12C17,12 17.4,12.4 17.4,12.9C17.4,13.4 17,13.8 16.5,13.8A0.9,0.9 0 0,1 15.6,12.9A0.9,0.9 0 0,1 16.5,12M12,6.9C12.5,6.9 12.9,7.3 12.9,7.8C12.9,8.3 12.5,8.7 12,8.7C11.5,8.7 11.1,8.3 11.1,7.8C11.1,7.3 11.5,6.9 12,6.9Z";
+var mdiHomeAutomation = "M12,3L2,12H5V20H19V12H22L12,3M12,8.5C14.34,8.5 16.46,9.43 18,10.94L16.8,12.12C15.58,10.91 13.88,10.17 12,10.17C10.12,10.17 8.42,10.91 7.2,12.12L6,10.94C7.54,9.43 9.66,8.5 12,8.5M12,11.83C13.4,11.83 14.67,12.39 15.6,13.3L14.4,14.47C13.79,13.87 12.94,13.5 12,13.5C11.06,13.5 10.21,13.87 9.6,14.47L8.4,13.3C9.33,12.39 10.6,11.83 12,11.83M12,15.17C12.94,15.17 13.7,15.91 13.7,16.83C13.7,17.75 12.94,18.5 12,18.5C11.06,18.5 10.3,17.75 10.3,16.83C10.3,15.91 11.06,15.17 12,15.17Z";
+var mdiHomeLightbulb = "M12 3L2 12H5V20H19V12H22M13 18H11V17H13M13.5 14.58V16H10.5V14.58A3 3 0 1 1 13.5 14.58Z";
+var mdiHomeOutline = "M12 5.69L17 10.19V18H15V12H9V18H7V10.19L12 5.69M12 3L2 12H5V20H11V14H13V20H19V12H22";
+var mdiHomeThermometer = "M19 8C20.11 8 21 8.9 21 10V16.76C21.61 17.31 22 18.11 22 19C22 20.66 20.66 22 19 22C17.34 22 16 20.66 16 19C16 18.11 16.39 17.31 17 16.76V10C17 8.9 17.9 8 19 8M19 9C18.45 9 18 9.45 18 10V11H20V10C20 9.45 19.55 9 19 9M5 20V12H2L12 3L16.4 6.96C15.54 7.69 15 8.78 15 10V16C14.37 16.83 14 17.87 14 19L14.1 20H5Z";
+var mdiHulu = "M19.5,12.8V22H14.7V13.9C14.7,13.2 14.1,12.6 13.4,12.6H10.5C9.8,12.6 9.2,13.2 9.2,13.9V22H4.5V2H9.3V8.4C9.6,8.3 9.9,8.2 10.2,8.2H15C17.5,8.2 19.5,10.3 19.5,12.8Z";
+var mdiHumanGreeting = "M12 2C13.1 2 14 2.9 14 4S13.1 6 12 6 10 5.1 10 4 10.9 2 12 2M15.9 8.1C15.5 7.7 14.8 7 13.5 7H11C8.2 7 6 4.8 6 2H4C4 5.2 6.1 7.8 9 8.7V22H11V16H13V22H15V10.1L19 14L20.4 12.6L15.9 8.1Z";
+var mdiImage = "M8.5,13.5L11,16.5L14.5,12L19,18H5M21,19V5C21,3.89 20.1,3 19,3H5A2,2 0 0,0 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19Z";
+var mdiImageMultiple = "M22,16V4A2,2 0 0,0 20,2H8A2,2 0 0,0 6,4V16A2,2 0 0,0 8,18H20A2,2 0 0,0 22,16M11,12L13.03,14.71L16,11L20,16H8M2,6V20A2,2 0 0,0 4,22H18V20H4V6";
+var mdiInformation = "M13,9H11V7H13M13,17H11V11H13M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z";
+var mdiInformationOutline = "M11,9H13V7H11M12,20C7.59,20 4,16.41 4,12C4,7.59 7.59,4 12,4C16.41,4 20,7.59 20,12C20,16.41 16.41,20 12,20M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M11,17H13V11H11V17Z";
+var mdiInvertColors = "M12,19.58V19.58C10.4,19.58 8.89,18.96 7.76,17.83C6.62,16.69 6,15.19 6,13.58C6,12 6.62,10.47 7.76,9.34L12,5.1M17.66,7.93L12,2.27V2.27L6.34,7.93C3.22,11.05 3.22,16.12 6.34,19.24C7.9,20.8 9.95,21.58 12,21.58C14.05,21.58 16.1,20.8 17.66,19.24C20.78,16.12 20.78,11.05 17.66,7.93Z";
+var mdiKettle = "M12.5,3C7.81,3 4,5.69 4,9V9C4,10.19 4.5,11.34 5.44,12.33C4.53,13.5 4,14.96 4,16.5C4,17.64 4,18.83 4,20C4,21.11 4.89,22 6,22H19C20.11,22 21,21.11 21,20C21,18.85 21,17.61 21,16.5C21,15.28 20.66,14.07 20,13L22,11L19,8L16.9,10.1C15.58,9.38 14.05,9 12.5,9C10.65,9 8.95,9.53 7.55,10.41C7.19,9.97 7,9.5 7,9C7,7.21 9.46,5.75 12.5,5.75V5.75C13.93,5.75 15.3,6.08 16.33,6.67L18.35,4.65C16.77,3.59 14.68,3 12.5,3M12.5,11C12.84,11 13.17,11.04 13.5,11.09C10.39,11.57 8,14.25 8,17.5V20H6V17.5A6.5,6.5 0 0,1 12.5,11Z";
+var mdiKeyboard = "M19,10H17V8H19M19,13H17V11H19M16,10H14V8H16M16,13H14V11H16M16,17H8V15H16M7,10H5V8H7M7,13H5V11H7M8,11H10V13H8M8,8H10V10H8M11,11H13V13H11M11,8H13V10H11M20,5H4C2.89,5 2,5.89 2,7V17A2,2 0 0,0 4,19H20A2,2 0 0,0 22,17V7C22,5.89 21.1,5 20,5Z";
+var mdiKeyboardBackspace = "M21,11H6.83L10.41,7.41L9,6L3,12L9,18L10.41,16.58L6.83,13H21V11Z";
+var mdiKeyboardReturn = "M19,7V11H5.83L9.41,7.41L8,6L2,12L8,18L9.41,16.58L5.83,13H21V7H19Z";
+var mdiKeyboardSpace = "M3 15H5V19H19V15H21V19C21 20.1 20.1 21 19 21H5C3.9 21 3 20.1 3 19V15Z";
+var mdiKodi = "M12.03,1C11.82,1 11.6,1.11 11.41,1.31C10.56,2.16 9.72,3 8.88,3.84C8.66,4.06 8.6,4.18 8.38,4.38C8.09,4.62 7.96,4.91 7.97,5.28C8,6.57 8,7.84 8,9.13C8,10.46 8,11.82 8,13.16C8,13.26 8,13.34 8.03,13.44C8.11,13.75 8.31,13.82 8.53,13.59C9.73,12.39 10.8,11.3 12,10.09C13.36,8.73 14.73,7.37 16.09,6C16.5,5.6 16.5,5.15 16.09,4.75C14.94,3.6 13.77,2.47 12.63,1.31C12.43,1.11 12.24,1 12.03,1M18.66,7.66C18.45,7.66 18.25,7.75 18.06,7.94C16.91,9.1 15.75,10.24 14.59,11.41C14.2,11.8 14.2,12.23 14.59,12.63C15.74,13.78 16.88,14.94 18.03,16.09C18.43,16.5 18.85,16.5 19.25,16.09C20.36,15 21.5,13.87 22.59,12.75C22.76,12.58 22.93,12.42 23,12.19V11.88C22.93,11.64 22.76,11.5 22.59,11.31C21.47,10.19 20.37,9.06 19.25,7.94C19.06,7.75 18.86,7.66 18.66,7.66M4.78,8.09C4.65,8.04 4.58,8.14 4.5,8.22C3.35,9.39 2.34,10.43 1.19,11.59C0.93,11.86 0.93,12.24 1.19,12.5C1.81,13.13 2.44,13.75 3.06,14.38C3.6,14.92 4,15.33 4.56,15.88C4.72,16.03 4.86,16 4.94,15.81C5,15.71 5,15.58 5,15.47C5,14.29 5,13.37 5,12.19C5,11 5,9.81 5,8.63C5,8.55 5,8.45 4.97,8.38C4.95,8.25 4.9,8.14 4.78,8.09M12.09,14.25C11.89,14.25 11.66,14.34 11.47,14.53C10.32,15.69 9.18,16.87 8.03,18.03C7.63,18.43 7.63,18.85 8.03,19.25C9.14,20.37 10.26,21.47 11.38,22.59C11.54,22.76 11.71,22.93 11.94,23H12.22C12.44,22.94 12.62,22.79 12.78,22.63C13.9,21.5 15.03,20.38 16.16,19.25C16.55,18.85 16.5,18.4 16.13,18C14.97,16.84 13.84,15.69 12.69,14.53C12.5,14.34 12.3,14.25 12.09,14.25Z";
+var mdiLamp = "M8,2H16L20,14H4L8,2M11,15H13V20H18V22H6V20H11V15Z";
+var mdiLaptop = "M4,6H20V16H4M20,18A2,2 0 0,0 22,16V6C22,4.89 21.1,4 20,4H4C2.89,4 2,4.89 2,6V16A2,2 0 0,0 4,18H0V20H24V18H20Z";
+var mdiLedStrip = "M2.81,8.46L14.83,20.5L15.54,19.78L16.95,21.19L18.36,19.78L16.95,18.36L18.36,16.95L19.78,18.36L21.19,16.95L19.78,15.54L20.5,14.83L8.46,2.81L2.81,8.46M5.64,8.46L8.46,5.64L17.66,14.83L14.83,17.66L5.64,8.46M7.05,8.46L8.46,9.88L9.88,8.46L8.46,7.05L7.05,8.46M9.17,10.59L10.59,12L12,10.59L10.59,9.17L9.17,10.59M11.29,12.71L12.71,14.12L14.12,12.71L12.71,11.29L11.29,12.71M13.41,14.83L14.83,16.24L16.24,14.83L14.83,13.41L13.41,14.83Z";
+var mdiLedStripVariant = "M2.95 3L2 6.91L19.34 11.25L20.29 7.34L2.95 3M6.09 6.89L4.16 6.41L4.64 4.46L6.57 4.94L6.09 6.89M9.94 7.86L8 7.38L8.5 5.42L10.42 5.91L9.94 7.86M13.8 8.82L11.87 8.34L12.35 6.39L14.27 6.87L13.8 8.82M17.65 9.79L15.72 9.31L16.2 7.35L18.13 7.84L17.65 9.79M4.66 12.75L3.71 16.66L21.05 21L22 17.1L4.66 12.75M7.8 16.65L5.88 16.16L6.35 14.21L8.28 14.69L7.8 16.65M11.65 17.61L9.73 17.13L10.2 15.18L12.13 15.66L11.65 17.61M15.5 18.58L13.58 18.09L14.06 16.14L16 16.62L15.5 18.58M19.36 19.54L17.43 19.06L17.91 17.11L19.84 17.59L19.36 19.54M6.25 12.11L11 10.2L17.75 11.89L13 13.8L6.25 12.11Z";
+var mdiLightbulb = "M12,2A7,7 0 0,0 5,9C5,11.38 6.19,13.47 8,14.74V17A1,1 0 0,0 9,18H15A1,1 0 0,0 16,17V14.74C17.81,13.47 19,11.38 19,9A7,7 0 0,0 12,2M9,21A1,1 0 0,0 10,22H14A1,1 0 0,0 15,21V20H9V21Z";
+var mdiLightbulbGroup = "M15 14V16A1 1 0 0 1 14 17H10A1 1 0 0 1 9 16V14A5 5 0 1 1 15 14M14 18H10V19A1 1 0 0 0 11 20H13A1 1 0 0 0 14 19M7 19V18H5V19A1 1 0 0 0 6 20H7.17A2.93 2.93 0 0 1 7 19M5 10A6.79 6.79 0 0 1 5.68 7A4 4 0 0 0 4 14.45V16A1 1 0 0 0 5 17H7V14.88A6.92 6.92 0 0 1 5 10M17 18V19A2.93 2.93 0 0 1 16.83 20H18A1 1 0 0 0 19 19V18M18.32 7A6.79 6.79 0 0 1 19 10A6.92 6.92 0 0 1 17 14.88V17H19A1 1 0 0 0 20 16V14.45A4 4 0 0 0 18.32 7Z";
+var mdiLightbulbGroupOff = "M20.84 22.73L18.09 20C18.06 20 18.03 20 18 20H16.83C16.94 19.68 17 19.34 17 19V18.89L14.75 16.64C14.57 16.86 14.31 17 14 17H10C9.45 17 9 16.55 9 16V14C7.4 12.8 6.74 10.84 7.12 9L5.5 7.4C5.18 8.23 5 9.11 5 10C5 11.83 5.72 13.58 7 14.88V17H5C4.45 17 4 16.55 4 16V14.45C2.86 13.79 2.12 12.62 2 11.31C1.85 9.27 3.25 7.5 5.2 7.09L1.11 3L2.39 1.73L22.11 21.46L20.84 22.73M15 6C13.22 4.67 10.86 4.72 9.13 5.93L16.08 12.88C17.63 10.67 17.17 7.63 15 6M19.79 16.59C19.91 16.42 20 16.22 20 16V14.45C21.91 13.34 22.57 10.9 21.46 9C20.8 7.85 19.63 7.11 18.32 7C18.77 7.94 19 8.96 19 10C19 11.57 18.47 13.09 17.5 14.31L19.79 16.59M10 19C10 19.55 10.45 20 11 20H13C13.55 20 14 19.55 14 19V18H10V19M7 18H5V19C5 19.55 5.45 20 6 20H7.17C7.06 19.68 7 19.34 7 19V18Z";
+var mdiLightbulbOff = "M12,2C9.76,2 7.78,3.05 6.5,4.68L16.31,14.5C17.94,13.21 19,11.24 19,9A7,7 0 0,0 12,2M3.28,4L2,5.27L5.04,8.3C5,8.53 5,8.76 5,9C5,11.38 6.19,13.47 8,14.74V17A1,1 0 0,0 9,18H14.73L18.73,22L20,20.72L3.28,4M9,20V21A1,1 0 0,0 10,22H14A1,1 0 0,0 15,21V20H9Z";
+var mdiLightbulbOn = "M12,6A6,6 0 0,1 18,12C18,14.22 16.79,16.16 15,17.2V19A1,1 0 0,1 14,20H10A1,1 0 0,1 9,19V17.2C7.21,16.16 6,14.22 6,12A6,6 0 0,1 12,6M14,21V22A1,1 0 0,1 13,23H11A1,1 0 0,1 10,22V21H14M20,11H23V13H20V11M1,11H4V13H1V11M13,1V4H11V1H13M4.92,3.5L7.05,5.64L5.63,7.05L3.5,4.93L4.92,3.5M16.95,5.63L19.07,3.5L20.5,4.93L18.37,7.05L16.95,5.63Z";
+var mdiLightbulbOutline = "M12,2A7,7 0 0,1 19,9C19,11.38 17.81,13.47 16,14.74V17A1,1 0 0,1 15,18H9A1,1 0 0,1 8,17V14.74C6.19,13.47 5,11.38 5,9A7,7 0 0,1 12,2M9,21V20H15V21A1,1 0 0,1 14,22H10A1,1 0 0,1 9,21M12,4A5,5 0 0,0 7,9C7,11.05 8.23,12.81 10,13.58V16H14V13.58C15.77,12.81 17,11.05 17,9A5,5 0 0,0 12,4Z";
+var mdiLock = "M12,17A2,2 0 0,0 14,15C14,13.89 13.1,13 12,13A2,2 0 0,0 10,15A2,2 0 0,0 12,17M18,8A2,2 0 0,1 20,10V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V10C4,8.89 4.9,8 6,8H7V6A5,5 0 0,1 12,1A5,5 0 0,1 17,6V8H18M12,3A3,3 0 0,0 9,6V8H15V6A3,3 0 0,0 12,3Z";
+var mdiLockOpen = "M18,8A2,2 0 0,1 20,10V20A2,2 0 0,1 18,22H6C4.89,22 4,21.1 4,20V10A2,2 0 0,1 6,8H15V6A3,3 0 0,0 12,3A3,3 0 0,0 9,6H7A5,5 0 0,1 12,1A5,5 0 0,1 17,6V8H18M12,17A2,2 0 0,0 14,15A2,2 0 0,0 12,13A2,2 0 0,0 10,15A2,2 0 0,0 12,17Z";
+var mdiLockOpenVariant = "M18 1C15.24 1 13 3.24 13 6V8H4C2.9 8 2 8.89 2 10V20C2 21.11 2.9 22 4 22H16C17.11 22 18 21.11 18 20V10C18 8.9 17.11 8 16 8H15V6C15 4.34 16.34 3 18 3C19.66 3 21 4.34 21 6V8H23V6C23 3.24 20.76 1 18 1M10 13C11.1 13 12 13.89 12 15C12 16.11 11.11 17 10 17C8.9 17 8 16.11 8 15C8 13.9 8.9 13 10 13Z";
+var mdiMagnify = "M9.5,3A6.5,6.5 0 0,1 16,9.5C16,11.11 15.41,12.59 14.44,13.73L14.71,14H15.5L20.5,19L19,20.5L14,15.5V14.71L13.73,14.44C12.59,15.41 11.11,16 9.5,16A6.5,6.5 0 0,1 3,9.5A6.5,6.5 0 0,1 9.5,3M9.5,5C7,5 5,7 5,9.5C5,12 7,14 9.5,14C12,14 14,12 14,9.5C14,7 12,5 9.5,5Z";
+var mdiMagnifyMinus = "M9,2A7,7 0 0,1 16,9C16,10.57 15.5,12 14.61,13.19L15.41,14H16L22,20L20,22L14,16V15.41L13.19,14.61C12,15.5 10.57,16 9,16A7,7 0 0,1 2,9A7,7 0 0,1 9,2M5,8V10H13V8H5Z";
+var mdiMagnifyPlus = "M9,2A7,7 0 0,1 16,9C16,10.57 15.5,12 14.61,13.19L15.41,14H16L22,20L20,22L14,16V15.41L13.19,14.61C12,15.5 10.57,16 9,16A7,7 0 0,1 2,9A7,7 0 0,1 9,2M8,5V8H5V10H8V13H10V10H13V8H10V5H8Z";
+var mdiMenu = "M3,6H21V8H3V6M3,11H21V13H3V11M3,16H21V18H3V16Z";
+var mdiMenuDown = "M7,10L12,15L17,10H7Z";
+var mdiMenuOpen = "M21,15.61L19.59,17L14.58,12L19.59,7L21,8.39L17.44,12L21,15.61M3,6H16V8H3V6M3,13V11H13V13H3M3,18V16H16V18H3Z";
+var mdiMenuUp = "M7,15L12,10L17,15H7Z";
+var mdiMicrosoftXbox = "M6.43,3.72C6.5,3.66 6.57,3.6 6.62,3.56C8.18,2.55 10,2 12,2C13.88,2 15.64,2.5 17.14,3.42C17.25,3.5 17.54,3.69 17.7,3.88C16.25,2.28 12,5.7 12,5.7C10.5,4.57 9.17,3.8 8.16,3.5C7.31,3.29 6.73,3.5 6.46,3.7M19.34,5.21C19.29,5.16 19.24,5.11 19.2,5.06C18.84,4.66 18.38,4.56 18,4.59C17.61,4.71 15.9,5.32 13.8,7.31C13.8,7.31 16.17,9.61 17.62,11.96C19.07,14.31 19.93,16.16 19.4,18.73C21,16.95 22,14.59 22,12C22,9.38 21,7 19.34,5.21M15.73,12.96C15.08,12.24 14.13,11.21 12.86,9.95C12.59,9.68 12.3,9.4 12,9.1C12,9.1 11.53,9.56 10.93,10.17C10.16,10.94 9.17,11.95 8.61,12.54C7.63,13.59 4.81,16.89 4.65,18.74C4.65,18.74 4,17.28 5.4,13.89C6.3,11.68 9,8.36 10.15,7.28C10.15,7.28 9.12,6.14 7.82,5.35L7.77,5.32C7.14,4.95 6.46,4.66 5.8,4.62C5.13,4.67 4.71,5.16 4.71,5.16C3.03,6.95 2,9.35 2,12A10,10 0 0,0 12,22C14.93,22 17.57,20.74 19.4,18.73C19.4,18.73 19.19,17.4 17.84,15.5C17.53,15.07 16.37,13.69 15.73,12.96Z";
+var mdiMicrowave = "M4,5A2,2 0 0,0 2,7V17A2,2 0 0,0 4,19H20A2,2 0 0,0 22,17V7A2,2 0 0,0 20,5H4M4,7H16V17H4V7M19,7A1,1 0 0,1 20,8A1,1 0 0,1 19,9A1,1 0 0,1 18,8A1,1 0 0,1 19,7M13,9V15H15V9H13M19,11A1,1 0 0,1 20,12A1,1 0 0,1 19,13A1,1 0 0,1 18,12A1,1 0 0,1 19,11Z";
+var mdiMinus = "M19,13H5V11H19V13Z";
+var mdiMinusBox = "M17,13H7V11H17M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5C21,3.89 20.1,3 19,3Z";
+var mdiMinusCircle = "M17,13H7V11H17M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z";
+var mdiMonitor = "M21,16H3V4H21M21,2H3C1.89,2 1,2.89 1,4V16A2,2 0 0,0 3,18H10V20H8V22H16V20H14V18H21A2,2 0 0,0 23,16V4C23,2.89 22.1,2 21,2Z";
+var mdiMotionSensor = "M10,0.2C9,0.2 8.2,1 8.2,2C8.2,3 9,3.8 10,3.8C11,3.8 11.8,3 11.8,2C11.8,1 11,0.2 10,0.2M15.67,1A7.33,7.33 0 0,0 23,8.33V7A6,6 0 0,1 17,1H15.67M18.33,1C18.33,3.58 20.42,5.67 23,5.67V4.33C21.16,4.33 19.67,2.84 19.67,1H18.33M21,1A2,2 0 0,0 23,3V1H21M7.92,4.03C7.75,4.03 7.58,4.06 7.42,4.11L2,5.8V11H3.8V7.33L5.91,6.67L2,22H3.8L6.67,13.89L9,17V22H10.8V15.59L8.31,11.05L9.04,8.18L10.12,10H15V8.2H11.38L9.38,4.87C9.08,4.37 8.54,4.03 7.92,4.03Z";
+var mdiMovie = "M18,4L20,8H17L15,4H13L15,8H12L10,4H8L10,8H7L5,4H4A2,2 0 0,0 2,6V18A2,2 0 0,0 4,20H20A2,2 0 0,0 22,18V4H18Z";
+var mdiMovieOpen = "M20.84 2.18L16.91 2.96L19.65 6.5L21.62 6.1L20.84 2.18M13.97 3.54L12 3.93L14.75 7.46L16.71 7.07L13.97 3.54M9.07 4.5L7.1 4.91L9.85 8.44L11.81 8.05L9.07 4.5M4.16 5.5L3.18 5.69A2 2 0 0 0 1.61 8.04L2 10L6.9 9.03L4.16 5.5M2 10V20C2 21.11 2.9 22 4 22H20C21.11 22 22 21.11 22 20V10H2Z";
+var mdiMovieRoll = "M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2M12,4A2.5,2.5 0 0,0 9.5,6.5A2.5,2.5 0 0,0 12,9A2.5,2.5 0 0,0 14.5,6.5A2.5,2.5 0 0,0 12,4M4.4,9.53C3.97,10.84 4.69,12.25 6,12.68C7.32,13.1 8.73,12.39 9.15,11.07C9.58,9.76 8.86,8.35 7.55,7.92C6.24,7.5 4.82,8.21 4.4,9.53M19.61,9.5C19.18,8.21 17.77,7.5 16.46,7.92C15.14,8.34 14.42,9.75 14.85,11.07C15.28,12.38 16.69,13.1 18,12.67C19.31,12.25 20.03,10.83 19.61,9.5M7.31,18.46C8.42,19.28 10,19.03 10.8,17.91C11.61,16.79 11.36,15.23 10.24,14.42C9.13,13.61 7.56,13.86 6.75,14.97C5.94,16.09 6.19,17.65 7.31,18.46M16.7,18.46C17.82,17.65 18.07,16.09 17.26,14.97C16.45,13.85 14.88,13.6 13.77,14.42C12.65,15.23 12.4,16.79 13.21,17.91C14,19.03 15.59,19.27 16.7,18.46M12,10.5A1.5,1.5 0 0,0 10.5,12A1.5,1.5 0 0,0 12,13.5A1.5,1.5 0 0,0 13.5,12A1.5,1.5 0 0,0 12,10.5Z";
+var mdiMusic = "M21,3V15.5A3.5,3.5 0 0,1 17.5,19A3.5,3.5 0 0,1 14,15.5A3.5,3.5 0 0,1 17.5,12C18.04,12 18.55,12.12 19,12.34V6.47L9,8.6V17.5A3.5,3.5 0 0,1 5.5,21A3.5,3.5 0 0,1 2,17.5A3.5,3.5 0 0,1 5.5,14C6.04,14 6.55,14.12 7,14.34V6L21,3Z";
+var mdiMusicBox = "M16,9H13V14.5A2.5,2.5 0 0,1 10.5,17A2.5,2.5 0 0,1 8,14.5A2.5,2.5 0 0,1 10.5,12C11.07,12 11.58,12.19 12,12.5V7H16M19,3H5A2,2 0 0,0 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5A2,2 0 0,0 19,3Z";
+var mdiMusicBoxOutline = "M16,9H13V14.5A2.5,2.5 0 0,1 10.5,17A2.5,2.5 0 0,1 8,14.5A2.5,2.5 0 0,1 10.5,12C11.07,12 11.58,12.19 12,12.5V7H16V9M19,3A2,2 0 0,1 21,5V19A2,2 0 0,1 19,21H5A2,2 0 0,1 3,19V5A2,2 0 0,1 5,3H19M5,5V19H19V5H5Z";
+var mdiMusicNote = "M12 3V13.55C11.41 13.21 10.73 13 10 13C7.79 13 6 14.79 6 17S7.79 21 10 21 14 19.21 14 17V7H18V3H12Z";
+var mdiNetflix = "M6.5,2H10.5L13.44,10.83L13.5,2H17.5V22C16.25,21.78 14.87,21.64 13.41,21.58L10.5,13L10.43,21.59C9.03,21.65 7.7,21.79 6.5,22V2Z";
+var mdiNintendoGameBoy = "M7 1C5.9 1 5 1.9 5 3V21C5 22.11 5.9 23 7 23H14C16.76 23 19 20.76 19 18V3C19 1.9 18.11 1 17 1H7M8 4H16V11H8V4M9 14H10V16H12V17H10V19H9V17H7V16H9V14M16 15C16.55 15 17 15.45 17 16C17 16.55 16.55 17 16 17C15.45 17 15 16.55 15 16C15 15.45 15.45 15 16 15M14 17C14.55 17 15 17.45 15 18C15 18.55 14.55 19 14 19C13.45 19 13 18.55 13 18C13 17.45 13.45 17 14 17Z";
+var mdiNintendoSwitch = "M10.04,20.4H7.12C6.19,20.4 5.3,20 4.64,19.36C4,18.7 3.6,17.81 3.6,16.88V7.12C3.6,6.19 4,5.3 4.64,4.64C5.3,4 6.19,3.62 7.12,3.62H10.04V20.4M7.12,2A5.12,5.12 0 0,0 2,7.12V16.88C2,19.71 4.29,22 7.12,22H11.65V2H7.12M5.11,8C5.11,9.04 5.95,9.88 7,9.88C8.03,9.88 8.87,9.04 8.87,8C8.87,6.96 8.03,6.12 7,6.12C5.95,6.12 5.11,6.96 5.11,8M17.61,11C18.72,11 19.62,11.89 19.62,13C19.62,14.12 18.72,15 17.61,15C16.5,15 15.58,14.12 15.58,13C15.58,11.89 16.5,11 17.61,11M16.88,22A5.12,5.12 0 0,0 22,16.88V7.12C22,4.29 19.71,2 16.88,2H13.65V22H16.88Z";
+var mdiNumeric = "M4,17V9H2V7H6V17H4M22,15C22,16.11 21.1,17 20,17H16V15H20V13H18V11H20V9H16V7H20A2,2 0 0,1 22,9V10.5A1.5,1.5 0 0,1 20.5,12A1.5,1.5 0 0,1 22,13.5V15M14,15V17H8V13C8,11.89 8.9,11 10,11H12V9H8V7H12A2,2 0 0,1 14,9V11C14,12.11 13.1,13 12,13H10V15H14Z";
+var mdiPalette = "M17.5,12A1.5,1.5 0 0,1 16,10.5A1.5,1.5 0 0,1 17.5,9A1.5,1.5 0 0,1 19,10.5A1.5,1.5 0 0,1 17.5,12M14.5,8A1.5,1.5 0 0,1 13,6.5A1.5,1.5 0 0,1 14.5,5A1.5,1.5 0 0,1 16,6.5A1.5,1.5 0 0,1 14.5,8M9.5,8A1.5,1.5 0 0,1 8,6.5A1.5,1.5 0 0,1 9.5,5A1.5,1.5 0 0,1 11,6.5A1.5,1.5 0 0,1 9.5,8M6.5,12A1.5,1.5 0 0,1 5,10.5A1.5,1.5 0 0,1 6.5,9A1.5,1.5 0 0,1 8,10.5A1.5,1.5 0 0,1 6.5,12M12,3A9,9 0 0,0 3,12A9,9 0 0,0 12,21A1.5,1.5 0 0,0 13.5,19.5C13.5,19.11 13.35,18.76 13.11,18.5C12.88,18.23 12.73,17.88 12.73,17.5A1.5,1.5 0 0,1 14.23,16H16A5,5 0 0,0 21,11C21,6.58 16.97,3 12,3Z";
+var mdiPaletteOutline = "M12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2C17.5,2 22,6 22,11A6,6 0 0,1 16,17H14.2C13.9,17 13.7,17.2 13.7,17.5C13.7,17.6 13.8,17.7 13.8,17.8C14.2,18.3 14.4,18.9 14.4,19.5C14.5,20.9 13.4,22 12,22M12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20C12.3,20 12.5,19.8 12.5,19.5C12.5,19.3 12.4,19.2 12.4,19.1C12,18.6 11.8,18.1 11.8,17.5C11.8,16.1 12.9,15 14.3,15H16A4,4 0 0,0 20,11C20,7.1 16.4,4 12,4M6.5,10C7.3,10 8,10.7 8,11.5C8,12.3 7.3,13 6.5,13C5.7,13 5,12.3 5,11.5C5,10.7 5.7,10 6.5,10M9.5,6C10.3,6 11,6.7 11,7.5C11,8.3 10.3,9 9.5,9C8.7,9 8,8.3 8,7.5C8,6.7 8.7,6 9.5,6M14.5,6C15.3,6 16,6.7 16,7.5C16,8.3 15.3,9 14.5,9C13.7,9 13,8.3 13,7.5C13,6.7 13.7,6 14.5,6M17.5,10C18.3,10 19,10.7 19,11.5C19,12.3 18.3,13 17.5,13C16.7,13 16,12.3 16,11.5C16,10.7 16.7,10 17.5,10Z";
+var mdiPause = "M14,19H18V5H14M6,19H10V5H6V19Z";
+var mdiPauseCircle = "M15,16H13V8H15M11,16H9V8H11M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z";
+var mdiPauseCircleOutline = "M13,16V8H15V16H13M9,16V8H11V16H9M12,2A10,10 0 0,1 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12A10,10 0 0,1 12,2M12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20A8,8 0 0,0 20,12A8,8 0 0,0 12,4Z";
+var mdiPictureInPictureBottomRight = "M19,11H11V17H19V11M23,19V5C23,3.88 22.1,3 21,3H3A2,2 0 0,0 1,5V19A2,2 0 0,0 3,21H21A2,2 0 0,0 23,19M21,19H3V4.97H21V19Z";
+var mdiPlay = "M8,5.14V19.14L19,12.14L8,5.14Z";
+var mdiPlayCircle = "M10,16.5V7.5L16,12M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z";
+var mdiPlayCircleOutline = "M12,20C7.59,20 4,16.41 4,12C4,7.59 7.59,4 12,4C16.41,4 20,7.59 20,12C20,16.41 16.41,20 12,20M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M10,16.5L16,12L10,7.5V16.5Z";
+var mdiPlayPause = "M3,5V19L11,12M13,19H16V5H13M18,5V19H21V5";
+var mdiPlex = "M4,2C2.89,2 2,2.89 2,4V20C2,21.11 2.89,22 4,22H20C21.11,22 22,21.11 22,20V4C22,2.89 21.11,2 20,2H4M8.56,6H12.06L15.5,12L12.06,18H8.56L12,12L8.56,6Z";
+var mdiPlus = "M19,13H13V19H11V13H5V11H11V5H13V11H19V13Z";
+var mdiPlusBox = "M17,13H13V17H11V13H7V11H11V7H13V11H17M19,3H5C3.89,3 3,3.89 3,5V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V5C21,3.89 20.1,3 19,3Z";
+var mdiPlusCircle = "M17,13H13V17H11V13H7V11H11V7H13V11H17M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z";
+var mdiPopcorn = "M7,22H4.75C4.75,22 4,22 3.81,20.65L2.04,3.81L2,3.5C2,2.67 2.9,2 4,2C5.1,2 6,2.67 6,3.5C6,2.67 6.9,2 8,2C9.1,2 10,2.67 10,3.5C10,2.67 10.9,2 12,2C13.09,2 14,2.66 14,3.5V3.5C14,2.67 14.9,2 16,2C17.1,2 18,2.67 18,3.5C18,2.67 18.9,2 20,2C21.1,2 22,2.67 22,3.5L21.96,3.81L20.19,20.65C20,22 19.25,22 19.25,22H17L16.5,22H13.75L10.25,22H7.5L7,22M17.85,4.93C17.55,4.39 16.84,4 16,4C15.19,4 14.36,4.36 14,4.87L13.78,20H16.66L17.85,4.93M10,4.87C9.64,4.36 8.81,4 8,4C7.16,4 6.45,4.39 6.15,4.93L7.34,20H10.22L10,4.87Z";
+var mdiPower = "M16.56,5.44L15.11,6.89C16.84,7.94 18,9.83 18,12A6,6 0 0,1 12,18A6,6 0 0,1 6,12C6,9.83 7.16,7.94 8.88,6.88L7.44,5.44C5.36,6.88 4,9.28 4,12A8,8 0 0,0 12,20A8,8 0 0,0 20,12C20,9.28 18.64,6.88 16.56,5.44M13,3H11V13H13";
+var mdiPowerCycle = "M12,3A9,9 0 0,0 3,12A9,9 0 0,0 12,21A9,9 0 0,0 21,12A9,9 0 0,0 12,3M12,19A7,7 0 0,1 5,12A7,7 0 0,1 12,5A7,7 0 0,1 19,12A7,7 0 0,1 12,19M13,17H11V7H13V17Z";
+var mdiPowerOff = "M12,3A9,9 0 0,0 3,12A9,9 0 0,0 12,21A9,9 0 0,0 21,12A9,9 0 0,0 12,3M12,19A7,7 0 0,1 5,12A7,7 0 0,1 12,5A7,7 0 0,1 19,12A7,7 0 0,1 12,19Z";
+var mdiPowerOn = "M11,3H13V21H11V3Z";
+var mdiPowerSleep = "M18.73,18C15.4,21.69 9.71,22 6,18.64C2.33,15.31 2.04,9.62 5.37,5.93C6.9,4.25 9,3.2 11.27,3C7.96,6.7 8.27,12.39 12,15.71C13.63,17.19 15.78,18 18,18C18.25,18 18.5,18 18.73,18Z";
+var mdiPowerStandby = "M13,3H11V13H13V3M17.83,5.17L16.41,6.59C18.05,7.91 19,9.9 19,12A7,7 0 0,1 12,19C8.14,19 5,15.88 5,12C5,9.91 5.95,7.91 7.58,6.58L6.17,5.17C2.38,8.39 1.92,14.07 5.14,17.86C8.36,21.64 14.04,22.1 17.83,18.88C19.85,17.17 21,14.65 21,12C21,9.37 19.84,6.87 17.83,5.17Z";
+var mdiProjector = "M16,6C14.87,6 13.77,6.35 12.84,7H4C2.89,7 2,7.89 2,9V15C2,16.11 2.89,17 4,17H5V18A1,1 0 0,0 6,19H8A1,1 0 0,0 9,18V17H15V18A1,1 0 0,0 16,19H18A1,1 0 0,0 19,18V17H20C21.11,17 22,16.11 22,15V9C22,7.89 21.11,7 20,7H19.15C18.23,6.35 17.13,6 16,6M16,7.5A3.5,3.5 0 0,1 19.5,11A3.5,3.5 0 0,1 16,14.5A3.5,3.5 0 0,1 12.5,11A3.5,3.5 0 0,1 16,7.5M4,9H8V10H4V9M16,9A2,2 0 0,0 14,11A2,2 0 0,0 16,13A2,2 0 0,0 18,11A2,2 0 0,0 16,9M4,11H8V12H4V11M4,13H8V14H4V13Z";
+var mdiProjectorScreen = "M4,2A1,1 0 0,0 3,3V4A1,1 0 0,0 4,5H5V14H11V16.59L6.79,20.79L8.21,22.21L11,19.41V22H13V19.41L15.79,22.21L17.21,20.79L13,16.59V14H19V5H20A1,1 0 0,0 21,4V3A1,1 0 0,0 20,2H4Z";
+var mdiRadiator = "M7.95,3L6.53,5.19L7.95,7.4H7.94L5.95,10.5L4.22,9.6L5.64,7.39L4.22,5.19L6.22,2.09L7.95,3M13.95,2.89L12.53,5.1L13.95,7.3L13.94,7.31L11.95,10.4L10.22,9.5L11.64,7.3L10.22,5.1L12.22,2L13.95,2.89M20,2.89L18.56,5.1L20,7.3V7.31L18,10.4L16.25,9.5L17.67,7.3L16.25,5.1L18.25,2L20,2.89M2,22V14A2,2 0 0,1 4,12H20A2,2 0 0,1 22,14V22H20V20H4V22H2M6,14A1,1 0 0,0 5,15V17A1,1 0 0,0 6,18A1,1 0 0,0 7,17V15A1,1 0 0,0 6,14M10,14A1,1 0 0,0 9,15V17A1,1 0 0,0 10,18A1,1 0 0,0 11,17V15A1,1 0 0,0 10,14M14,14A1,1 0 0,0 13,15V17A1,1 0 0,0 14,18A1,1 0 0,0 15,17V15A1,1 0 0,0 14,14M18,14A1,1 0 0,0 17,15V17A1,1 0 0,0 18,18A1,1 0 0,0 19,17V15A1,1 0 0,0 18,14Z";
+var mdiRadio = "M20,6A2,2 0 0,1 22,8V20A2,2 0 0,1 20,22H4A2,2 0 0,1 2,20V8C2,7.15 2.53,6.42 3.28,6.13L15.71,1L16.47,2.83L8.83,6H20M20,8H4V12H16V10H18V12H20V8M7,14A3,3 0 0,0 4,17A3,3 0 0,0 7,20A3,3 0 0,0 10,17A3,3 0 0,0 7,14Z";
+var mdiRadioTower = "M12,10A2,2 0 0,1 14,12C14,12.5 13.82,12.94 13.53,13.29L16.7,22H14.57L12,14.93L9.43,22H7.3L10.47,13.29C10.18,12.94 10,12.5 10,12A2,2 0 0,1 12,10M12,8A4,4 0 0,0 8,12C8,12.5 8.1,13 8.28,13.46L7.4,15.86C6.53,14.81 6,13.47 6,12A6,6 0 0,1 12,6A6,6 0 0,1 18,12C18,13.47 17.47,14.81 16.6,15.86L15.72,13.46C15.9,13 16,12.5 16,12A4,4 0 0,0 12,8M12,4A8,8 0 0,0 4,12C4,14.36 5,16.5 6.64,17.94L5.92,19.94C3.54,18.11 2,15.23 2,12A10,10 0 0,1 12,2A10,10 0 0,1 22,12C22,15.23 20.46,18.11 18.08,19.94L17.36,17.94C19,16.5 20,14.36 20,12A8,8 0 0,0 12,4Z";
+var mdiRecord = "M19,12C19,15.86 15.86,19 12,19C8.14,19 5,15.86 5,12C5,8.14 8.14,5 12,5C15.86,5 19,8.14 19,12Z";
+var mdiRecordRec = "M12.5,5A7.5,7.5 0 0,0 5,12.5A7.5,7.5 0 0,0 12.5,20A7.5,7.5 0 0,0 20,12.5A7.5,7.5 0 0,0 12.5,5M7,10H9A1,1 0 0,1 10,11V12C10,12.5 9.62,12.9 9.14,12.97L10.31,15H9.15L8,13V15H7M12,10H14V11H12V12H14V13H12V14H14V15H12A1,1 0 0,1 11,14V11A1,1 0 0,1 12,10M16,10H18V11H16V14H18V15H16A1,1 0 0,1 15,14V11A1,1 0 0,1 16,10M8,11V12H9V11";
+var mdiRedo = "M18.4,10.6C16.55,9 14.15,8 11.5,8C6.85,8 2.92,11.03 1.54,15.22L3.9,16C4.95,12.81 7.95,10.5 11.5,10.5C13.45,10.5 15.23,11.22 16.62,12.38L13,16H22V7L18.4,10.6Z";
+var mdiRefresh = "M17.65,6.35C16.2,4.9 14.21,4 12,4A8,8 0 0,0 4,12A8,8 0 0,0 12,20C15.73,20 18.84,17.45 19.73,14H17.65C16.83,16.33 14.61,18 12,18A6,6 0 0,1 6,12A6,6 0 0,1 12,6C13.66,6 15.14,6.69 16.22,7.78L13,11H20V4L17.65,6.35Z";
+var mdiReload = "M2 12C2 16.97 6.03 21 11 21C13.39 21 15.68 20.06 17.4 18.4L15.9 16.9C14.63 18.25 12.86 19 11 19C4.76 19 1.64 11.46 6.05 7.05C10.46 2.64 18 5.77 18 12H15L19 16H19.1L23 12H20C20 7.03 15.97 3 11 3C6.03 3 2 7.03 2 12Z";
+var mdiRemote = "M12,0C8.96,0 6.21,1.23 4.22,3.22L5.63,4.63C7.26,3 9.5,2 12,2C14.5,2 16.74,3 18.36,4.64L19.77,3.23C17.79,1.23 15.04,0 12,0M7.05,6.05L8.46,7.46C9.37,6.56 10.62,6 12,6C13.38,6 14.63,6.56 15.54,7.46L16.95,6.05C15.68,4.78 13.93,4 12,4C10.07,4 8.32,4.78 7.05,6.05M12,15A2,2 0 0,1 10,13A2,2 0 0,1 12,11A2,2 0 0,1 14,13A2,2 0 0,1 12,15M15,9H9A1,1 0 0,0 8,10V22A1,1 0 0,0 9,23H15A1,1 0 0,0 16,22V10A1,1 0 0,0 15,9Z";
+var mdiRemoteOff = "M2,5.27L3.28,4L21,21.72L19.73,23L16,19.27V22A1,1 0 0,1 15,23H9C8.46,23 8,22.55 8,22V11.27L2,5.27M12,0C15.05,0 17.8,1.23 19.77,3.23L18.36,4.64C16.75,3 14.5,2 12,2C9.72,2 7.64,2.85 6.06,4.24L4.64,2.82C6.59,1.07 9.17,0 12,0M12,4C13.94,4 15.69,4.78 16.95,6.05L15.55,7.46C14.64,6.56 13.39,6 12,6C10.83,6 9.76,6.4 8.9,7.08L7.5,5.66C8.7,4.62 10.28,4 12,4M15,9C15.56,9 16,9.45 16,10V14.18L13.5,11.69L13.31,11.5L10.82,9H15M10.03,13.3C10.16,14.16 10.84,14.85 11.71,15L10.03,13.3Z";
+var mdiRemoteTv = "M9,2C7.89,2 7,2.89 7,4V20C7,21.11 7.89,22 9,22H15C16.11,22 17,21.11 17,20V4C17,2.89 16.11,2 15,2H13V4H11V2H9M11,6H13V8H15V10H13V12H11V10H9V8H11V6M9,14H11V16H9V14M13,14H15V16H13V14M9,18H11V20H9V18M13,18H15V20H13V18Z";
+var mdiRepeat = "M17,17H7V14L3,18L7,22V19H19V13H17M7,7H17V10L21,6L17,2V5H5V11H7V7Z";
+var mdiRepeatOnce = "M13,15V9H12L10,10V11H11.5V15M17,17H7V14L3,18L7,22V19H19V13H17M7,7H17V10L21,6L17,2V5H5V11H7V7Z";
+var mdiRewind = "M11.5,12L20,18V6M11,18V6L2.5,12L11,18Z";
+var mdiRhombus = "M12 2C11.5 2 11 2.19 10.59 2.59L2.59 10.59C1.8 11.37 1.8 12.63 2.59 13.41L10.59 21.41C11.37 22.2 12.63 22.2 13.41 21.41L21.41 13.41C22.2 12.63 22.2 11.37 21.41 10.59L13.41 2.59C13 2.19 12.5 2 12 2Z";
+var mdiRhombusOutline = "M12 2C11.5 2 11 2.19 10.59 2.59L2.59 10.59C1.8 11.37 1.8 12.63 2.59 13.41L10.59 21.41C11.37 22.2 12.63 22.2 13.41 21.41L21.41 13.41C22.2 12.63 22.2 11.37 21.41 10.59L13.41 2.59C13 2.19 12.5 2 12 2M12 4L20 12L12 20L4 12Z";
+var mdiRobot = "M12,2A2,2 0 0,1 14,4C14,4.74 13.6,5.39 13,5.73V7H14A7,7 0 0,1 21,14H22A1,1 0 0,1 23,15V18A1,1 0 0,1 22,19H21V20A2,2 0 0,1 19,22H5A2,2 0 0,1 3,20V19H2A1,1 0 0,1 1,18V15A1,1 0 0,1 2,14H3A7,7 0 0,1 10,7H11V5.73C10.4,5.39 10,4.74 10,4A2,2 0 0,1 12,2M7.5,13A2.5,2.5 0 0,0 5,15.5A2.5,2.5 0 0,0 7.5,18A2.5,2.5 0 0,0 10,15.5A2.5,2.5 0 0,0 7.5,13M16.5,13A2.5,2.5 0 0,0 14,15.5A2.5,2.5 0 0,0 16.5,18A2.5,2.5 0 0,0 19,15.5A2.5,2.5 0 0,0 16.5,13Z";
+var mdiRobotVacuum = "M12,2C14.65,2 17.19,3.06 19.07,4.93L17.65,6.35C16.15,4.85 14.12,4 12,4C9.88,4 7.84,4.84 6.35,6.35L4.93,4.93C6.81,3.06 9.35,2 12,2M3.66,6.5L5.11,7.94C4.39,9.17 4,10.57 4,12A8,8 0 0,0 12,20A8,8 0 0,0 20,12C20,10.57 19.61,9.17 18.88,7.94L20.34,6.5C21.42,8.12 22,10.04 22,12A10,10 0 0,1 12,22A10,10 0 0,1 2,12C2,10.04 2.58,8.12 3.66,6.5M12,6A6,6 0 0,1 18,12C18,13.59 17.37,15.12 16.24,16.24L14.83,14.83C14.08,15.58 13.06,16 12,16C10.94,16 9.92,15.58 9.17,14.83L7.76,16.24C6.63,15.12 6,13.59 6,12A6,6 0 0,1 12,6M12,8A1,1 0 0,0 11,9A1,1 0 0,0 12,10A1,1 0 0,0 13,9A1,1 0 0,0 12,8Z";
+var mdiRobotVacuumVariant = "M5,3A2,2 0 0,0 3,5V7H5V5H19V7H21V5A2,2 0 0,0 19,3H5M8,7V9H16V7H8M3,9V12A9,9 0 0,0 12,21A9,9 0 0,0 21,12V9H19V12A7,7 0 0,1 12,19A7,7 0 0,1 5,12V9H3M12,12A2.5,2.5 0 0,0 9.5,14.5A2.5,2.5 0 0,0 12,17A2.5,2.5 0 0,0 14.5,14.5A2.5,2.5 0 0,0 12,12Z";
+var mdiRouterWireless = "M20.2,5.9L21,5.1C19.6,3.7 17.8,3 16,3C14.2,3 12.4,3.7 11,5.1L11.8,5.9C13,4.8 14.5,4.2 16,4.2C17.5,4.2 19,4.8 20.2,5.9M19.3,6.7C18.4,5.8 17.2,5.3 16,5.3C14.8,5.3 13.6,5.8 12.7,6.7L13.5,7.5C14.2,6.8 15.1,6.5 16,6.5C16.9,6.5 17.8,6.8 18.5,7.5L19.3,6.7M19,13H17V9H15V13H5A2,2 0 0,0 3,15V19A2,2 0 0,0 5,21H19A2,2 0 0,0 21,19V15A2,2 0 0,0 19,13M8,18H6V16H8V18M11.5,18H9.5V16H11.5V18M15,18H13V16H15V18Z";
+var mdiRun = "M13.5,5.5C14.59,5.5 15.5,4.58 15.5,3.5C15.5,2.38 14.59,1.5 13.5,1.5C12.39,1.5 11.5,2.38 11.5,3.5C11.5,4.58 12.39,5.5 13.5,5.5M9.89,19.38L10.89,15L13,17V23H15V15.5L12.89,13.5L13.5,10.5C14.79,12 16.79,13 19,13V11C17.09,11 15.5,10 14.69,8.58L13.69,7C13.29,6.38 12.69,6 12,6C11.69,6 11.5,6.08 11.19,6.08L6,8.28V13H8V9.58L9.79,8.88L8.19,17L3.29,16L2.89,18L9.89,19.38Z";
+var mdiSeat = "M4,18V21H7V18H17V21H20V15H4V18M19,10H22V13H19V10M2,10H5V13H2V10M17,13H7V5A2,2 0 0,1 9,3H15A2,2 0 0,1 17,5V13Z";
+var mdiSeatOutline = "M15,5V12H9V5H15M15,3H9A2,2 0 0,0 7,5V14H17V5A2,2 0 0,0 15,3M22,10H19V13H22V10M5,10H2V13H5V10M20,15H4V21H6V17H18V21H20V15Z";
+var mdiServer = "M4,1H20A1,1 0 0,1 21,2V6A1,1 0 0,1 20,7H4A1,1 0 0,1 3,6V2A1,1 0 0,1 4,1M4,9H20A1,1 0 0,1 21,10V14A1,1 0 0,1 20,15H4A1,1 0 0,1 3,14V10A1,1 0 0,1 4,9M4,17H20A1,1 0 0,1 21,18V22A1,1 0 0,1 20,23H4A1,1 0 0,1 3,22V18A1,1 0 0,1 4,17M9,5H10V3H9V5M9,13H10V11H9V13M9,21H10V19H9V21M5,3V5H7V3H5M5,11V13H7V11H5M5,19V21H7V19H5Z";
+var mdiShieldCheck = "M10,17L6,13L7.41,11.59L10,14.17L16.59,7.58L18,9M12,1L3,5V11C3,16.55 6.84,21.74 12,23C17.16,21.74 21,16.55 21,11V5L12,1Z";
+var mdiShieldHome = "M11,13H13V16H16V11H18L12,6L6,11H8V16H11V13M12,1L21,5V11C21,16.55 17.16,21.74 12,23C6.84,21.74 3,16.55 3,11V5L12,1Z";
+var mdiShieldHomeOutline = "M21,11C21,16.55 17.16,21.74 12,23C6.84,21.74 3,16.55 3,11V5L12,1L21,5V11M12,21C15.75,20 19,15.54 19,11.22V6.3L12,3.18L5,6.3V11.22C5,15.54 8.25,20 12,21M11,14H13V17H16V12H18L12,7L6,12H8V17H11V14";
+var mdiShuffle = "M14.83,13.41L13.42,14.82L16.55,17.95L14.5,20H20V14.5L17.96,16.54L14.83,13.41M14.5,4L16.54,6.04L4,18.59L5.41,20L17.96,7.46L20,9.5V4M10.59,9.17L5.41,4L4,5.41L9.17,10.58L10.59,9.17Z";
+var mdiSilverwareForkKnife = "M11,9H9V2H7V9H5V2H3V9C3,11.12 4.66,12.84 6.75,12.97V22H9.25V12.97C11.34,12.84 13,11.12 13,9V2H11V9M16,6V14H18.5V22H21V2C18.24,2 16,4.24 16,6Z";
+var mdiSkipBackward = "M20,5V19L13,12M6,5V19H4V5M13,5V19L6,12";
+var mdiSkipForward = "M4,5V19L11,12M18,5V19H20V5M11,5V19L18,12";
+var mdiSkipNext = "M16,18H18V6H16M6,18L14.5,12L6,6V18Z";
+var mdiSkipPrevious = "M6,18V6H8V18H6M9.5,12L18,6V18L9.5,12Z";
+var mdiSleep = "M23,12H17V10L20.39,6H17V4H23V6L19.62,10H23V12M15,16H9V14L12.39,10H9V8H15V10L11.62,14H15V16M7,20H1V18L4.39,14H1V12H7V14L3.62,18H7V20Z";
+var mdiSleepOff = "M2,5.27L3.28,4L20,20.72L18.73,22L12.73,16H9V14L9.79,13.06L2,5.27M23,12H17V10L20.39,6H17V4H23V6L19.62,10H23V12M9.82,8H15V10L13.54,11.72L9.82,8M7,20H1V18L4.39,14H1V12H7V14L3.62,18H7V20Z";
+var mdiSnowflake = "M20.79,13.95L18.46,14.57L16.46,13.44V10.56L18.46,9.43L20.79,10.05L21.31,8.12L19.54,7.65L20,5.88L18.07,5.36L17.45,7.69L15.45,8.82L13,7.38V5.12L14.71,3.41L13.29,2L12,3.29L10.71,2L9.29,3.41L11,5.12V7.38L8.5,8.82L6.5,7.69L5.92,5.36L4,5.88L4.47,7.65L2.7,8.12L3.22,10.05L5.55,9.43L7.55,10.56V13.45L5.55,14.58L3.22,13.96L2.7,15.89L4.47,16.36L4,18.12L5.93,18.64L6.55,16.31L8.55,15.18L11,16.62V18.88L9.29,20.59L10.71,22L12,20.71L13.29,22L14.7,20.59L13,18.88V16.62L15.5,15.17L17.5,16.3L18.12,18.63L20,18.12L19.53,16.35L21.3,15.88L20.79,13.95M9.5,10.56L12,9.11L14.5,10.56V13.44L12,14.89L9.5,13.44V10.56Z";
+var mdiSofa = "M12.5 7C12.5 5.89 13.39 5 14.5 5H18C19.1 5 20 5.9 20 7V9.16C18.84 9.57 18 10.67 18 11.97V14H12.5V7M6 11.96V14H11.5V7C11.5 5.89 10.61 5 9.5 5H6C4.9 5 4 5.9 4 7V9.15C5.16 9.56 6 10.67 6 11.96M20.66 10.03C19.68 10.19 19 11.12 19 12.12V15H5V12C5 10.9 4.11 10 3 10S1 10.9 1 12V17C1 18.1 1.9 19 3 19V21H5V19H19V21H21V19C22.1 19 23 18.1 23 17V12C23 10.79 21.91 9.82 20.66 10.03Z";
+var mdiSofaOutline = "M21 9V7C21 5.35 19.65 4 18 4H14C13.23 4 12.53 4.3 12 4.78C11.47 4.3 10.77 4 10 4H6C4.35 4 3 5.35 3 7V9C1.35 9 0 10.35 0 12V17C0 18.65 1.35 20 3 20V22H5V20H19V22H21V20C22.65 20 24 18.65 24 17V12C24 10.35 22.65 9 21 9M14 6H18C18.55 6 19 6.45 19 7V9.78C18.39 10.33 18 11.12 18 12V14H13V7C13 6.45 13.45 6 14 6M5 7C5 6.45 5.45 6 6 6H10C10.55 6 11 6.45 11 7V14H6V12C6 11.12 5.61 10.33 5 9.78V7M22 17C22 17.55 21.55 18 21 18H3C2.45 18 2 17.55 2 17V12C2 11.45 2.45 11 3 11S4 11.45 4 12V16H20V12C20 11.45 20.45 11 21 11S22 11.45 22 12V17Z";
+var mdiSonyPlaystation = "M9.5,4.27C10.88,4.53 12.9,5.14 14,5.5C16.75,6.45 17.69,7.63 17.69,10.29C17.69,12.89 16.09,13.87 14.05,12.89V8.05C14.05,7.5 13.95,6.97 13.41,6.82C13,6.69 12.76,7.07 12.76,7.63V19.73L9.5,18.69V4.27M13.37,17.62L18.62,15.75C19.22,15.54 19.31,15.24 18.83,15.08C18.34,14.92 17.47,14.97 16.87,15.18L13.37,16.41V14.45L13.58,14.38C13.58,14.38 14.59,14 16,13.87C17.43,13.71 19.17,13.89 20.53,14.4C22.07,14.89 22.25,15.61 21.86,16.1C21.46,16.6 20.5,16.95 20.5,16.95L13.37,19.5V17.62M3.5,17.42C1.93,17 1.66,16.05 2.38,15.5C3.05,15 4.18,14.65 4.18,14.65L8.86,13V14.88L5.5,16.09C4.9,16.3 4.81,16.6 5.29,16.76C5.77,16.92 6.65,16.88 7.24,16.66L8.86,16.08V17.77L8.54,17.83C6.92,18.09 5.2,18 3.5,17.42Z";
+var mdiSort = "M18 21L14 17H17V7H14L18 3L22 7H19V17H22M2 19V17H12V19M2 13V11H9V13M2 7V5H6V7H2Z";
+var mdiSoundbar = "M4 8C2.9 8 2 8.9 2 10V14C2 15.11 2.9 16 4 16H20C21.11 16 22 15.11 22 14V10C22 8.9 21.11 8 20 8M9 10C10.11 10 11 10.9 11 12C11 13.11 10.11 14 9 14C7.9 14 7 13.11 7 12C7 10.9 7.9 10 9 10M15 10C16.11 10 17 10.9 17 12C17 13.11 16.11 14 15 14C13.9 14 13 13.11 13 12C13 10.9 13.9 10 15 10M5 11C5.55 11 6 11.45 6 12C6 12.55 5.55 13 5 13C4.45 13 4 12.55 4 12C4 11.45 4.45 11 5 11M9 11C8.45 11 8 11.45 8 12C8 12.55 8.45 13 9 13C9.55 13 10 12.55 10 12C10 11.45 9.55 11 9 11M15 11C14.45 11 14 11.45 14 12C14 12.55 14.45 13 15 13C15.55 13 16 12.55 16 12C16 11.45 15.55 11 15 11M19 11C19.55 11 20 11.45 20 12C20 12.55 19.55 13 19 13C18.45 13 18 12.55 18 12C18 11.45 18.45 11 19 11Z";
+var mdiSpeaker = "M12,12A3,3 0 0,0 9,15A3,3 0 0,0 12,18A3,3 0 0,0 15,15A3,3 0 0,0 12,12M12,20A5,5 0 0,1 7,15A5,5 0 0,1 12,10A5,5 0 0,1 17,15A5,5 0 0,1 12,20M12,4A2,2 0 0,1 14,6A2,2 0 0,1 12,8C10.89,8 10,7.1 10,6C10,4.89 10.89,4 12,4M17,2H7C5.89,2 5,2.89 5,4V20A2,2 0 0,0 7,22H17A2,2 0 0,0 19,20V4C19,2.89 18.1,2 17,2Z";
+var mdiSpeakerOff = "M2,5.27L3.28,4L21,21.72L19.73,23L18.27,21.54C17.93,21.83 17.5,22 17,22H7C5.89,22 5,21.1 5,20V8.27L2,5.27M12,18A3,3 0 0,1 9,15C9,14.24 9.28,13.54 9.75,13L8.33,11.6C7.5,12.5 7,13.69 7,15A5,5 0 0,0 12,20C13.31,20 14.5,19.5 15.4,18.67L14,17.25C13.45,17.72 12.76,18 12,18M17,15A5,5 0 0,0 12,10H11.82L5.12,3.3C5.41,2.54 6.14,2 7,2H17A2,2 0 0,1 19,4V17.18L17,15.17V15M12,4C10.89,4 10,4.89 10,6A2,2 0 0,0 12,8A2,2 0 0,0 14,6C14,4.89 13.1,4 12,4Z";
+var mdiSpeakerWireless = "M20.07,19.07L18.66,17.66C20.11,16.22 21,14.21 21,12C21,9.78 20.11,7.78 18.66,6.34L20.07,4.93C21.88,6.74 23,9.24 23,12C23,14.76 21.88,17.26 20.07,19.07M17.24,16.24L15.83,14.83C16.55,14.11 17,13.11 17,12C17,10.89 16.55,9.89 15.83,9.17L17.24,7.76C18.33,8.85 19,10.35 19,12C19,13.65 18.33,15.15 17.24,16.24M4,3H12A2,2 0 0,1 14,5V19A2,2 0 0,1 12,21H4A2,2 0 0,1 2,19V5A2,2 0 0,1 4,3M8,5A2,2 0 0,0 6,7A2,2 0 0,0 8,9A2,2 0 0,0 10,7A2,2 0 0,0 8,5M8,11A4,4 0 0,0 4,15A4,4 0 0,0 8,19A4,4 0 0,0 12,15A4,4 0 0,0 8,11M8,13A2,2 0 0,1 10,15A2,2 0 0,1 8,17A2,2 0 0,1 6,15A2,2 0 0,1 8,13Z";
+var mdiSpotify = "M17.9,10.9C14.7,9 9.35,8.8 6.3,9.75C5.8,9.9 5.3,9.6 5.15,9.15C5,8.65 5.3,8.15 5.75,8C9.3,6.95 15.15,7.15 18.85,9.35C19.3,9.6 19.45,10.2 19.2,10.65C18.95,11 18.35,11.15 17.9,10.9M17.8,13.7C17.55,14.05 17.1,14.2 16.75,13.95C14.05,12.3 9.95,11.8 6.8,12.8C6.4,12.9 5.95,12.7 5.85,12.3C5.75,11.9 5.95,11.45 6.35,11.35C10,10.25 14.5,10.8 17.6,12.7C17.9,12.85 18.05,13.35 17.8,13.7M16.6,16.45C16.4,16.75 16.05,16.85 15.75,16.65C13.4,15.2 10.45,14.9 6.95,15.7C6.6,15.8 6.3,15.55 6.2,15.25C6.1,14.9 6.35,14.6 6.65,14.5C10.45,13.65 13.75,14 16.35,15.6C16.7,15.75 16.75,16.15 16.6,16.45M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2Z";
+var mdiSquare = "M3,3V21H21V3";
+var mdiSquareOutline = "M3,3H21V21H3V3M5,5V19H19V5H5Z";
+var mdiStar = "M12,17.27L18.18,21L16.54,13.97L22,9.24L14.81,8.62L12,2L9.19,8.62L2,9.24L7.45,13.97L5.82,21L12,17.27Z";
+var mdiStarOutline = "M12,15.39L8.24,17.66L9.23,13.38L5.91,10.5L10.29,10.13L12,6.09L13.71,10.13L18.09,10.5L14.77,13.38L15.76,17.66M22,9.24L14.81,8.63L12,2L9.19,8.63L2,9.24L7.45,13.97L5.82,21L12,17.27L18.18,21L16.54,13.97L22,9.24Z";
+var mdiStop = "M18,18H6V6H18V18Z";
+var mdiStopCircle = "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M9,9H15V15H9";
+var mdiStopCircleOutline = "M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M12,4C16.41,4 20,7.59 20,12C20,16.41 16.41,20 12,20C7.59,20 4,16.41 4,12C4,7.59 7.59,4 12,4M9,9V15H15V9";
+var mdiStove = "M6,14H8L11,17H9L6,14M4,4H5V3A1,1 0 0,1 6,2H10A1,1 0 0,1 11,3V4H13V3A1,1 0 0,1 14,2H18A1,1 0 0,1 19,3V4H20A2,2 0 0,1 22,6V19A2,2 0 0,1 20,21V22H17V21H7V22H4V21A2,2 0 0,1 2,19V6A2,2 0 0,1 4,4M18,7A1,1 0 0,1 19,8A1,1 0 0,1 18,9A1,1 0 0,1 17,8A1,1 0 0,1 18,7M14,7A1,1 0 0,1 15,8A1,1 0 0,1 14,9A1,1 0 0,1 13,8A1,1 0 0,1 14,7M20,6H4V10H20V6M4,19H20V12H4V19M6,7A1,1 0 0,1 7,8A1,1 0 0,1 6,9A1,1 0 0,1 5,8A1,1 0 0,1 6,7M13,14H15L18,17H16L13,14Z";
+var mdiSubtitles = "M20,4H4A2,2 0 0,0 2,6V18A2,2 0 0,0 4,20H20A2,2 0 0,0 22,18V6A2,2 0 0,0 20,4M4,12H8V14H4V12M14,18H4V16H14V18M20,18H16V16H20V18M20,14H10V12H20V14Z";
+var mdiSubtitlesOutline = "M20,4A2,2 0 0,1 22,6V18A2,2 0 0,1 20,20H4A2,2 0 0,1 2,18V6A2,2 0 0,1 4,4H20M20,18V6H4V18H20M6,10H8V12H6V10M6,14H14V16H6V14M16,14H18V16H16V14M10,10H18V12H10V10Z";
+var mdiSurroundSound = "M20,4H4A2,2 0 0,0 2,6V18A2,2 0 0,0 4,20H20A2,2 0 0,0 22,18V6A2,2 0 0,0 20,4M7.76,16.24L6.35,17.65C4.78,16.1 4,14.05 4,12C4,9.95 4.78,7.9 6.34,6.34L7.75,7.75C6.59,8.93 6,10.46 6,12C6,13.54 6.59,15.07 7.76,16.24M12,16A4,4 0 0,1 8,12A4,4 0 0,1 12,8A4,4 0 0,1 16,12A4,4 0 0,1 12,16M17.66,17.66L16.25,16.25C17.41,15.07 18,13.54 18,12C18,10.46 17.41,8.93 16.24,7.76L17.65,6.35C19.22,7.9 20,9.95 20,12C20,14.05 19.22,16.1 17.66,17.66M12,10A2,2 0 0,0 10,12A2,2 0 0,0 12,14A2,2 0 0,0 14,12A2,2 0 0,0 12,10Z";
+var mdiSync = "M12,18A6,6 0 0,1 6,12C6,11 6.25,10.03 6.7,9.2L5.24,7.74C4.46,8.97 4,10.43 4,12A8,8 0 0,0 12,20V23L16,19L12,15M12,4V1L8,5L12,9V6A6,6 0 0,1 18,12C18,13 17.75,13.97 17.3,14.8L18.76,16.26C19.54,15.03 20,13.57 20,12A8,8 0 0,0 12,4Z";
+var mdiTablet = "M19,18H5V6H19M21,4H3C1.89,4 1,4.89 1,6V18A2,2 0 0,0 3,20H21A2,2 0 0,0 23,18V6C23,4.89 22.1,4 21,4Z";
+var mdiTelevision = "M21,17H3V5H21M21,3H3A2,2 0 0,0 1,5V17A2,2 0 0,0 3,19H8V21H16V19H21A2,2 0 0,0 23,17V5A2,2 0 0,0 21,3Z";
+var mdiTelevisionClassic = "M8.16,3L6.75,4.41L9.34,7H4C2.89,7 2,7.89 2,9V19C2,20.11 2.89,21 4,21H20C21.11,21 22,20.11 22,19V9C22,7.89 21.11,7 20,7H14.66L17.25,4.41L15.84,3L12,6.84L8.16,3M4,9H17V19H4V9M19.5,9A1,1 0 0,1 20.5,10A1,1 0 0,1 19.5,11A1,1 0 0,1 18.5,10A1,1 0 0,1 19.5,9M19.5,12A1,1 0 0,1 20.5,13A1,1 0 0,1 19.5,14A1,1 0 0,1 18.5,13A1,1 0 0,1 19.5,12Z";
+var mdiTelevisionGuide = "M21,17V5H3V17H21M21,3A2,2 0 0,1 23,5V17A2,2 0 0,1 21,19H16V21H8V19H3A2,2 0 0,1 1,17V5A2,2 0 0,1 3,3H21M5,7H11V11H5V7M5,13H11V15H5V13M13,7H19V9H13V7M13,11H19V15H13V11Z";
+var mdiTelevisionOff = "M0.5,2.77L1.78,1.5L21,20.72L19.73,22L16.73,19H16V21H8V19H3A2,2 0 0,1 1,17V5C1,4.5 1.17,4.07 1.46,3.73L0.5,2.77M21,17V5H7.82L5.82,3H21A2,2 0 0,1 23,5V17C23,17.85 22.45,18.59 21.7,18.87L19.82,17H21M3,17H14.73L3,5.27V17Z";
+var mdiTelevisionPlay = "M21,3H3C1.89,3 1,3.89 1,5V17A2,2 0 0,0 3,19H8V21H16V19H21A2,2 0 0,0 23,17V5C23,3.89 22.1,3 21,3M21,17H3V5H21M16,11L9,15V7";
+var mdiText = "M21,6V8H3V6H21M3,18H12V16H3V18M3,13H21V11H3V13Z";
+var mdiThermometer = "M15 13V5A3 3 0 0 0 9 5V13A5 5 0 1 0 15 13M12 4A1 1 0 0 1 13 5V8H11V5A1 1 0 0 1 12 4Z";
+var mdiThermostat = "M16.95,16.95L14.83,14.83C15.55,14.1 16,13.1 16,12C16,11.26 15.79,10.57 15.43,10L17.6,7.81C18.5,9 19,10.43 19,12C19,13.93 18.22,15.68 16.95,16.95M12,5C13.57,5 15,5.5 16.19,6.4L14,8.56C13.43,8.21 12.74,8 12,8A4,4 0 0,0 8,12C8,13.1 8.45,14.1 9.17,14.83L7.05,16.95C5.78,15.68 5,13.93 5,12A7,7 0 0,1 12,5M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12C22,6.47 17.5,2 12,2Z";
+var mdiTimer = "M19.03 7.39L20.45 5.97C20 5.46 19.55 5 19.04 4.56L17.62 6C16.07 4.74 14.12 4 12 4C7.03 4 3 8.03 3 13S7.03 22 12 22C17 22 21 17.97 21 13C21 10.88 20.26 8.93 19.03 7.39M13 14H11V7H13V14M15 1H9V3H15V1Z";
+var mdiTimerOutline = "M12,20A7,7 0 0,1 5,13A7,7 0 0,1 12,6A7,7 0 0,1 19,13A7,7 0 0,1 12,20M19.03,7.39L20.45,5.97C20,5.46 19.55,5 19.04,4.56L17.62,6C16.07,4.74 14.12,4 12,4A9,9 0 0,0 3,13A9,9 0 0,0 12,22C17,22 21,17.97 21,13C21,10.88 20.26,8.93 19.03,7.39M11,14H13V8H11M15,1H9V3H15V1Z";
+var mdiToggleSwitch = "M17,7H7A5,5 0 0,0 2,12A5,5 0 0,0 7,17H17A5,5 0 0,0 22,12A5,5 0 0,0 17,7M17,15A3,3 0 0,1 14,12A3,3 0 0,1 17,9A3,3 0 0,1 20,12A3,3 0 0,1 17,15Z";
+var mdiToggleSwitchOff = "M17,7H7A5,5 0 0,0 2,12A5,5 0 0,0 7,17H17A5,5 0 0,0 22,12A5,5 0 0,0 17,7M7,15A3,3 0 0,1 4,12A3,3 0 0,1 7,9A3,3 0 0,1 10,12A3,3 0 0,1 7,15Z";
+var mdiTranslate = "M12.87,15.07L10.33,12.56L10.36,12.53C12.1,10.59 13.34,8.36 14.07,6H17V4H10V2H8V4H1V6H12.17C11.5,7.92 10.44,9.75 9,11.35C8.07,10.32 7.3,9.19 6.69,8H4.69C5.42,9.63 6.42,11.17 7.67,12.56L2.58,17.58L4,19L9,14L12.11,17.11L12.87,15.07M18.5,10H16.5L12,22H14L15.12,19H19.87L21,22H23L18.5,10M15.88,17L17.5,12.67L19.12,17H15.88Z";
+var mdiTriangle = "M1,21H23L12,2";
+var mdiTriangleOutline = "M12,2L1,21H23M12,6L19.53,19H4.47";
+var mdiTune = "M3,17V19H9V17H3M3,5V7H13V5H3M13,21V19H21V17H13V15H11V21H13M7,9V11H3V13H7V15H9V9H7M21,13V11H11V13H21M15,9H17V7H21V5H17V3H15V9Z";
+var mdiTuneVertical = "M7 3H5V9H7V3M19 3H17V13H19V3M3 13H5V21H7V13H9V11H3V13M15 7H13V3H11V7H9V9H15V7M11 21H13V11H11V21M15 15V17H17V21H19V17H21V15H15Z";
+var mdiTwitch = "M11.64 5.93H13.07V10.21H11.64M15.57 5.93H17V10.21H15.57M7 2L3.43 5.57V18.43H7.71V22L11.29 18.43H14.14L20.57 12V2M19.14 11.29L16.29 14.14H13.43L10.93 16.64V14.14H7.71V3.43H19.14Z";
+var mdiUmbrella = "M12,2A9,9 0 0,1 21,11H13V19A3,3 0 0,1 10,22A3,3 0 0,1 7,19V18H9V19A1,1 0 0,0 10,20A1,1 0 0,0 11,19V11H3A9,9 0 0,1 12,2Z";
+var mdiUndo = "M12.5,8C9.85,8 7.45,9 5.6,10.6L2,7V16H11L7.38,12.38C8.77,11.22 10.54,10.5 12.5,10.5C16.04,10.5 19.05,12.81 20.1,16L22.47,15.22C21.08,11.03 17.15,8 12.5,8Z";
+var mdiUsb = "M15,7V11H16V13H13V5H15L12,1L9,5H11V13H8V10.93C8.7,10.56 9.2,9.85 9.2,9C9.2,7.78 8.21,6.8 7,6.8C5.78,6.8 4.8,7.78 4.8,9C4.8,9.85 5.3,10.56 6,10.93V13A2,2 0 0,0 8,15H11V18.05C10.29,18.41 9.8,19.15 9.8,20A2.2,2.2 0 0,0 12,22.2A2.2,2.2 0 0,0 14.2,20C14.2,19.15 13.71,18.41 13,18.05V15H16A2,2 0 0,0 18,13V11H19V7H15Z";
+var mdiVideo = "M17,10.5V7A1,1 0 0,0 16,6H4A1,1 0 0,0 3,7V17A1,1 0 0,0 4,18H16A1,1 0 0,0 17,17V13.5L21,17.5V6.5L17,10.5Z";
+var mdiVideoInputAntenna = "M12,5A7,7 0 0,0 5,12H7A5,5 0 0,1 12,7A5,5 0 0,1 17,12H19A7,7 0 0,0 12,5M13,14.29C13.88,13.9 14.5,13.03 14.5,12A2.5,2.5 0 0,0 12,9.5A2.5,2.5 0 0,0 9.5,12C9.5,13 10.12,13.9 11,14.29V17.59L7.59,21L9,22.41L12,19.41L15,22.41L16.41,21L13,17.59V14.29M12,1A11,11 0 0,0 1,12H3A9,9 0 0,1 12,3A9,9 0 0,1 21,12H23A11,11 0 0,0 12,1Z";
+var mdiVideoInputComponent = "M5,2A1,1 0 0,0 4,1A1,1 0 0,0 3,2V6H1V12H7V6H5V2M9,16C9,17.3 9.84,18.4 11,18.82V23H13V18.82C14.16,18.41 15,17.31 15,16V14H9V16M1,16C1,17.3 1.84,18.4 3,18.82V23H5V18.82C6.16,18.4 7,17.3 7,16V14H1V16M21,6V2A1,1 0 0,0 20,1A1,1 0 0,0 19,2V6H17V12H23V6H21M13,2A1,1 0 0,0 12,1A1,1 0 0,0 11,2V6H9V12H15V6H13V2M17,16C17,17.3 17.84,18.4 19,18.82V23H21V18.82C22.16,18.41 23,17.31 23,16V14H17V16Z";
+var mdiVideoInputHdmi = "M18,7V4A2,2 0 0,0 16,2H8A2,2 0 0,0 6,4V7H5V13L8,19V22H16V19L19,13V7H18M8,4H16V7H14V5H13V7H11V5H10V7H8V4Z";
+var mdiVideoInputSvideo = "M8,11.5A1.5,1.5 0 0,0 6.5,10A1.5,1.5 0 0,0 5,11.5A1.5,1.5 0 0,0 6.5,13A1.5,1.5 0 0,0 8,11.5M15,6.5A1.5,1.5 0 0,0 13.5,5H10.5A1.5,1.5 0 0,0 9,6.5A1.5,1.5 0 0,0 10.5,8H13.5A1.5,1.5 0 0,0 15,6.5M8.5,15A1.5,1.5 0 0,0 7,16.5A1.5,1.5 0 0,0 8.5,18A1.5,1.5 0 0,0 10,16.5A1.5,1.5 0 0,0 8.5,15M12,1A11,11 0 0,0 1,12A11,11 0 0,0 12,23A11,11 0 0,0 23,12A11,11 0 0,0 12,1M12,21C7.04,21 3,16.96 3,12C3,7.04 7.04,3 12,3C16.96,3 21,7.04 21,12C21,16.96 16.96,21 12,21M17.5,10A1.5,1.5 0 0,0 16,11.5A1.5,1.5 0 0,0 17.5,13A1.5,1.5 0 0,0 19,11.5A1.5,1.5 0 0,0 17.5,10M15.5,15A1.5,1.5 0 0,0 14,16.5A1.5,1.5 0 0,0 15.5,18A1.5,1.5 0 0,0 17,16.5A1.5,1.5 0 0,0 15.5,15Z";
+var mdiVideoOff = "M3.27,2L2,3.27L4.73,6H4A1,1 0 0,0 3,7V17A1,1 0 0,0 4,18H16C16.2,18 16.39,17.92 16.54,17.82L19.73,21L21,19.73M21,6.5L17,10.5V7A1,1 0 0,0 16,6H9.82L21,17.18V6.5Z";
+var mdiVideoVintage = "M18,14.5V11A1,1 0 0,0 17,10H16C18.24,8.39 18.76,5.27 17.15,3C15.54,0.78 12.42,0.26 10.17,1.87C9.5,2.35 8.96,3 8.6,3.73C6.25,2.28 3.17,3 1.72,5.37C0.28,7.72 1,10.8 3.36,12.25C3.57,12.37 3.78,12.5 4,12.58V21A1,1 0 0,0 5,22H17A1,1 0 0,0 18,21V17.5L22,21.5V10.5L18,14.5M13,4A2,2 0 0,1 15,6A2,2 0 0,1 13,8A2,2 0 0,1 11,6A2,2 0 0,1 13,4M6,6A2,2 0 0,1 8,8A2,2 0 0,1 6,10A2,2 0 0,1 4,8A2,2 0 0,1 6,6Z";
+var mdiVolumeHigh = "M14,3.23V5.29C16.89,6.15 19,8.83 19,12C19,15.17 16.89,17.84 14,18.7V20.77C18,19.86 21,16.28 21,12C21,7.72 18,4.14 14,3.23M16.5,12C16.5,10.23 15.5,8.71 14,7.97V16C15.5,15.29 16.5,13.76 16.5,12M3,9V15H7L12,20V4L7,9H3Z";
+var mdiVolumeLow = "M7,9V15H11L16,20V4L11,9H7Z";
+var mdiVolumeMedium = "M5,9V15H9L14,20V4L9,9M18.5,12C18.5,10.23 17.5,8.71 16,7.97V16C17.5,15.29 18.5,13.76 18.5,12Z";
+var mdiVolumeMinus = "M3,9H7L12,4V20L7,15H3V9M14,11H22V13H14V11Z";
+var mdiVolumeMute = "M3,9H7L12,4V20L7,15H3V9M16.59,12L14,9.41L15.41,8L18,10.59L20.59,8L22,9.41L19.41,12L22,14.59L20.59,16L18,13.41L15.41,16L14,14.59L16.59,12Z";
+var mdiVolumeOff = "M12,4L9.91,6.09L12,8.18M4.27,3L3,4.27L7.73,9H3V15H7L12,20V13.27L16.25,17.53C15.58,18.04 14.83,18.46 14,18.7V20.77C15.38,20.45 16.63,19.82 17.68,18.96L19.73,21L21,19.73L12,10.73M19,12C19,12.94 18.8,13.82 18.46,14.64L19.97,16.15C20.62,14.91 21,13.5 21,12C21,7.72 18,4.14 14,3.23V5.29C16.89,6.15 19,8.83 19,12M16.5,12C16.5,10.23 15.5,8.71 14,7.97V10.18L16.45,12.63C16.5,12.43 16.5,12.21 16.5,12Z";
+var mdiVolumePlus = "M3,9H7L12,4V20L7,15H3V9M14,11H17V8H19V11H22V13H19V16H17V13H14V11Z";
+var mdiVolumeVariantOff = "M5.64,3.64L21.36,19.36L19.95,20.78L16,16.83V20L11,15H7V9H8.17L4.22,5.05L5.64,3.64M16,4V11.17L12.41,7.58L16,4Z";
+var mdiWalk = "M14.12,10H19V8.2H15.38L13.38,4.87C13.08,4.37 12.54,4.03 11.92,4.03C11.74,4.03 11.58,4.06 11.42,4.11L6,5.8V11H7.8V7.33L9.91,6.67L6,22H7.8L10.67,13.89L13,17V22H14.8V15.59L12.31,11.05L13.04,8.18M14,3.8C15,3.8 15.8,3 15.8,2C15.8,1 15,0.2 14,0.2C13,0.2 12.2,1 12.2,2C12.2,3 13,3.8 14,3.8Z";
+var mdiWashingMachine = "M14.83,11.17C16.39,12.73 16.39,15.27 14.83,16.83C13.27,18.39 10.73,18.39 9.17,16.83L14.83,11.17M6,2H18A2,2 0 0,1 20,4V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V4A2,2 0 0,1 6,2M7,4A1,1 0 0,0 6,5A1,1 0 0,0 7,6A1,1 0 0,0 8,5A1,1 0 0,0 7,4M10,4A1,1 0 0,0 9,5A1,1 0 0,0 10,6A1,1 0 0,0 11,5A1,1 0 0,0 10,4M12,8A6,6 0 0,0 6,14A6,6 0 0,0 12,20A6,6 0 0,0 18,14A6,6 0 0,0 12,8Z";
+var mdiWater = "M12,20A6,6 0 0,1 6,14C6,10 12,3.25 12,3.25C12,3.25 18,10 18,14A6,6 0 0,1 12,20Z";
+var mdiWaterOff = "M20.84 22.73L16.29 18.18C15.2 19.3 13.69 20 12 20C8.69 20 6 17.31 6 14C6 12.67 6.67 11.03 7.55 9.44L1.11 3L2.39 1.73L22.11 21.46L20.84 22.73M18 14C18 10 12 3.25 12 3.25S10.84 4.55 9.55 6.35L17.95 14.75C18 14.5 18 14.25 18 14Z";
+var mdiWeatherCloudy = "M6,19A5,5 0 0,1 1,14A5,5 0 0,1 6,9C7,6.65 9.3,5 12,5C15.43,5 18.24,7.66 18.5,11.03L19,11A4,4 0 0,1 23,15A4,4 0 0,1 19,19H6M19,13H17V12A5,5 0 0,0 12,7C9.5,7 7.45,8.82 7.06,11.19C6.73,11.07 6.37,11 6,11A3,3 0 0,0 3,14A3,3 0 0,0 6,17H19A2,2 0 0,0 21,15A2,2 0 0,0 19,13Z";
+var mdiWeatherNight = "M17.75,4.09L15.22,6.03L16.13,9.09L13.5,7.28L10.87,9.09L11.78,6.03L9.25,4.09L12.44,4L13.5,1L14.56,4L17.75,4.09M21.25,11L19.61,12.25L20.2,14.23L18.5,13.06L16.8,14.23L17.39,12.25L15.75,11L17.81,10.95L18.5,9L19.19,10.95L21.25,11M18.97,15.95C19.8,15.87 20.69,17.05 20.16,17.8C19.84,18.25 19.5,18.67 19.08,19.07C15.17,23 8.84,23 4.94,19.07C1.03,15.17 1.03,8.83 4.94,4.93C5.34,4.53 5.76,4.17 6.21,3.85C6.96,3.32 8.14,4.21 8.06,5.04C7.79,7.9 8.75,10.87 10.95,13.06C13.14,15.26 16.1,16.22 18.97,15.95M17.33,17.97C14.5,17.81 11.7,16.64 9.53,14.5C7.36,12.31 6.2,9.5 6.04,6.68C3.23,9.82 3.34,14.64 6.35,17.66C9.37,20.67 14.19,20.78 17.33,17.97Z";
+var mdiWeatherRainy = "M6,14.03A1,1 0 0,1 7,15.03C7,15.58 6.55,16.03 6,16.03C3.24,16.03 1,13.79 1,11.03C1,8.27 3.24,6.03 6,6.03C7,3.68 9.3,2.03 12,2.03C15.43,2.03 18.24,4.69 18.5,8.06L19,8.03A4,4 0 0,1 23,12.03C23,14.23 21.21,16.03 19,16.03H18C17.45,16.03 17,15.58 17,15.03C17,14.47 17.45,14.03 18,14.03H19A2,2 0 0,0 21,12.03A2,2 0 0,0 19,10.03H17V9.03C17,6.27 14.76,4.03 12,4.03C9.5,4.03 7.45,5.84 7.06,8.21C6.73,8.09 6.37,8.03 6,8.03A3,3 0 0,0 3,11.03A3,3 0 0,0 6,14.03M12,14.15C12.18,14.39 12.37,14.66 12.56,14.94C13,15.56 14,17.03 14,18C14,19.11 13.1,20 12,20A2,2 0 0,1 10,18C10,17.03 11,15.56 11.44,14.94C11.63,14.66 11.82,14.4 12,14.15M12,11.03L11.5,11.59C11.5,11.59 10.65,12.55 9.79,13.81C8.93,15.06 8,16.56 8,18A4,4 0 0,0 12,22A4,4 0 0,0 16,18C16,16.56 15.07,15.06 14.21,13.81C13.35,12.55 12.5,11.59 12.5,11.59";
+var mdiWeatherSunny = "M12,7A5,5 0 0,1 17,12A5,5 0 0,1 12,17A5,5 0 0,1 7,12A5,5 0 0,1 12,7M12,9A3,3 0 0,0 9,12A3,3 0 0,0 12,15A3,3 0 0,0 15,12A3,3 0 0,0 12,9M12,2L14.39,5.42C13.65,5.15 12.84,5 12,5C11.16,5 10.35,5.15 9.61,5.42L12,2M3.34,7L7.5,6.65C6.9,7.16 6.36,7.78 5.94,8.5C5.5,9.24 5.25,10 5.11,10.79L3.34,7M3.36,17L5.12,13.23C5.26,14 5.53,14.78 5.95,15.5C6.37,16.24 6.91,16.86 7.5,17.37L3.36,17M20.65,7L18.88,10.79C18.74,10 18.47,9.23 18.05,8.5C17.63,7.78 17.1,7.15 16.5,6.64L20.65,7M20.64,17L16.5,17.36C17.09,16.85 17.62,16.22 18.04,15.5C18.46,14.77 18.73,14 18.87,13.21L20.64,17M12,22L9.59,18.56C10.33,18.83 11.14,19 12,19C12.82,19 13.63,18.83 14.37,18.56L12,22Z";
+var mdiWifi = "M12,21L15.6,16.2C14.6,15.45 13.35,15 12,15C10.65,15 9.4,15.45 8.4,16.2L12,21M12,3C7.95,3 4.21,4.34 1.2,6.6L3,9C5.5,7.12 8.62,6 12,6C15.38,6 18.5,7.12 21,9L22.8,6.6C19.79,4.34 16.05,3 12,3M12,9C9.3,9 6.81,9.89 4.8,11.4L6.6,13.8C8.1,12.67 9.97,12 12,12C14.03,12 15.9,12.67 17.4,13.8L19.2,11.4C17.19,9.89 14.7,9 12,9Z";
+var mdiWifiOff = "M2.28,3L1,4.27L2.47,5.74C2.04,6 1.61,6.29 1.2,6.6L3,9C3.53,8.6 4.08,8.25 4.66,7.93L6.89,10.16C6.15,10.5 5.44,10.91 4.8,11.4L6.6,13.8C7.38,13.22 8.26,12.77 9.2,12.47L11.75,15C10.5,15.07 9.34,15.5 8.4,16.2L12,21L14.46,17.73L17.74,21L19,19.72M12,3C9.85,3 7.8,3.38 5.9,4.07L8.29,6.47C9.5,6.16 10.72,6 12,6C15.38,6 18.5,7.11 21,9L22.8,6.6C19.79,4.34 16.06,3 12,3M12,9C11.62,9 11.25,9 10.88,9.05L14.07,12.25C15.29,12.53 16.43,13.07 17.4,13.8L19.2,11.4C17.2,9.89 14.7,9 12,9Z";
+var mdiWindowClosed = "M6,11H10V9H14V11H18V4H6V11M18,13H6V20H18V13M6,2H18A2,2 0 0,1 20,4V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V4A2,2 0 0,1 6,2Z";
+var mdiWindowOpen = "M6,8H10V6H14V8H18V4H6V8M18,10H6V15H18V10M6,20H18V17H6V20M6,2H18A2,2 0 0,1 20,4V20A2,2 0 0,1 18,22H6A2,2 0 0,1 4,20V4A2,2 0 0,1 6,2Z";
+var mdiWindowShutter = "M3 4H21V8H19V20H17V8H7V20H5V8H3V4M8 9H16V11H8V9M8 12H16V14H8V12M8 15H16V17H8V15M8 18H16V20H8V18Z";
+var mdiWindowShutterOpen = "M3 4H21V8H19V20H17V8H7V20H5V8H3V4M8 9H16V11H8V9Z";
+var mdiWrench = "M22.7,19L13.6,9.9C14.5,7.6 14,4.9 12.1,3C10.1,1 7.1,0.6 4.7,1.7L9,6L6,9L1.6,4.7C0.4,7.1 0.9,10.1 2.9,12.1C4.8,14 7.5,14.5 9.8,13.6L18.9,22.7C19.3,23.1 19.9,23.1 20.3,22.7L22.6,20.4C23.1,20 23.1,19.3 22.7,19Z";
+var mdiYoutube = "M10,15L15.19,12L10,9V15M21.56,7.17C21.69,7.64 21.78,8.27 21.84,9.07C21.91,9.87 21.94,10.56 21.94,11.16L22,12C22,14.19 21.84,15.8 21.56,16.83C21.31,17.73 20.73,18.31 19.83,18.56C19.36,18.69 18.5,18.78 17.18,18.84C15.88,18.91 14.69,18.94 13.59,18.94L12,19C7.81,19 5.2,18.84 4.17,18.56C3.27,18.31 2.69,17.73 2.44,16.83C2.31,16.36 2.22,15.73 2.16,14.93C2.09,14.13 2.06,13.44 2.06,12.84L2,12C2,9.81 2.16,8.2 2.44,7.17C2.69,6.27 3.27,5.69 4.17,5.44C4.64,5.31 5.5,5.22 6.82,5.16C8.12,5.09 9.31,5.06 10.41,5.06L12,5C16.19,5 18.8,5.16 19.83,5.44C20.73,5.69 21.31,6.27 21.56,7.17Z";
+var mdiYoutubeTv = "M2.5,4.5H21.5C22.34,4.5 23,5.15 23,6V17.5C23,18.35 22.34,19 21.5,19H2.5C1.65,19 1,18.35 1,17.5V6C1,5.15 1.65,4.5 2.5,4.5M9.71,8.5V15L15.42,11.7L9.71,8.5M17.25,21H6.65C6.35,21 6.15,20.8 6.15,20.5C6.15,20.2 6.35,20 6.65,20H17.35C17.65,20 17.85,20.2 17.85,20.5C17.85,20.8 17.55,21 17.25,21Z";
+
+// remote-card/src/shims/mdi-icons.ts
+var MDI_ICON_PATHS = {
+  "account": mdiAccount,
+  "account-group": mdiAccountGroup,
+  "air-conditioner": mdiAirConditioner,
+  "alarm-light": mdiAlarmLight,
+  "album": mdiAlbum,
+  "alert": mdiAlert,
+  "alert-circle": mdiAlertCircle,
+  "alert-circle-outline": mdiAlertCircleOutline,
+  "alert-outline": mdiAlertOutline,
+  "alpha-a-circle-outline": mdiAlphaACircleOutline,
+  "alpha-b-circle-outline": mdiAlphaBCircleOutline,
+  "alpha-c-circle-outline": mdiAlphaCCircleOutline,
+  "amplifier": mdiAmplifier,
+  "apple": mdiApple,
+  "arrow-down": mdiArrowDown,
+  "arrow-down-bold": mdiArrowDownBold,
+  "arrow-left": mdiArrowLeft,
+  "arrow-left-bold": mdiArrowLeftBold,
+  "arrow-left-top": mdiArrowLeftTop,
+  "arrow-right": mdiArrowRight,
+  "arrow-right-bold": mdiArrowRightBold,
+  "arrow-u-left-top": mdiArrowULeftTop,
+  "arrow-up": mdiArrowUp,
+  "arrow-up-bold": mdiArrowUpBold,
+  "audio-video": mdiAudioVideo,
+  "audio-video-off": mdiAudioVideoOff,
+  "backspace": mdiBackspace,
+  "bed": mdiBed,
+  "bed-outline": mdiBedOutline,
+  "bell": mdiBell,
+  "bell-off": mdiBellOff,
+  "bell-ring": mdiBellRing,
+  "blinds": mdiBlinds,
+  "blinds-open": mdiBlindsOpen,
+  "bluetooth": mdiBluetooth,
+  "bluetooth-off": mdiBluetoothOff,
+  "bookmark": mdiBookmark,
+  "bookmark-outline": mdiBookmarkOutline,
+  "brightness-1": mdiBrightness1,
+  "brightness-2": mdiBrightness2,
+  "brightness-3": mdiBrightness3,
+  "brightness-4": mdiBrightness4,
+  "brightness-5": mdiBrightness5,
+  "brightness-6": mdiBrightness6,
+  "brightness-7": mdiBrightness7,
+  "broom": mdiBroom,
+  "camera": mdiCamera,
+  "camera-off": mdiCameraOff,
+  "cancel": mdiCancel,
+  "car": mdiCar,
+  "car-key": mdiCarKey,
+  "cast": mdiCast,
+  "cast-connected": mdiCastConnected,
+  "cast-off": mdiCastOff,
+  "cctv": mdiCctv,
+  "ceiling-light": mdiCeilingLight,
+  "cellphone": mdiCellphone,
+  "cellphone-wireless": mdiCellphoneWireless,
+  "check": mdiCheck,
+  "check-bold": mdiCheckBold,
+  "check-circle": mdiCheckCircle,
+  "check-circle-outline": mdiCheckCircleOutline,
+  "chevron-double-down": mdiChevronDoubleDown,
+  "chevron-double-left": mdiChevronDoubleLeft,
+  "chevron-double-right": mdiChevronDoubleRight,
+  "chevron-double-up": mdiChevronDoubleUp,
+  "chevron-down": mdiChevronDown,
+  "chevron-down-circle-outline": mdiChevronDownCircleOutline,
+  "chevron-left": mdiChevronLeft,
+  "chevron-right": mdiChevronRight,
+  "chevron-up": mdiChevronUp,
+  "chevron-up-circle-outline": mdiChevronUpCircleOutline,
+  "circle": mdiCircle,
+  "circle-outline": mdiCircleOutline,
+  "clock": mdiClock,
+  "clock-outline": mdiClockOutline,
+  "close": mdiClose,
+  "close-circle": mdiCloseCircle,
+  "close-circle-outline": mdiCloseCircleOutline,
+  "closed-caption": mdiClosedCaption,
+  "closed-caption-outline": mdiClosedCaptionOutline,
+  "coffee": mdiCoffee,
+  "coffee-outline": mdiCoffeeOutline,
+  "cog": mdiCog,
+  "cog-outline": mdiCogOutline,
+  "cogs": mdiCogs,
+  "controller-classic": mdiControllerClassic,
+  "controller-classic-outline": mdiControllerClassicOutline,
+  "curtains": mdiCurtains,
+  "curtains-closed": mdiCurtainsClosed,
+  "desktop-tower": mdiDesktopTower,
+  "disc": mdiDisc,
+  "disc-player": mdiDiscPlayer,
+  "dishwasher": mdiDishwasher,
+  "door": mdiDoor,
+  "door-closed": mdiDoorClosed,
+  "door-open": mdiDoorOpen,
+  "doorbell": mdiDoorbell,
+  "dots-horizontal": mdiDotsHorizontal,
+  "dots-vertical": mdiDotsVertical,
+  "drag-vertical-variant": mdiDragVerticalVariant,
+  "eye": mdiEye,
+  "eye-off": mdiEyeOff,
+  "fan": mdiFan,
+  "fan-off": mdiFanOff,
+  "fast-forward": mdiFastForward,
+  "film": mdiFilm,
+  "filmstrip": mdiFilmstrip,
+  "fire": mdiFire,
+  "fireplace": mdiFireplace,
+  "fireplace-off": mdiFireplaceOff,
+  "floor-lamp": mdiFloorLamp,
+  "format-color-fill": mdiFormatColorFill,
+  "fridge": mdiFridge,
+  "fullscreen": mdiFullscreen,
+  "fullscreen-exit": mdiFullscreenExit,
+  "gamepad": mdiGamepad,
+  "gamepad-variant": mdiGamepadVariant,
+  "garage": mdiGarage,
+  "garage-open": mdiGarageOpen,
+  "gesture-double-tap": mdiGestureDoubleTap,
+  "gesture-swipe": mdiGestureSwipe,
+  "gesture-tap": mdiGestureTap,
+  "gesture-tap-button": mdiGestureTapButton,
+  "glass-cocktail": mdiGlassCocktail,
+  "headphones": mdiHeadphones,
+  "heart": mdiHeart,
+  "heart-outline": mdiHeartOutline,
+  "help-circle": mdiHelpCircle,
+  "help-circle-outline": mdiHelpCircleOutline,
+  "hexagon": mdiHexagon,
+  "hexagon-outline": mdiHexagonOutline,
+  "home": mdiHome,
+  "home-assistant": mdiHomeAssistant,
+  "home-automation": mdiHomeAutomation,
+  "home-lightbulb": mdiHomeLightbulb,
+  "home-outline": mdiHomeOutline,
+  "home-thermometer": mdiHomeThermometer,
+  "hulu": mdiHulu,
+  "human-greeting": mdiHumanGreeting,
+  "image": mdiImage,
+  "image-multiple": mdiImageMultiple,
+  "information": mdiInformation,
+  "information-outline": mdiInformationOutline,
+  "invert-colors": mdiInvertColors,
+  "kettle": mdiKettle,
+  "keyboard": mdiKeyboard,
+  "keyboard-backspace": mdiKeyboardBackspace,
+  "keyboard-return": mdiKeyboardReturn,
+  "keyboard-space": mdiKeyboardSpace,
+  "kodi": mdiKodi,
+  "lamp": mdiLamp,
+  "laptop": mdiLaptop,
+  "led-strip": mdiLedStrip,
+  "led-strip-variant": mdiLedStripVariant,
+  "lightbulb": mdiLightbulb,
+  "lightbulb-group": mdiLightbulbGroup,
+  "lightbulb-group-off": mdiLightbulbGroupOff,
+  "lightbulb-off": mdiLightbulbOff,
+  "lightbulb-on": mdiLightbulbOn,
+  "lightbulb-outline": mdiLightbulbOutline,
+  "lock": mdiLock,
+  "lock-open": mdiLockOpen,
+  "lock-open-variant": mdiLockOpenVariant,
+  "magnify": mdiMagnify,
+  "magnify-minus": mdiMagnifyMinus,
+  "magnify-plus": mdiMagnifyPlus,
+  "menu": mdiMenu,
+  "menu-down": mdiMenuDown,
+  "menu-open": mdiMenuOpen,
+  "menu-up": mdiMenuUp,
+  "microsoft-xbox": mdiMicrosoftXbox,
+  "microwave": mdiMicrowave,
+  "minus": mdiMinus,
+  "minus-box": mdiMinusBox,
+  "minus-circle": mdiMinusCircle,
+  "monitor": mdiMonitor,
+  "motion-sensor": mdiMotionSensor,
+  "movie": mdiMovie,
+  "movie-open": mdiMovieOpen,
+  "movie-roll": mdiMovieRoll,
+  "music": mdiMusic,
+  "music-box": mdiMusicBox,
+  "music-box-outline": mdiMusicBoxOutline,
+  "music-note": mdiMusicNote,
+  "netflix": mdiNetflix,
+  "nintendo-game-boy": mdiNintendoGameBoy,
+  "nintendo-switch": mdiNintendoSwitch,
+  "numeric": mdiNumeric,
+  "palette": mdiPalette,
+  "palette-outline": mdiPaletteOutline,
+  "pause": mdiPause,
+  "pause-circle": mdiPauseCircle,
+  "pause-circle-outline": mdiPauseCircleOutline,
+  "picture-in-picture-bottom-right": mdiPictureInPictureBottomRight,
+  "play": mdiPlay,
+  "play-circle": mdiPlayCircle,
+  "play-circle-outline": mdiPlayCircleOutline,
+  "play-pause": mdiPlayPause,
+  "plex": mdiPlex,
+  "plus": mdiPlus,
+  "plus-box": mdiPlusBox,
+  "plus-circle": mdiPlusCircle,
+  "popcorn": mdiPopcorn,
+  "power": mdiPower,
+  "power-cycle": mdiPowerCycle,
+  "power-off": mdiPowerOff,
+  "power-on": mdiPowerOn,
+  "power-sleep": mdiPowerSleep,
+  "power-standby": mdiPowerStandby,
+  "projector": mdiProjector,
+  "projector-screen": mdiProjectorScreen,
+  "radiator": mdiRadiator,
+  "radio": mdiRadio,
+  "radio-tower": mdiRadioTower,
+  "record": mdiRecord,
+  "record-rec": mdiRecordRec,
+  "redo": mdiRedo,
+  "refresh": mdiRefresh,
+  "reload": mdiReload,
+  "remote": mdiRemote,
+  "remote-off": mdiRemoteOff,
+  "remote-tv": mdiRemoteTv,
+  "repeat": mdiRepeat,
+  "repeat-once": mdiRepeatOnce,
+  "rewind": mdiRewind,
+  "rhombus": mdiRhombus,
+  "rhombus-outline": mdiRhombusOutline,
+  "robot": mdiRobot,
+  "robot-vacuum": mdiRobotVacuum,
+  "robot-vacuum-variant": mdiRobotVacuumVariant,
+  "router-wireless": mdiRouterWireless,
+  "run": mdiRun,
+  "seat": mdiSeat,
+  "seat-outline": mdiSeatOutline,
+  "server": mdiServer,
+  "shield-check": mdiShieldCheck,
+  "shield-home": mdiShieldHome,
+  "shield-home-outline": mdiShieldHomeOutline,
+  "shuffle": mdiShuffle,
+  "silverware-fork-knife": mdiSilverwareForkKnife,
+  "skip-backward": mdiSkipBackward,
+  "skip-forward": mdiSkipForward,
+  "skip-next": mdiSkipNext,
+  "skip-previous": mdiSkipPrevious,
+  "sleep": mdiSleep,
+  "sleep-off": mdiSleepOff,
+  "snowflake": mdiSnowflake,
+  "sofa": mdiSofa,
+  "sofa-outline": mdiSofaOutline,
+  "sony-playstation": mdiSonyPlaystation,
+  "sort": mdiSort,
+  "soundbar": mdiSoundbar,
+  "speaker": mdiSpeaker,
+  "speaker-off": mdiSpeakerOff,
+  "speaker-wireless": mdiSpeakerWireless,
+  "spotify": mdiSpotify,
+  "square": mdiSquare,
+  "square-outline": mdiSquareOutline,
+  "star": mdiStar,
+  "star-outline": mdiStarOutline,
+  "stop": mdiStop,
+  "stop-circle": mdiStopCircle,
+  "stop-circle-outline": mdiStopCircleOutline,
+  "stove": mdiStove,
+  "subtitles": mdiSubtitles,
+  "subtitles-outline": mdiSubtitlesOutline,
+  "surround-sound": mdiSurroundSound,
+  "sync": mdiSync,
+  "tablet": mdiTablet,
+  "television": mdiTelevision,
+  "television-classic": mdiTelevisionClassic,
+  "television-guide": mdiTelevisionGuide,
+  "television-off": mdiTelevisionOff,
+  "television-play": mdiTelevisionPlay,
+  "text": mdiText,
+  "thermometer": mdiThermometer,
+  "thermostat": mdiThermostat,
+  "timer": mdiTimer,
+  "timer-outline": mdiTimerOutline,
+  "toggle-switch": mdiToggleSwitch,
+  "toggle-switch-off": mdiToggleSwitchOff,
+  "translate": mdiTranslate,
+  "triangle": mdiTriangle,
+  "triangle-outline": mdiTriangleOutline,
+  "tune": mdiTune,
+  "tune-vertical": mdiTuneVertical,
+  "twitch": mdiTwitch,
+  "umbrella": mdiUmbrella,
+  "undo": mdiUndo,
+  "usb": mdiUsb,
+  "video": mdiVideo,
+  "video-input-antenna": mdiVideoInputAntenna,
+  "video-input-component": mdiVideoInputComponent,
+  "video-input-hdmi": mdiVideoInputHdmi,
+  "video-input-svideo": mdiVideoInputSvideo,
+  "video-off": mdiVideoOff,
+  "video-vintage": mdiVideoVintage,
+  "volume-high": mdiVolumeHigh,
+  "volume-low": mdiVolumeLow,
+  "volume-medium": mdiVolumeMedium,
+  "volume-minus": mdiVolumeMinus,
+  "volume-mute": mdiVolumeMute,
+  "volume-off": mdiVolumeOff,
+  "volume-plus": mdiVolumePlus,
+  "volume-variant-off": mdiVolumeVariantOff,
+  "walk": mdiWalk,
+  "washing-machine": mdiWashingMachine,
+  "water": mdiWater,
+  "water-off": mdiWaterOff,
+  "weather-cloudy": mdiWeatherCloudy,
+  "weather-night": mdiWeatherNight,
+  "weather-rainy": mdiWeatherRainy,
+  "weather-sunny": mdiWeatherSunny,
+  "wifi": mdiWifi,
+  "wifi-off": mdiWifiOff,
+  "window-closed": mdiWindowClosed,
+  "window-open": mdiWindowOpen,
+  "window-shutter": mdiWindowShutter,
+  "window-shutter-open": mdiWindowShutterOpen,
+  "wrench": mdiWrench,
+  "youtube": mdiYoutube,
+  "youtube-tv": mdiYoutubeTv
+};
+
+// remote-card/src/shims/ha-icon.ts
+var FALLBACK_PATH = "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8z";
+function mdiPathFor(icon) {
+  const name = String(icon ?? "").trim().replace(/^mdi:/, "");
+  if (!name) return null;
+  return MDI_ICON_PATHS[name] ?? null;
+}
+var SbHaIcon = class extends HTMLElement {
+  constructor() {
+    super();
+    this._rendered = null;
+    this._shadow = this.attachShadow({ mode: "open" });
+  }
+  static get observedAttributes() {
+    return ["icon"];
+  }
+  get icon() {
+    return this.getAttribute("icon") ?? "";
+  }
+  set icon(value) {
+    if (value == null || value === "") this.removeAttribute("icon");
+    else this.setAttribute("icon", String(value));
+  }
+  connectedCallback() {
+    this._render();
+  }
+  attributeChangedCallback() {
+    this._render();
+  }
+  _render() {
+    const icon = this.icon;
+    if (this._rendered === icon) return;
+    this._rendered = icon;
+    const path = mdiPathFor(icon) ?? FALLBACK_PATH;
+    this._shadow.innerHTML = `
+      <style>
+        :host {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: var(--mdc-icon-size, 24px);
+          height: var(--mdc-icon-size, 24px);
+          color: inherit;
+          vertical-align: middle;
+        }
+        svg { width: 100%; height: 100%; fill: currentColor; display: block; }
+      </style>
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="${path}"></path></svg>
+    `;
+  }
+};
+function defineHaIconShim() {
+  if (!customElements.get("ha-icon")) customElements.define("ha-icon", SbHaIcon);
+}
+
+// remote-card/src/shims/ha-select.ts
+var SbMwcListItem = class extends HTMLElement {
+  constructor() {
+    super(...arguments);
+    this._value = null;
+  }
+  get value() {
+    return this._value ?? this.getAttribute("value") ?? "";
+  }
+  set value(next) {
+    this._value = next == null ? "" : String(next);
+    this.setAttribute("value", this._value);
+  }
+};
+var SbHaSelect = class extends HTMLElement {
+  constructor() {
+    super();
+    this._labelEl = null;
+    this._valueEl = null;
+    this._trigger = null;
+    this._menu = null;
+    this._label = "";
+    this._value = "";
+    this._options = [];
+    this._connected = false;
+    this._observer = new MutationObserver(() => this._syncOptions());
+    this._shadow = this.attachShadow({ mode: "open" });
+    this._shadow.innerHTML = `
+      <style>
+        :host { display: block; position: relative; }
+        .label {
+          font-size: 12px;
+          color: var(--mdc-select-label-ink-color, rgba(0, 0, 0, 0.6));
+          line-height: 1.2;
+        }
+        .trigger {
+          width: 100%;
+          border: 0;
+          background: var(--ha-color-form-background, #f3f3f3);
+          border-radius: var(--mdc-shape-small, 4px);
+          min-height: 56px;
+          padding: 10px 14px 8px 16px;
+          color: var(--primary-text-color, #141414);
+          font: inherit;
+          text-align: left;
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          grid-template-rows: auto auto;
+          gap: 2px 10px;
+          cursor: pointer;
+          box-shadow: inset 0 -1px 0 var(--ha-color-border-neutral-loud, rgba(0, 0, 0, 0.55));
+          transition: box-shadow 180ms ease-in-out;
+        }
+        .trigger:focus-visible {
+          outline: none;
+          box-shadow: inset 0 -2px 0 var(--mdc-theme-primary, var(--primary-color, #009ac7));
+        }
+        .trigger:hover:not([disabled]) {
+          background: color-mix(in srgb, var(--primary-text-color, #141414) 8%, var(--ha-color-form-background, #f3f3f3));
+        }
+        .trigger:active:not([disabled]) {
+          background: color-mix(in srgb, var(--primary-text-color, #141414) 12%, var(--ha-color-form-background, #f3f3f3));
+        }
+        .trigger[disabled] { cursor: default; opacity: 0.6; }
+        .value {
+          font-size: 16px;
+          line-height: 1.3;
+          color: var(--primary-text-color, #141414);
+          white-space: nowrap;
+          overflow: hidden;
+          text-overflow: ellipsis;
+        }
+        .caret {
+          grid-column: 2;
+          grid-row: 1 / span 2;
+          align-self: center;
+          width: 24px;
+          height: 24px;
+          color: var(--secondary-text-color, #5e5e5e);
+        }
+        .caret svg { width: 100%; height: 100%; fill: currentColor; }
+        .menu {
+          position: absolute;
+          left: 0;
+          right: 0;
+          top: calc(100% + 4px);
+          display: none;
+          max-height: 60vh;
+          overflow-y: auto;
+          background: var(--card-background-color, var(--mdc-theme-surface, #fff));
+          border-radius: 12px;
+          border: 1px solid var(--ha-color-border-neutral-quiet, var(--divider-color, #e6e6e6));
+          box-shadow: 0 2px 4px rgba(0, 0, 0, 0.08), 0 12px 28px rgba(0, 0, 0, 0.16);
+          padding: 6px;
+          z-index: 40;
+        }
+        :host([open]) .menu { display: block; }
+        .option {
+          width: 100%;
+          border: 0;
+          background: transparent;
+          color: var(--primary-text-color, #141414);
+          text-align: left;
+          font: inherit;
+          font-size: 16px;
+          line-height: 1.3;
+          padding: 12px 14px;
+          border-radius: 8px;
+          cursor: pointer;
+        }
+        .option:hover, .option:focus-visible {
+          outline: none;
+          background: var(--wa-color-neutral-fill-normal, var(--ha-color-fill-neutral-normal-resting, #e6e6e6));
+        }
+        .option[data-selected="true"] {
+          background: var(--ha-color-fill-primary-quiet-resting, #eff9fe);
+          color: var(--sb-select-selected-text, var(--primary-color, inherit));
+        }
+        .option + .option { margin-top: 2px; }
+      </style>
+      <button class="trigger" type="button" aria-haspopup="listbox" aria-expanded="false">
+        <span class="label"></span>
+        <span class="value"></span>
+        <span class="caret"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5z"></path></svg></span>
+      </button>
+      <div class="menu" role="listbox"></div>
+    `;
+    this._labelEl = this._shadow.querySelector(".label");
+    this._valueEl = this._shadow.querySelector(".value");
+    this._trigger = this._shadow.querySelector(".trigger");
+    this._menu = this._shadow.querySelector(".menu");
+  }
+  static get observedAttributes() {
+    return ["label", "disabled"];
+  }
+  connectedCallback() {
+    if (!this._connected) {
+      this._connected = true;
+      this._trigger?.addEventListener("click", () => {
+        if (this.disabled) return;
+        if (this.hasAttribute("open")) this._closeMenu();
+        else this._openMenu();
+      });
+      this._trigger?.addEventListener("keydown", (event) => {
+        if (this.disabled) return;
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+          event.preventDefault();
+          if (!this.hasAttribute("open")) this._openMenu();
+          const buttons = Array.from(this._menu?.querySelectorAll(".option") ?? []);
+          const index = Math.max(0, this._options.findIndex((option) => option.value === this._value));
+          const next = event.key === "ArrowDown" ? Math.min(buttons.length - 1, index + 1) : Math.max(0, index - 1);
+          buttons[next]?.focus();
+        } else if (event.key === "Escape" && this.hasAttribute("open")) {
+          event.preventDefault();
+          this._closeMenu();
+        }
+      });
+      this._shadow.addEventListener("focusout", (event) => {
+        const next = event.relatedTarget;
+        if (next && this._shadow.contains(next)) return;
+        if (this.hasAttribute("open")) this._closeMenu();
+      });
+    }
+    this._observer.observe(this, { childList: true, subtree: true, characterData: true });
+    this._renderLabel();
+    this._syncOptions();
+  }
+  disconnectedCallback() {
+    this._observer.disconnect();
+  }
+  attributeChangedCallback(name) {
+    if (name === "label") this._renderLabel();
+    if (name === "disabled" && this._trigger) this._trigger.disabled = this.disabled;
+  }
+  get label() {
+    return this._label || this.getAttribute("label") || "";
+  }
+  set label(value) {
+    this._label = value == null ? "" : String(value);
+    this._renderLabel();
+  }
+  get value() {
+    return this._value;
+  }
+  set value(next) {
+    this._value = next == null ? "" : String(next);
+    this._renderValue();
+    this._renderOptions();
+  }
+  get disabled() {
+    return this.hasAttribute("disabled");
+  }
+  set disabled(next) {
+    if (next) this.setAttribute("disabled", "");
+    else this.removeAttribute("disabled");
+    if (this._trigger) this._trigger.disabled = Boolean(next);
+  }
+  _renderLabel() {
+    if (this._labelEl) this._labelEl.textContent = this.label;
+  }
+  _syncOptions() {
+    const current = this._value;
+    const items = Array.from(this.children);
+    this._options = items.map((item) => ({
+      value: String(item.value ?? item.getAttribute("value") ?? item.textContent ?? ""),
+      label: (item.textContent ?? "").trim()
+    }));
+    if (!this._options.some((option) => option.value === current)) {
+      this._value = this._options[0]?.value ?? "";
+    }
+    this._renderValue();
+    this._renderOptions();
+  }
+  _renderValue() {
+    if (!this._valueEl) return;
+    const match = this._options.find((option) => option.value === this._value);
+    this._valueEl.textContent = match?.label ?? this._value;
+  }
+  _renderOptions() {
+    if (!this._menu) return;
+    this._menu.textContent = "";
+    for (const option of this._options) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "option";
+      button.setAttribute("role", "option");
+      button.textContent = option.label;
+      button.dataset.selected = String(option.value === this._value);
+      button.setAttribute("aria-selected", button.dataset.selected);
+      button.addEventListener("click", () => {
+        this._value = option.value;
+        this._renderValue();
+        this._renderOptions();
+        this.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+        this.dispatchEvent(
+          new CustomEvent("selected", { detail: { value: this._value }, bubbles: true, composed: true })
+        );
+        this._closeMenu();
+        this._trigger?.focus();
+      });
+      this._menu.appendChild(button);
+    }
+  }
+  _openMenu() {
+    this.setAttribute("open", "");
+    this._trigger?.setAttribute("aria-expanded", "true");
+    this.dispatchEvent(new Event("opened", { bubbles: true, composed: true }));
+  }
+  _closeMenu() {
+    if (!this.hasAttribute("open")) return;
+    this.removeAttribute("open");
+    this._trigger?.setAttribute("aria-expanded", "false");
+    this.dispatchEvent(new Event("closed", { bubbles: true, composed: true }));
+  }
+};
+function defineHaSelectShim() {
+  if (!customElements.get("mwc-list-item")) customElements.define("mwc-list-item", SbMwcListItem);
+  if (!customElements.get("ha-select")) customElements.define("ha-select", SbHaSelect);
+}
+
+// remote-card/src/shims/palette.ts
+var REMOTE_WEB_PALETTE_CSS = `
+:root {
+  color-scheme: light dark;
+  --primary-color: #009ac7;
+  --rgb-primary-color: 0, 154, 199;
+  --primary-text-color: #141414;
+  --rgb-primary-text-color: 33, 33, 33;
+  --secondary-text-color: #5e5e5e;
+  --disabled-text-color: #bdbdbd;
+  --primary-background-color: #fafafa;
+  --secondary-background-color: #e5e5e5;
+  --card-background-color: #ffffff;
+  --divider-color: rgba(0, 0, 0, 0.12);
+  --error-color: #db4437;
+  --rgb-error-color: 219, 68, 55;
+  --warning-color: #ffa600;
+  --success-color: #43a047;
+  --info-color: #039be5;
+  --state-icon-color: #44739e;
+  --input-fill-color: rgb(245, 245, 245);
+  --ha-color-form-background: #f3f3f3;
+  --ha-color-fill-neutral-normal-resting: #e6e6e6;
+  --ha-color-fill-neutral-quiet-hover: #e6e6e6;
+  --ha-color-fill-primary-quiet-hover: #dff3fc;
+  --ha-color-border-neutral-loud: #5e5e5e;
+  --ha-color-border-neutral-quiet: #e6e6e6;
+  --ha-color-fill-primary-quiet-resting: #eff9fe;
+  --mdc-theme-primary: #009ac7;
+  --mdc-theme-surface: #ffffff;
+  --mdc-select-label-ink-color: rgba(0, 0, 0, 0.6);
+  --wa-color-neutral-fill-normal: #e6e6e6;
+}
+:root[data-theme="dark"] {
+  --primary-color: #009ac7;
+  --rgb-primary-color: 0, 154, 199;
+  --primary-text-color: #e1e1e1;
+  --rgb-primary-text-color: 33, 33, 33;
+  --secondary-text-color: #9b9b9b;
+  --disabled-text-color: #6f6f6f;
+  --primary-background-color: #111111;
+  --secondary-background-color: #282828;
+  --card-background-color: #1c1c1c;
+  --divider-color: rgba(225, 225, 225, 0.12);
+  --error-color: #db4437;
+  --rgb-error-color: 219, 68, 55;
+  --warning-color: #ffa600;
+  --success-color: #43a047;
+  --info-color: #039be5;
+  --state-icon-color: #44739e;
+  --input-fill-color: rgba(255, 255, 255, 0.05);
+  --ha-color-form-background: #363636;
+  --ha-color-fill-neutral-normal-resting: #202020;
+  --ha-color-fill-neutral-quiet-hover: #202020;
+  --ha-color-fill-primary-quiet-hover: #002e3e;
+  --ha-color-border-neutral-loud: #b1b1b1;
+  --ha-color-border-neutral-quiet: #5e5e5e;
+  --ha-color-fill-primary-quiet-resting: #001721;
+  --mdc-theme-primary: #009ac7;
+  --mdc-theme-surface: #1c1c1c;
+  --mdc-select-label-ink-color: rgba(255, 255, 255, 0.6);
+  --wa-color-neutral-fill-normal: #202020;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+  --primary-color: #009ac7;
+  --rgb-primary-color: 0, 154, 199;
+  --primary-text-color: #e1e1e1;
+  --rgb-primary-text-color: 33, 33, 33;
+  --secondary-text-color: #9b9b9b;
+  --disabled-text-color: #6f6f6f;
+  --primary-background-color: #111111;
+  --secondary-background-color: #282828;
+  --card-background-color: #1c1c1c;
+  --divider-color: rgba(225, 225, 225, 0.12);
+  --error-color: #db4437;
+  --rgb-error-color: 219, 68, 55;
+  --warning-color: #ffa600;
+  --success-color: #43a047;
+  --info-color: #039be5;
+  --state-icon-color: #44739e;
+  --input-fill-color: rgba(255, 255, 255, 0.05);
+  --ha-color-form-background: #363636;
+  --ha-color-fill-neutral-normal-resting: #202020;
+  --ha-color-fill-neutral-quiet-hover: #202020;
+  --ha-color-fill-primary-quiet-hover: #002e3e;
+  --ha-color-border-neutral-loud: #b1b1b1;
+  --ha-color-border-neutral-quiet: #5e5e5e;
+  --ha-color-fill-primary-quiet-resting: #001721;
+  --mdc-theme-primary: #009ac7;
+  --mdc-theme-surface: #1c1c1c;
+  --mdc-select-label-ink-color: rgba(255, 255, 255, 0.6);
+  --wa-color-neutral-fill-normal: #202020;
+  }
+}
+`;
+
+// remote-card/src/shims/index.ts
+var PALETTE_STYLE_ID = "sofabaton-remote-web-palette";
+function installRemoteWebPalette(doc = document) {
+  if (doc.getElementById(PALETTE_STYLE_ID)) return;
+  const style = doc.createElement("style");
+  style.id = PALETTE_STYLE_ID;
+  style.textContent = REMOTE_WEB_PALETTE_CSS;
+  doc.head.appendChild(style);
+}
+function defineRemoteWebElements() {
+  defineHaCardShim();
+  defineHaIconShim();
+  defineHaSelectShim();
+}
+function installRemoteWebShims(doc = document) {
+  installRemoteWebPalette(doc);
+  defineRemoteWebElements();
+}
 
 // remote-card/src/remote-card-translations/ar.ts
 var isolate = (value) => `\u2068${value}\u2069`;
@@ -9465,8 +9125,8 @@ var REMOTE_CARD_STRINGS_AR = {
     macrosFavoritesAsRows: "\u0639\u0631\u0636 \u0648\u062D\u062F\u0627\u062A \u0627\u0644\u0645\u0627\u0643\u0631\u0648 \u0648\u0627\u0644\u0645\u0641\u0636\u0644\u0627\u062A \u0641\u064A \u0635\u0641\u0648\u0641",
     commandsAsRows: "\u0639\u0631\u0636 \u0627\u0644\u0623\u0648\u0627\u0645\u0631 \u0641\u064A \u0635\u0641\u0648\u0641",
     visibleRows: "\u0627\u0644\u0635\u0641\u0648\u0641 \u0627\u0644\u0645\u0631\u0626\u064A\u0629",
-    moveGroupUp: (groupLabel2) => `\u0646\u0642\u0644 ${isolate(groupLabel2)} \u0625\u0644\u0649 \u0627\u0644\u0623\u0639\u0644\u0649`,
-    moveGroupDown: (groupLabel2) => `\u0646\u0642\u0644 ${isolate(groupLabel2)} \u0625\u0644\u0649 \u0627\u0644\u0623\u0633\u0641\u0644`,
+    moveGroupUp: (groupLabel) => `\u0646\u0642\u0644 ${isolate(groupLabel)} \u0625\u0644\u0649 \u0627\u0644\u0623\u0639\u0644\u0649`,
+    moveGroupDown: (groupLabel) => `\u0646\u0642\u0644 ${isolate(groupLabel)} \u0625\u0644\u0649 \u0627\u0644\u0623\u0633\u0641\u0644`,
     macros: "\u0648\u062D\u062F\u0627\u062A \u0627\u0644\u0645\u0627\u0643\u0631\u0648",
     favorites: "\u0627\u0644\u0645\u0641\u0636\u0644\u0627\u062A",
     volume: "\u0645\u0633\u062A\u0648\u0649 \u0627\u0644\u0635\u0648\u062A",
@@ -9684,8 +9344,8 @@ var REMOTE_CARD_STRINGS_DE = {
     macrosFavoritesAsRows: "Makros/Favoriten als Zeilen",
     commandsAsRows: "Befehle als Zeilen",
     visibleRows: "Sichtbare Zeilen",
-    moveGroupUp: (groupLabel2) => `${groupLabel2} nach oben verschieben`,
-    moveGroupDown: (groupLabel2) => `${groupLabel2} nach unten verschieben`,
+    moveGroupUp: (groupLabel) => `${groupLabel} nach oben verschieben`,
+    moveGroupDown: (groupLabel) => `${groupLabel} nach unten verschieben`,
     macros: "Makros",
     favorites: "Favoriten",
     volume: "Lautst\xE4rke",
@@ -9882,8 +9542,8 @@ var REMOTE_CARD_STRINGS_ES = {
     macrosFavoritesAsRows: "Macros/favoritos como filas",
     commandsAsRows: "Comandos como filas",
     visibleRows: "Filas visibles",
-    moveGroupUp: (groupLabel2) => `Mover ${groupLabel2} hacia arriba`,
-    moveGroupDown: (groupLabel2) => `Mover ${groupLabel2} hacia abajo`,
+    moveGroupUp: (groupLabel) => `Mover ${groupLabel} hacia arriba`,
+    moveGroupDown: (groupLabel) => `Mover ${groupLabel} hacia abajo`,
     macros: "Macros",
     favorites: "Favoritos",
     volume: "Volumen",
@@ -10080,8 +9740,8 @@ var REMOTE_CARD_STRINGS_FR = {
     macrosFavoritesAsRows: "Macros/favoris sous forme de lignes",
     commandsAsRows: "Commandes sous forme de lignes",
     visibleRows: "Lignes visibles",
-    moveGroupUp: (groupLabel2) => `D\xE9placer ${groupLabel2} vers le haut`,
-    moveGroupDown: (groupLabel2) => `D\xE9placer ${groupLabel2} vers le bas`,
+    moveGroupUp: (groupLabel) => `D\xE9placer ${groupLabel} vers le haut`,
+    moveGroupDown: (groupLabel) => `D\xE9placer ${groupLabel} vers le bas`,
     macros: "Macros",
     favorites: "Favoris",
     volume: "Volume",
@@ -10277,8 +9937,8 @@ var REMOTE_CARD_STRINGS_NL = {
     macrosFavoritesAsRows: "Macro's/favorieten als rijen",
     commandsAsRows: "Commando's als rijen",
     visibleRows: "Zichtbare rijen",
-    moveGroupUp: (groupLabel2) => `Verplaats ${groupLabel2} omhoog`,
-    moveGroupDown: (groupLabel2) => `Verplaats ${groupLabel2} omlaag`,
+    moveGroupUp: (groupLabel) => `Verplaats ${groupLabel} omhoog`,
+    moveGroupDown: (groupLabel) => `Verplaats ${groupLabel} omlaag`,
     macros: "Macro's",
     favorites: "Favorieten",
     volume: "Volume",
@@ -10474,8 +10134,8 @@ var REMOTE_CARD_STRINGS_ZH_HANS = {
     macrosFavoritesAsRows: "\u5C06\u5B8F/\u6536\u85CF\u663E\u793A\u4E3A\u884C",
     commandsAsRows: "\u5C06\u547D\u4EE4\u663E\u793A\u4E3A\u884C",
     visibleRows: "\u53EF\u89C1\u884C",
-    moveGroupUp: (groupLabel2) => `\u5C06${groupLabel2}\u4E0A\u79FB`,
-    moveGroupDown: (groupLabel2) => `\u5C06${groupLabel2}\u4E0B\u79FB`,
+    moveGroupUp: (groupLabel) => `\u5C06${groupLabel}\u4E0A\u79FB`,
+    moveGroupDown: (groupLabel) => `\u5C06${groupLabel}\u4E0B\u79FB`,
     macros: "\u5B8F",
     favorites: "\u6536\u85CF",
     volume: "\u97F3\u91CF",
@@ -10545,25 +10205,165 @@ var REMOTE_CARD_STRINGS_ZH_HANS = {
 };
 registerRemoteCardTranslation("zh-hans", REMOTE_CARD_STRINGS_ZH_HANS);
 
-// remote-card/src/remote-card.ts
-var win = window;
-logPillsOnce();
-if (!customElements.get(EDITOR))
-  customElements.define(EDITOR, SofabatonRemoteCardEditor);
-if (!customElements.get(TYPE)) customElements.define(TYPE, SofabatonRemoteCard);
-win.customCards = win.customCards || [];
-if (!win.customCards.some((c7) => c7.type === TYPE)) {
-  win.customCards.push({
-    type: TYPE,
-    name: str().card.pickerName,
-    description: str().card.pickerDescription,
-    // Card picker (HA 2026.6+): recommend this card for Sofabaton remote
-    // entities, which is exactly what it binds to.
-    getEntitySuggestion: (hass, entityId) => {
-      if (!entityId.startsWith("remote.")) return null;
-      const platform = String(hass?.entities?.[entityId]?.platform || "");
-      if (platform !== "sofabaton_x1s" && platform !== "sofabaton_hub") return null;
-      return { config: { type: `custom:${TYPE}`, entity: entityId } };
+// remote-card/src/remote-web.ts
+var WEB_REMOTE_TAG = "sofabaton-remote-web";
+var HOST_CSS = `
+  :host {
+    display: block;
+    min-height: 100vh;
+    box-sizing: border-box;
+    padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+    background: var(--primary-background-color);
+    color: var(--primary-text-color);
+    font-family: Roboto, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  .stage {
+    max-width: 480px;
+    margin: 0 auto;
+    padding: 12px;
+  }
+  .notice {
+    max-width: 480px;
+    margin: 24px auto;
+    padding: 20px;
+    border-radius: 12px;
+    background: var(--card-background-color);
+    border: 1px solid var(--divider-color);
+    line-height: 1.5;
+  }
+  .notice h1 { font-size: 20px; margin: 0 0 8px; }
+  .notice code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .notice ul { padding-left: 20px; }
+  .notice a { color: var(--primary-color); }
+  .banner {
+    max-width: 480px;
+    margin: 0 auto 8px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: rgba(var(--rgb-error-color), 0.12);
+    color: var(--error-color);
+    font-size: 13px;
+  }
+  .foot {
+    max-width: 480px;
+    margin: 8px auto 0;
+    text-align: center;
+    color: var(--secondary-text-color);
+    font-size: 11px;
+  }
+`;
+var SofabatonRemoteWeb = class extends HTMLElement {
+  constructor() {
+    super();
+    this._backend = null;
+    this._card = null;
+    this._unsubscribe = null;
+    this._params = null;
+    this._lastBanner = null;
+    this._shadow = this.attachShadow({ mode: "open" });
+  }
+  connectedCallback() {
+    void this._boot();
+  }
+  disconnectedCallback() {
+    this._unsubscribe?.();
+    this._unsubscribe = null;
+    this._card?.setBackend(null);
+    this._backend?.stop();
+  }
+  async _boot() {
+    const params = parseWebRemoteParams(location.search, navigator.language);
+    this._params = params;
+    if (params.theme) document.documentElement.dataset.theme = params.theme;
+    let hubs = [];
+    let hubsError = null;
+    try {
+      const response = await fetch(`${SERVER_API_PREFIX}/hubs`, { headers: { accept: "application/json" } });
+      if (!response.ok) throw new Error(`GET /hubs -> ${response.status}`);
+      hubs = await response.json();
+    } catch (err) {
+      hubsError = err instanceof Error ? err.message : String(err);
     }
-  });
+    const known = hubs.find((hub) => hub.hub_id === params.hub);
+    if (!params.hub || !known) {
+      this._renderInstructions(params.hub, hubs, hubsError);
+      return;
+    }
+    let storedDocument = null;
+    try {
+      const response = await fetch(`${SERVER_API_PREFIX}/hubs/${encodeURIComponent(params.hub)}/ui/remote-card`, {
+        headers: { accept: "application/json" }
+      });
+      if (response.ok) storedDocument = (await response.json()).document ?? null;
+    } catch (_err) {
+      storedDocument = null;
+    }
+    const backend = new ServerRemoteBackend({ baseUrl: "" });
+    backend.setTarget(params.hub);
+    this._backend = backend;
+    const card = document_createCard();
+    card.setConfig(cardConfigForWebRemote(params.hub, storedDocument, { openDevice: params.device }));
+    card.setLanguage(params.lang);
+    card.setBackend(backend);
+    this._card = card;
+    this._renderStage(card, known);
+    this._unsubscribe = backend.subscribe(() => this._syncBanner());
+    this._syncBanner();
+  }
+  _renderStage(card, hub) {
+    const zoom = this._params?.zoom;
+    this._shadow.innerHTML = `<style>${HOST_CSS}</style>
+      <div class="banner" id="banner" hidden></div>
+      <div class="stage" id="stage"></div>
+      <div class="foot">${escapeHtml(hub.config?.name || hub.hub_id)} \xB7 sofabaton-x-server \xB7 remote card ${CARD_VERSION}</div>`;
+    const stage = this._shadow.getElementById("stage");
+    if (zoom) stage.style.zoom = String(zoom);
+    stage.appendChild(card);
+  }
+  _syncBanner() {
+    const banner = this._shadow.getElementById("banner");
+    if (!banner || !this._backend) return;
+    const snapshot = this._backend.snapshot();
+    const unavailable = !snapshot || snapshot.state === "unavailable";
+    const text = unavailable ? this._backend.lastError ? `The server cannot reach the hub (${this._backend.lastError}).` : "The hub is not controllable right now (offline, disabled, or the Sofabaton app is connected)." : null;
+    if (text === this._lastBanner) return;
+    this._lastBanner = text;
+    banner.hidden = !text;
+    banner.textContent = text ?? "";
+  }
+  _renderInstructions(requested, hubs, error) {
+    const list = hubs.length ? `<ul>${hubs.map((hub) => {
+      const href = `?hub=${encodeURIComponent(hub.hub_id)}`;
+      const label = `${escapeHtml(hub.config?.name || hub.hub_id)} (${escapeHtml(hub.status?.hub_version || "?")}, ${hub.enabled ? escapeHtml(hub.status?.mode || "starting") : "disabled"})`;
+      return `<li><a href="${href}">${label}</a> <code>${escapeHtml(hub.hub_id)}</code></li>`;
+    }).join("")}</ul>` : error ? `<p>The server did not answer <code>${SERVER_API_PREFIX}/hubs</code>: ${escapeHtml(error)}.</p>` : `<p>This server has no hubs registered yet. Add one with <code>POST ${SERVER_API_PREFIX}/hubs</code> or from the <a href="/harness">console</a>.</p>`;
+    const why = requested ? `<p>No hub with id <code>${escapeHtml(requested)}</code> is registered on this server.</p>` : `<p>Open this page with <code>?hub=&lt;hub id&gt;</code>. The id is the hub's MAC as the server lists it.</p>`;
+    this._shadow.innerHTML = `<style>${HOST_CSS}</style>
+      <div class="notice">
+        <h1>Sofabaton web remote</h1>
+        ${why}
+        ${list}
+        <p>Optional parameters: <code>lang=</code>, <code>device=&lt;device id&gt;</code> to open in device mode, <code>zoom=</code>, <code>theme=light|dark</code>.</p>
+      </div>`;
+  }
+};
+function document_createCard() {
+  return document.createElement(TYPE);
 }
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, (c7) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c7]);
+}
+function bootstrapWebRemote() {
+  installRemoteWebShims();
+  logPillsOnce();
+  if (!customElements.get(TYPE)) customElements.define(TYPE, SofabatonRemoteCard);
+  if (!customElements.get(WEB_REMOTE_TAG)) customElements.define(WEB_REMOTE_TAG, SofabatonRemoteWeb);
+}
+if (typeof window !== "undefined" && typeof customElements !== "undefined") {
+  bootstrapWebRemote();
+}
+export {
+  SofabatonRemoteWeb,
+  WEB_REMOTE_TAG,
+  bootstrapWebRemote
+};

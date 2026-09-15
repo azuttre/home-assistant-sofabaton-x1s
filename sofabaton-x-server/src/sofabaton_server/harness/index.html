@@ -101,6 +101,20 @@
     </div>
   </section>
   <section>
+    <h2>Web remote <span class="spacer"></span>
+      <a class="hint" id="remote-link" href="/ui/remote/" target="_blank" rel="noopener">open /ui/remote/ for the selected hub</a></h2>
+    <div class="body">
+      <div class="hint">The card configuration document for the selected hub (<code>PUT /hubs/{hub_id}/ui/remote-card</code>): the HA card's YAML as JSON, minus <code>entity</code>, <code>theme</code> and Home Assistant actions. An empty object resets to the card's defaults.</div>
+      <textarea id="remote-doc" style="min-height:160px" placeholder='{ "show_dpad": true, "group_order": ["activity", "dpad", "nav"] }'></textarea>
+      <div class="row">
+        <button class="small" id="remote-load">Load</button>
+        <button class="primary" id="remote-save">Save</button>
+        <button class="small" id="remote-delete">Delete</button>
+        <span class="hint" id="remote-status"></span>
+      </div>
+    </div>
+  </section>
+  <section>
     <h2><span class="dot" id="ws-dot"></span> Events
       <input id="ws-filter" placeholder="hub_id filter (optional, comma separated)" style="flex:1; font-size:12px; padding:2px 6px">
       <button class="small" id="ws-toggle">connect</button>
@@ -154,6 +168,7 @@
       box.appendChild(el);
     }
     if (!state.hub && state.hubs.length) { state.hub = state.hubs[0].hub_id; save(); loadHubs(); }
+    syncRemoteLink();
   }
   async function loadOps() {
     try {
@@ -260,6 +275,52 @@
   $("reload-hubs").onclick = () => { loadHubs(); loadServer(); };
 
   // -- events --------------------------------------------------------------------
+  // -- web remote configuration document ----------------------------------------
+  const remoteDocUrl = () => new URL(`hubs/${encodeURIComponent(state.hub)}/ui/remote-card`, API);
+  function remoteStatus(text, ok = true) { const el = $("remote-status"); el.textContent = text; el.style.color = ok ? "" : "#c62828"; }
+  async function remoteLoad() {
+    if (!state.hub) { remoteStatus("select a hub first", false); return; }
+    try {
+      const r = await fetch(remoteDocUrl());
+      const body = await r.json();
+      if (!r.ok) { remoteStatus(`${r.status}: ${body.detail || body.title || ""}`, false); return; }
+      $("remote-doc").value = body.document ? JSON.stringify(body.document, null, 2) : "";
+      remoteStatus(body.document ? `loaded (updated ${body.updated_at})` : "no document stored: the card uses its defaults");
+    } catch (e) { remoteStatus(String(e), false); }
+  }
+  async function remoteSave() {
+    if (!state.hub) { remoteStatus("select a hub first", false); return; }
+    let document;
+    try {
+      const text = $("remote-doc").value.trim();
+      document = text ? JSON.parse(text) : {};
+    } catch (e) { remoteStatus("not valid JSON: " + e.message, false); return; }
+    if (!document || typeof document !== "object" || Array.isArray(document)) { remoteStatus("the document must be a JSON object", false); return; }
+    try {
+      const r = await fetch(remoteDocUrl(), { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ document }) });
+      const body = await r.json();
+      if (!r.ok) { remoteStatus(`${r.status}: ${body.detail || body.title || ""}`, false); return; }
+      $("remote-doc").value = JSON.stringify(body.document, null, 2);
+      remoteStatus(`saved (updated ${body.updated_at}); reload the web remote to pick it up`);
+    } catch (e) { remoteStatus(String(e), false); }
+  }
+  async function remoteDelete() {
+    if (!state.hub) { remoteStatus("select a hub first", false); return; }
+    try {
+      const r = await fetch(remoteDocUrl(), { method: "DELETE" });
+      if (r.status !== 204) { const body = await r.json(); remoteStatus(`${r.status}: ${body.detail || body.title || ""}`, false); return; }
+      $("remote-doc").value = "";
+      remoteStatus("deleted: the card uses its defaults");
+    } catch (e) { remoteStatus(String(e), false); }
+  }
+  function syncRemoteLink() {
+    const a = $("remote-link");
+    a.href = state.hub ? `/ui/remote/?hub=${encodeURIComponent(state.hub)}` : "/ui/remote/";
+  }
+  $("remote-load").onclick = remoteLoad;
+  $("remote-save").onclick = remoteSave;
+  $("remote-delete").onclick = remoteDelete;
+
   function wsUrl() {
     const u = new URL("events", API); u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
     const filter = $("ws-filter").value.split(",").map((s) => s.trim()).filter(Boolean);

@@ -59,6 +59,14 @@ class Accepted:
     mode: str
 
 
+@dataclass(frozen=True)
+class DevicePowerState:
+    """``GET /hubs/{id}/devices/{did}/power-state``: a fresh read of one power byte."""
+
+    device_id: int
+    power_state: Optional[int]
+
+
 class SendCommand(BaseModel):
     entity_id: int = Field(ge=0, description="activity id (101+) or device id")
     command_id: int = Field(ge=0, description="command id, macro id, or button code")
@@ -167,6 +175,27 @@ async def list_device_commands(request: Request, hub_id: str, device_id: int) ->
     await _require_device(proxy, hub_id, device_id)
     async with hub_errors(hub_id):
         return await proxy.commands(device_id)
+
+
+@router.get("/devices/{device_id}/power-state", operation_id="getDevicePowerState", response_model=DevicePowerState,
+            summary="Fresh read of one device's power state", responses=_HUB_ERRORS)
+async def get_device_power_state(request: Request, hub_id: str, device_id: int) -> DevicePowerState:
+    """A hub round-trip on purpose: the device list is re-read (the
+    protocol's only read of the power byte), then the one row is
+    projected. ``power_state`` is 0 off / 1 on, or null when the row
+    carried no parseable record; a power macro commits the byte with a
+    short lag, so a caller that just fired must not expect an immediate
+    flip. A read the hub never answers is a 504, not a null."""
+
+    proxy = _proxy(request, hub_id)
+    await _require_device(proxy, hub_id, device_id)
+    async with hub_errors(hub_id):
+        devices = await proxy.devices(refresh=True)
+    row = next((d for d in devices if d.device_id == device_id), None)
+    if row is None:
+        raise entity_not_found(hub_id, "device", device_id)
+    state = row.power_state
+    return DevicePowerState(device_id=device_id, power_state=state if state in (0, 1) else None)
 
 
 @router.get("/entities/{entity_id}/buttons", operation_id="listEntityButtons", response_model=list[Button],

@@ -4,13 +4,18 @@
 
 import type { HassLike } from "./remote-card-types";
 
+/** Uppercased hub_version attribute of a remote state object ("" if unknown). */
+export function hubVersionFromState(
+  remoteState: { attributes?: Record<string, unknown> } | null | undefined,
+): string {
+  return String(remoteState?.attributes?.hub_version || "").toUpperCase();
+}
+
 /** Uppercased hub_version attribute of the configured remote entity ("" if unknown). */
 export function hubVersionFor(hass: HassLike | null | undefined, entityId: unknown): string {
   const resolved = String(entityId || "").trim();
   if (!resolved) return "";
-  return String(
-    (hass?.states?.[resolved]?.attributes as Record<string, unknown> | undefined)?.hub_version || "",
-  ).toUpperCase();
+  return hubVersionFromState(hass?.states?.[resolved]);
 }
 
 /** sofabaton_hub (the X2 integration) is always an X2; otherwise go by hub_version. */

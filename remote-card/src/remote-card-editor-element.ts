@@ -50,6 +50,7 @@ import {
   volumeTogglePatch,
 } from "./remote-card-editor-layout";
 import { hubVersionFor, isX2Hub } from "./remote-card-compat";
+import { webRemoteConfigFromCardConfig } from "./remote-web-config";
 import {
   remoteCardDirection,
   remoteCardLanguage,
@@ -683,6 +684,29 @@ export class SofabatonRemoteCardEditor extends LitElement {
     this.requestUpdate();
   }
 
+  /**
+   * Copy this card's config as the JSON document the web remote takes
+   * (docs/internal/web-remote-plan.md, section 7): the same keys minus
+   * entity, theme and Home Assistant actions.
+   */
+  private async _copyWebRemoteConfig(): Promise<void> {
+    const document = webRemoteConfigFromCardConfig(this._config);
+    const text = JSON.stringify(document, null, 2);
+    let message = str().editor.copiedConfigJson;
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch (_err) {
+      message = str().editor.copyConfigJsonFailed;
+    }
+    this.dispatchEvent(
+      new CustomEvent("hass-notification", {
+        detail: { message },
+        bubbles: true,
+        composed: true,
+      }),
+    );
+  }
+
   // ---------- render ----------
 
   render() {
@@ -823,6 +847,15 @@ export class SofabatonRemoteCardEditor extends LitElement {
             this._mergeFormValue(ev.detail.value);
           }}
         ></ha-form>
+        <div style="padding: 8px 0 0; display: flex; justify-content: flex-end;">
+          <button
+            type="button"
+            class="sb-copy-web-config"
+            style="font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--divider-color); background: transparent; color: var(--primary-color); cursor: pointer;"
+            title=${str().editor.copyConfigJson}
+            @click=${() => void this._copyWebRemoteConfig()}
+          >${str().editor.copyConfigJson}</button>
+        </div>
       </div>
       <div class="sb-general-wrap" style="padding: 0 0 12px 0;">
         ${renderGeneralOptionsSection({

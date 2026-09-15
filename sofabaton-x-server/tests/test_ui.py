@@ -1,0 +1,126 @@
+"""S1 (web-remote plan): the web remote page, its assets, and the per-hub
+card configuration document."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from sofabaton_server import API_PREFIX
+from sofabaton_server.app import create_app
+from sofabaton_server.config import Settings
+from sofabaton_server.manager import HubManager
+from sofabaton_server.routes_ui import MAX_DOCUMENT_BYTES, UI_DIR
+
+from fakes import Factory, no_network_discovery
+
+HUBS = f"{API_PREFIX}/hubs"
+
+
+@pytest.fixture
+def rig(tmp_path: Path):
+    factory = Factory()
+    settings = Settings(data_dir=tmp_path)
+    manager = HubManager(settings, proxy_factory=factory)
+    app = create_app(settings, manager=manager, discovery=no_network_discovery(settings, manager))
+    with TestClient(app) as client:
+        assert client.post(HUBS, json={"host": "192.168.1.50"}).status_code == 201
+        yield client, manager, tmp_path
+
+
+def test_page_assets_ship_in_the_package() -> None:
+    for name in ("index.html", "remote-web.js", "manifest.webmanifest", "icon.svg"):
+        assert (UI_DIR / name).is_file(), name
+    html = (UI_DIR / "index.html").read_text(encoding="utf-8")
+    assert "<sofabaton-remote-web>" in html and 'src="remote-web.js"' in html
+    bundle = (UI_DIR / "remote-web.js").read_text(encoding="utf-8")
+    assert "sofabaton-remote-web" in bundle and "/api/v1" in bundle
+
+
+def test_root_and_ui_remote_redirect_to_the_page(rig) -> None:
+    client, _, _ = rig
+    r = client.get("/", follow_redirects=False)
+    assert r.status_code == 307 and r.headers["location"] == "/ui/remote/"
+    r = client.get("/ui/remote", follow_redirects=False)
+    assert r.status_code == 307 and r.headers["location"] == "/ui/remote/"
+    r = client.get("/ui/remote/")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
+    assert "<sofabaton-remote-web>" in r.text
+    assert r.headers["cache-control"] == "no-cache" and r.headers["etag"]
+
+
+def test_assets_are_served_with_types_and_revalidation(rig) -> None:
+    client, _, _ = rig
+    js = client.get("/ui/remote/remote-web.js")
+    assert js.status_code == 200 and js.headers["content-type"].startswith("text/javascript")
+    manifest = client.get("/ui/remote/manifest.webmanifest")
+    assert manifest.status_code == 200 and manifest.headers["content-type"] == "application/manifest+json"
+    assert json.loads(manifest.text)["start_url"] == "./"
+    icon = client.get("/ui/remote/icon.svg")
+    assert icon.status_code == 200 and icon.headers["content-type"] == "image/svg+xml"
+    again = client.get("/ui/remote/remote-web.js", headers={"if-none-match": js.headers["etag"]})
+    assert again.status_code == 304
+    # Only the allow-listed files are reachable.
+    assert client.get("/ui/remote/routes_ui.py").status_code == 404
+    assert client.get("/ui/remote/../routes_ui.py").status_code == 404
+    assert client.get("/ui/remote/nope.js").json()["type"] == "ui_asset_not_found"
+
+
+def test_page_routes_are_outside_the_api_contract(rig) -> None:
+    client, _, _ = rig
+    spec = client.get(f"{API_PREFIX}/openapi.json").json()
+    assert not any(path.startswith("/ui") or path == "/" for path in spec["paths"])
+    assert f"/api/v1/hubs/{{hub_id}}/ui/remote-card" in spec["paths"]
+
+
+def test_remote_card_document_round_trip(rig) -> None:
+    client, manager, data_dir = rig
+    h = f"{HUBS}/192.168.1.50/ui/remote-card"
+
+    r = client.get(h)
+    assert r.status_code == 200 and r.json() == {"hub_id": "192.168.1.50", "document": None, "updated_at": None}
+
+    document = {"show_dpad": True, "group_order": ["activity", "dpad"], "device_mode": {"enabled": True}}
+    r = client.put(h, json={"document": document})
+    assert r.status_code == 200, r.text
+    assert r.json()["document"] == document and r.json()["updated_at"]
+    stored = json.loads(manager.ui_documents.path("192.168.1.50").read_text(encoding="utf-8"))
+    assert stored["document"] == document and stored["kind"] == "sofabaton_remote_card_document"
+    assert manager.ui_documents.path("192.168.1.50").parent == data_dir
+
+    # A PUT replaces the whole document; an empty object is a valid reset.
+    assert client.put(h, json={"document": {}}).json()["document"] == {}
+    assert client.get(h).json()["document"] == {}
+
+    r = client.delete(h)
+    assert r.status_code == 204
+    assert client.get(h).json()["document"] is None
+    assert client.delete(h).status_code == 204, "deleting twice is fine"
+
+
+def test_remote_card_document_validation(rig) -> None:
+    client, _, _ = rig
+    h = f"{HUBS}/192.168.1.50/ui/remote-card"
+    assert client.put(h, json={"document": []}).status_code == 422
+    assert client.put(h, json={"document": "x"}).status_code == 422
+    assert client.put(h, json={}).status_code == 422
+    big = {"notes": "x" * (MAX_DOCUMENT_BYTES + 1)}
+    r = client.put(h, json={"document": big})
+    assert r.status_code == 413 and r.json()["type"] == "ui_document_too_large"
+    for method in ("get", "put", "delete"):
+        kwargs = {"json": {"document": {}}} if method == "put" else {}
+        r = getattr(client, method)(f"{HUBS}/nope/ui/remote-card", **kwargs)
+        assert r.status_code == 404 and r.json()["type"] == "hub_not_found", method
+
+
+def test_document_follows_the_hub_through_removal(rig) -> None:
+    client, manager, _ = rig
+    h = f"{HUBS}/192.168.1.50"
+    assert client.put(f"{h}/ui/remote-card", json={"document": {"show_dpad": False}}).status_code == 200
+    path = manager.ui_documents.path("192.168.1.50")
+    assert path.exists()
+    assert client.delete(h).status_code in (200, 204)
+    assert not path.exists(), "removing the hub removes its document"

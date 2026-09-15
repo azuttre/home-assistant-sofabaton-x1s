@@ -94,6 +94,9 @@ const REMOTE_CARD_STRINGS_NL = {
     },
   },
   editor: {
+    copyConfigJson: "Configuratie voor de webafstandsbediening kopiëren",
+    copiedConfigJson: "Kaartconfiguratie als JSON gekopieerd (entiteit, thema en Home Assistant-acties weggelaten)",
+    copyConfigJsonFailed: "Kopiëren mislukt: de browser weigerde toegang tot het klembord",
     fieldLabels: {
       entity: "Selecteer een Sofabaton-entiteit voor afstandsbediening",
       theme: "Pas een thema toe op de kaart",

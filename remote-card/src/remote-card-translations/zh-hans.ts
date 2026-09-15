@@ -91,6 +91,9 @@ export const REMOTE_CARD_STRINGS_ZH_HANS = {
     },
   },
   editor: {
+    copyConfigJson: "复制网页遥控器配置",
+    copiedConfigJson: "已将卡片配置复制为 JSON（不含实体、主题和 Home Assistant 动作）",
+    copyConfigJsonFailed: "无法复制：浏览器拒绝访问剪贴板",
     fieldLabels: {
       entity: "选择 Sofabaton 遥控实体",
       theme: "为卡片应用主题",

@@ -21,7 +21,7 @@ from sofabaton import AsyncXProxy, HubConfig, HubEvent, HubStatus, StateDocument
 
 from .config import Settings
 from .models import HubRecord, HubView, mac_key, now_iso
-from .store import HubStore, StateStore
+from .store import HubStore, StateStore, UiDocumentStore
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +70,7 @@ class HubManager:
         proxy_factory: ProxyFactory = AsyncXProxy.from_config,
         store: Optional[HubStore] = None,
         state_store: Optional[StateStore] = None,
+        ui_store: Optional[UiDocumentStore] = None,
     ) -> None:
         self._settings = settings
         self._factory = proxy_factory
@@ -77,6 +78,9 @@ class HubManager:
         # Phase 3 S7: the library's cache document per hub, imported before
         # start() and written after every snapshot change and at stop.
         self._state = state_store or StateStore(settings.data_dir)
+        # The web remote's per-hub card configuration (web-remote plan,
+        # section 7); follows the hub through re-key and removal.
+        self.ui_documents = ui_store or UiDocumentStore(settings.data_dir)
         self._records: dict[str, HubRecord] = {}
         self._proxies: dict[str, AsyncXProxy] = {}
         self._watchers: dict[str, asyncio.Task] = {}
@@ -222,6 +226,7 @@ class HubManager:
                 self._records.pop(record.hub_id, None)
                 self._persist()
             self._state.delete(record.hub_id)
+            self.ui_documents.delete(record.hub_id)
         self._emit_server("hub_removed", hub_id)
 
     async def enable(self, hub_id: str) -> HubRecord:
@@ -370,6 +375,7 @@ class HubManager:
                 if hub_id in self._watchers:
                     self._watchers[new_id] = self._watchers.pop(hub_id)
                 self._state.rename(hub_id, new_id)
+                self.ui_documents.rename(hub_id, new_id)
                 for listener in list(self._rekey_listeners):
                     try:
                         listener(hub_id, new_id)

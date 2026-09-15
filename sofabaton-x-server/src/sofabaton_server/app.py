@@ -33,6 +33,7 @@ from .routes_hubs import router as hubs_router
 from .routes_payload import router as payload_router
 from .routes_snapshot import router as snapshot_router
 from .store import ApplyStore
+from .routes_ui import router as ui_router, ui_pages_router
 from .ws import WS_MESSAGE_TYPES, EventRelay, WsPress, router as events_router
 
 # ``sofabaton`` is the library's import name (PyPI: sofabaton-x). Only
@@ -131,6 +132,8 @@ def create_app(settings: Settings | None = None, *, manager: Optional[HubManager
     app.include_router(payload_router)
     app.include_router(events_router)
     app.include_router(discovery_router)
+    app.include_router(ui_router)
+    app.include_router(ui_pages_router)
     _publish_ws_components(app)
 
     @app.get("/harness", include_in_schema=False)

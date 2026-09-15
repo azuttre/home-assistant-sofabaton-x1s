@@ -107,6 +107,9 @@ export const REMOTE_CARD_STRINGS_AR = {
     },
   },
   editor: {
+    copyConfigJson: "نسخ الإعدادات لجهاز التحكم عبر الويب",
+    copiedConfigJson: "تم نسخ إعدادات البطاقة بصيغة JSON (بدون الكيان والسمة وإجراءات Home Assistant)",
+    copyConfigJsonFailed: "تعذر النسخ: رفض المتصفح الوصول إلى الحافظة",
     fieldLabels: {
       entity: `اختر كيان جهاز تحكم عن بُعد من ${SOFABATON}`,
       theme: "تطبيق سمة على البطاقة",

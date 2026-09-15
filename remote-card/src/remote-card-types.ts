@@ -1,4 +1,4 @@
-import type { HassLike } from "../../custom_components/sofabaton_x1s/www/src/shared/ha-context";
+import type { HassLike } from "./backend/hass-types";
 
 export type { HassLike };
 

@@ -122,6 +122,9 @@ compatibility guarantee.
   in-place planner carries a pinned callback address (`target_host`).
 - `local_address()`: the routed local IPv4 toward the hub (the default
   callback target; a container on a bridge network must pass its host's).
+- `Button.long_press_device_id` / `Button.long_press_command_id`: the
+  hub's long-press pair for a bound button (both `None` when it has none).
+  Additive; `to_dict()` gains the two keys.
 
 ## Earlier releases
 

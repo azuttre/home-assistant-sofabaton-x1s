@@ -816,7 +816,10 @@ class AsyncXProxy:
 
         Each :class:`Button` carries the code you can send to
         ``entity_id`` plus the underlying target device command it maps
-        to (``device_id``/``command_id`` are ``None`` for unbound slots).
+        to (``device_id``/``command_id`` are ``None`` for unbound slots)
+        and, when the hub has one, the long-press pair the remote fires
+        on a hold (``long_press_device_id``/``long_press_command_id``,
+        both ``None`` otherwise: a pair needs a device and a command).
         """
 
         codes = await self._read(
@@ -831,12 +834,17 @@ class AsyncXProxy:
         out: list[Button] = []
         for code in codes:
             bound = details.get(code, {})
+            lp_device = bound.get("long_press_device_id")
+            lp_command = bound.get("long_press_command_id")
+            has_long_press = bool(lp_device) and lp_command is not None
             out.append(
                 Button(
                     button_code=int(code),
                     name=BUTTONNAME_BY_CODE.get(code),
                     device_id=bound.get("device_id"),
                     command_id=bound.get("command_id"),
+                    long_press_device_id=int(lp_device) if has_long_press else None,
+                    long_press_command_id=int(lp_command) if has_long_press else None,
                 )
             )
         return out

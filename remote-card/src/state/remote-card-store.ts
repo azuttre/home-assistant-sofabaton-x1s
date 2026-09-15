@@ -63,26 +63,27 @@ import {
   hubAssignedKeyCommand,
   hubFavoriteKeyCommand,
   hubMacroKeyCommand,
-  remoteSendCommandData,
 } from "../remote-card-actions";
 import { hubLongPressBinding } from "../remote-card-long-press";
 import {
   customFavoritesSignature,
   normalizeCustomFavorite,
 } from "../remote-card-editor-helpers";
-import { hubVersionFor, isX2Hub, supportsUnicodeCommandNames } from "../remote-card-compat";
+import { hubVersionFromState, isX2Hub, supportsUnicodeCommandNames } from "../remote-card-compat";
 import { str } from "../remote-card-strings";
 import {
   readPreviewActivity,
   stableJsonSignature,
   writePreviewActivity,
 } from "../remote-card-shared";
+import type { RemoteCardConfig } from "../remote-card-types";
+import type { HassLike } from "../backend/hass-types";
 import type {
-  DeviceKeymapResponse,
-  DevicePowerStateResponse,
-  HassLike,
-  RemoteCardConfig,
-} from "../remote-card-types";
+  RemoteBackend,
+  RemoteIntegration,
+  RemoteSnapshot,
+} from "../backend/remote-backend";
+import { HaRemoteBackend } from "../backend/ha-backend";
 
 export interface RemoteCardStoreHost {
   /** DOM event dispatch for haptic / hass-more-info / ll-custom / location events. */
@@ -168,13 +169,17 @@ export class RemoteCardStore {
   private readonly onChange: () => void;
   private readonly host: RemoteCardStoreHost;
 
-  private _hass: HassLike | null = null;
+  // The backend port (docs/internal/web-remote-plan.md): HA's `hass` is
+  // wrapped by the HA adapter; the web remote installs a server adapter.
+  private _backend: RemoteBackend | null = null;
+  private _haBackend: HaRemoteBackend | null = null;
+  private _backendUnsubscribe: (() => void) | null = null;
   private _config: RemoteCardConfig | null = null;
   private _editMode = false;
   previewActivity: string | null = null;
 
   // Integration detection (x1s vs hub)
-  private integrationDomain: string | null = null;
+  private integration: RemoteIntegration | null = null;
   private integrationEntityId: string | null = null;
   private integrationDetectingFor: string | null = null;
 
@@ -231,8 +236,18 @@ export class RemoteCardStore {
 
   // ---------- core wiring ----------
 
+  /** The active backend, or null before the card is wired to HA or a server. */
+  get backend(): RemoteBackend | null {
+    return this._backend;
+  }
+
+  /**
+   * The Lovelace `hass` object behind the HA adapter, null on any other
+   * backend. HA-only consumers (Automation Assist, ha-select, the theme
+   * engine) read it; the store itself never does.
+   */
   get hass(): HassLike | null {
-    return this._hass;
+    return this._haBackend?.hass ?? null;
   }
 
   get config(): RemoteCardConfig | null {
@@ -257,6 +272,7 @@ export class RemoteCardStore {
     }
 
     this._config = normalizeRemoteCardConfig(config);
+    this._backend?.setTarget(String(this._config.entity));
 
     this.activeDrawer = null;
     this.activityMenuOpen = false;
@@ -266,10 +282,30 @@ export class RemoteCardStore {
     this.onChange();
   }
 
+  /** HA entry point: wrap `hass` in the HA adapter and make it the backend. */
   setHass(hass: HassLike): void {
-    this._hass = hass;
+    if (!this._haBackend) this._haBackend = new HaRemoteBackend();
+    this._haBackend.setHass(hass);
+    this.setBackend(this._haBackend);
+  }
+
+  /** Generic entry point: any RemoteBackend (the web remote's server adapter). */
+  setBackend(backend: RemoteBackend | null): void {
+    if (this._backend !== backend) {
+      this._backendUnsubscribe?.();
+      this._backendUnsubscribe = null;
+      this._backend = backend;
+      if (backend?.subscribe) {
+        this._backendUnsubscribe = backend.subscribe(() => this.onBackendChange());
+      }
+    }
+    if (backend && this._config?.entity) backend.setTarget(String(this._config.entity));
+    this.onBackendChange();
+  }
+
+  private onBackendChange(): void {
     void this.ensureIntegration().then(() => {
-      if (!this.shouldNotifyForHass(hass)) return;
+      if (!this.shouldNotify()) return;
       this.onChange();
     });
   }
@@ -286,10 +322,14 @@ export class RemoteCardStore {
   }
 
   connected(): void {
-    /* no store-side listeners today; symmetry with ControlPanelStore */
+    if (this._backend?.subscribe && !this._backendUnsubscribe) {
+      this._backendUnsubscribe = this._backend.subscribe(() => this.onBackendChange());
+    }
   }
 
   disconnected(): void {
+    this._backendUnsubscribe?.();
+    this._backendUnsubscribe = null;
     if (this.commandPulseTimeout) clearTimeout(this.commandPulseTimeout);
     if (this.activityLoadTimeout) clearTimeout(this.activityLoadTimeout);
     this.commandPulseTimeout = null;
@@ -303,20 +343,19 @@ export class RemoteCardStore {
     this.lastUpdateFingerprint = null;
   }
 
-  shouldNotifyForHass(hass: HassLike | null): boolean {
-    const nextFingerprint = this.updateFingerprint(hass);
+  shouldNotify(): boolean {
+    const nextFingerprint = this.updateFingerprint();
     if (nextFingerprint === this.lastUpdateFingerprint) return false;
     this.lastUpdateFingerprint = nextFingerprint;
     return true;
   }
 
-  updateFingerprint(hass: HassLike | null = this._hass): string {
+  updateFingerprint(): string {
     const entityId = String(this._config?.entity || "");
-    const remote = entityId ? hass?.states?.[entityId] : null;
+    const remote = entityId ? this.remoteState() : null;
     const attrs = (remote?.attributes || {}) as Record<string, unknown>;
     const themeName = String(this._config?.theme || "");
-    const themes = (hass as { themes?: { themes?: Record<string, unknown>; darkMode?: boolean } } | null)
-      ?.themes;
+    const themes = this.hass?.themes;
     const themeDef = themeName ? themes?.themes?.[themeName] : null;
     const themeMode = themes?.darkMode ? "dark" : "light";
 
@@ -341,7 +380,7 @@ export class RemoteCardStore {
       stableJsonSignature(themeDef),
       this._editMode ? "1" : "0",
       String(this.previewActivity ?? ""),
-      this.integrationDomain || "",
+      this.integration || "",
       this._mode,
       String(this._deviceId ?? ""),
       keymapEntry
@@ -353,7 +392,7 @@ export class RemoteCardStore {
   // ---------- integration detection ----------
 
   async ensureIntegration(): Promise<void> {
-    if (!this._hass?.callWS || !this._config?.entity) return;
+    if (!this._backend || !this._config?.entity) return;
 
     const entityId = String(this._config.entity);
 
@@ -375,20 +414,15 @@ export class RemoteCardStore {
       this.initialViewApplied = false;
     }
 
-    if (this.integrationEntityId === entityId && this.integrationDomain) return;
+    if (this.integrationEntityId === entityId && this.integration) return;
     if (this.integrationDetectingFor === entityId) return;
 
     this.integrationDetectingFor = entityId;
     try {
-      const entry = await this._hass.callWS<{ platform?: string }>({
-        type: "config/entity_registry/get",
-        entity_id: entityId,
-      });
-      // Entity registry exposes the integration as `platform` for the entity
-      this.integrationDomain = String(entry?.platform || "");
+      this.integration = await this._backend.probeIntegration();
       this.integrationEntityId = entityId;
     } catch (e) {
-      this.integrationDomain = null;
+      this.integration = null;
       this.integrationEntityId = entityId;
     } finally {
       this.integrationDetectingFor = null;
@@ -397,11 +431,11 @@ export class RemoteCardStore {
   }
 
   isHubIntegration(): boolean {
-    return String(this.integrationDomain || "") === "sofabaton_hub";
+    return this.integration === "hub";
   }
 
   hubVersion(): string {
-    return hubVersionFor(this._hass, this._config?.entity);
+    return hubVersionFromState(this.remoteState());
   }
 
   isX2(): boolean {
@@ -440,7 +474,7 @@ export class RemoteCardStore {
    * user in one mode by design), never the mode itself.
    */
   deviceModeAvailable(): boolean {
-    if (String(this.integrationDomain || "") !== "sofabaton_x1s") return false;
+    if (this.integration !== "x1s") return false;
     if (!deviceModeEnabledInConfig(this._config)) return false;
     return this.devices().length > 0;
   }
@@ -527,22 +561,12 @@ export class RemoteCardStore {
     null;
 
   private async fetchDevicePowerState(deviceId: number): Promise<0 | 1 | null> {
-    if (!this._hass?.callWS) return null;
-    const entryId = String(
-      (this.remoteState()?.attributes as Record<string, unknown> | undefined)
-        ?.entry_id ?? "",
-    );
-    if (!entryId) return null;
+    const backend = this._backend;
+    if (!backend) return null;
     try {
-      const response = await this._hass.callWS<DevicePowerStateResponse>({
-        type: "sofabaton_x1s/device/power_state",
-        entry_id: entryId,
-        device_id: deviceId,
-      });
-      // Strict 0/1 only: null (hub could not read the row) must NOT
-      // coerce to "off", or a blind fire would desync hub bookkeeping.
-      const raw = response?.power_state;
-      return raw === 1 ? 1 : raw === 0 ? 0 : null;
+      // Strict 0/1 only (the adapter's contract): null must NOT coerce to
+      // "off", or a blind fire would desync hub bookkeeping.
+      return await backend.devicePowerState(deviceId);
     } catch (_err) {
       return null;
     }
@@ -558,7 +582,8 @@ export class RemoteCardStore {
    */
   async toggleDevicePower(): Promise<void> {
     if (this._editMode || this.powerBusy) return;
-    if (!this._hass || !this._config?.entity) return;
+    const backend = this._backend;
+    if (!backend || !this._config?.entity) return;
     const deviceId = this._deviceId;
     if (deviceId == null || !this.devicePowerConfigured(deviceId)) return;
 
@@ -579,10 +604,8 @@ export class RemoteCardStore {
       if (state == null) return;
 
       const keyId = state === 1 ? POWER_OFF_KEY_ID : POWER_ON_KEY_ID;
-      const serviceData = remoteSendCommandData(this._config.entity, keyId, deviceId);
-      if (!serviceData) return;
       this.triggerCommandPulse();
-      await this.callService("remote", "send_command", serviceData);
+      await backend.sendCommand(keyId, deviceId);
       this._powerAssumption = {
         deviceId,
         state: state === 1 ? 0 : 1,
@@ -609,20 +632,18 @@ export class RemoteCardStore {
   async ensureDeviceKeymap(deviceId: number): Promise<void> {
     const key = String(deviceId);
     if (this.deviceKeymaps[key]) return;
-    if (!this._hass?.callWS) return;
-    const entryId = String(
-      (this.remoteState()?.attributes as Record<string, unknown> | undefined)
-        ?.entry_id ?? "",
-    );
-    if (!entryId) return;
+    const backend = this._backend;
+    if (!backend) return;
 
     this.deviceKeymaps[key] = { status: "loading", buttons: [], commands: [] };
     try {
-      const response = await this._hass.callWS<DeviceKeymapResponse>({
-        type: "sofabaton_x1s/device/keymap",
-        entry_id: entryId,
-        device_id: deviceId,
-      });
+      const response = await backend.deviceKeymap(deviceId);
+      if (response === null) {
+        // The backend cannot fetch yet (no entry id published): retry on
+        // the next change instead of caching a miss.
+        delete this.deviceKeymaps[key];
+        return;
+      }
       const keymap = response?.keymap;
       if (!keymap) {
         this.deviceKeymaps[key] = {
@@ -693,8 +714,8 @@ export class RemoteCardStore {
 
   // ---------- basic state helpers ----------
 
-  remoteState() {
-    return this._hass?.states?.[String(this._config?.entity ?? "")];
+  remoteState(): RemoteSnapshot | undefined {
+    return this._backend?.snapshot();
   }
 
   currentActivityId(): number | null {
@@ -896,7 +917,7 @@ export class RemoteCardStore {
     { priority = false, gapMs = 150 }: { priority?: boolean; gapMs?: number } = {},
   ): void {
     if (!this.isHubIntegration()) return;
-    if (!this._hass || !this._config?.entity) return;
+    if (!this._backend || !this._config?.entity) return;
 
     this.hubInitState();
 
@@ -908,7 +929,7 @@ export class RemoteCardStore {
 
   hubEnqueueRequest(list: unknown[], requestKey: string | null): void {
     if (!this.isHubIntegration()) return;
-    if (!this._hass || !this._config?.entity) return;
+    if (!this._backend || !this._config?.entity) return;
 
     this.hubInitState();
 
@@ -925,7 +946,7 @@ export class RemoteCardStore {
 
   async hubDrainQueue(): Promise<void> {
     if (!this.isHubIntegration()) return;
-    if (!this._hass || !this._config?.entity) return;
+    if (!this._backend || !this._config?.entity) return;
 
     this.hubInitState();
     if (this.hubQueueBusy) return;
@@ -934,10 +955,7 @@ export class RemoteCardStore {
       while (this.hubQueue!.length) {
         const next = this.hubQueue!.shift();
         if (!next?.list) continue;
-        await this.callService("remote", "send_command", {
-          entity_id: this._config.entity,
-          command: next.list,
-        });
+        await this._backend?.sendRawCommandList?.(next.list);
 
         // A small delay between calls improves reliability.
         const gap = Number.isFinite(Number(next?.gapMs)) ? Number(next.gapMs) : 750;
@@ -961,7 +979,7 @@ export class RemoteCardStore {
   ): Promise<void> {
     if (this._editMode) return;
     if (!this.isHubIntegration()) return;
-    if (!this._hass || !this._config?.entity) return;
+    if (!this._backend || !this._config?.entity) return;
 
     // If we're already running queued hub traffic (e.g. bootstrapping request_* calls),
     // serialize user commands too (but prioritize them) to reduce dropped calls.
@@ -976,10 +994,7 @@ export class RemoteCardStore {
       return;
     }
 
-    await this.callService("remote", "send_command", {
-      entity_id: this._config.entity,
-      command: list,
-    });
+    await this._backend?.sendRawCommandList?.(list);
   }
 
   hubRequestBasicData(): void {
@@ -1027,7 +1042,11 @@ export class RemoteCardStore {
     data: Record<string, unknown>,
     target: Record<string, unknown> | undefined = undefined,
   ): Promise<void> {
-    await this._hass!.callService!(domain, service, data, target);
+    const backend = this._backend;
+    if (!backend?.callService) {
+      throw new TypeError("service calls are unavailable on this backend");
+    }
+    await backend.callService(domain, service, data, target);
   }
 
   async runLovelaceAction(
@@ -1115,7 +1134,7 @@ export class RemoteCardStore {
 
   async sendCommand(commandId: unknown, deviceId: unknown = null): Promise<void> {
     if (this._editMode) return;
-    if (!this._hass || !this._config?.entity) return;
+    if (!this._backend || !this._config?.entity) return;
 
     // Device mode scopes every send to the selected device; activity mode
     // falls back to the enabled_buttons override (activity_id) or
@@ -1137,9 +1156,7 @@ export class RemoteCardStore {
     }
 
     // X1S/X1 style
-    const serviceData = remoteSendCommandData(this._config.entity, commandId, resolvedDevice);
-    if (!serviceData) return;
-    await this.callService("remote", "send_command", serviceData);
+    await this._backend.sendCommand(commandId, resolvedDevice);
   }
 
   /**
@@ -1155,7 +1172,7 @@ export class RemoteCardStore {
     buttonId: unknown,
     scopeId: unknown,
   ): { device_id: number; command_id: number } | null {
-    if (String(this.integrationDomain || "") !== "sofabaton_x1s") return null;
+    if (this.integration !== "x1s") return null;
     const attrs = this.remoteState()?.attributes as
       | { long_press_keys?: unknown }
       | undefined;
@@ -1176,16 +1193,10 @@ export class RemoteCardStore {
    */
   async sendLongPress(buttonId: unknown, scopeId: unknown): Promise<void> {
     if (this._editMode) return;
-    if (!this._hass || !this._config?.entity) return;
+    if (!this._backend || !this._config?.entity) return;
     const binding = this.longPressBindingForButton(buttonId, scopeId);
     if (!binding) return;
-    const serviceData = remoteSendCommandData(
-      this._config.entity,
-      binding.command_id,
-      binding.device_id,
-    );
-    if (!serviceData) return;
-    await this.callService("remote", "send_command", serviceData);
+    await this._backend.sendCommand(binding.command_id, binding.device_id);
   }
 
   async sendDrawerItem(
@@ -1201,7 +1212,7 @@ export class RemoteCardStore {
     }
 
     // Hub path
-    if (!this._hass || !this._config?.entity) return;
+    if (!this._backend || !this._config?.entity) return;
 
     const activityId = Number(deviceId ?? this.currentActivityId());
     const keyId = Number(commandId);
@@ -1228,7 +1239,7 @@ export class RemoteCardStore {
 
   async sendCustomFavoriteCommand(commandId: unknown, deviceId: unknown): Promise<void> {
     if (this._editMode) return;
-    if (!this._hass || !this._config?.entity) return;
+    if (!this._backend || !this._config?.entity) return;
 
     const cmd = Number(commandId);
     const dev = Number(deviceId);
@@ -1243,9 +1254,7 @@ export class RemoteCardStore {
     }
 
     // X1S/X1 style: send_command with device + numeric command
-    const serviceData = remoteSendCommandData(this._config.entity, cmd, dev);
-    if (!serviceData) return;
-    await this.callService("remote", "send_command", serviceData);
+    await this._backend.sendCommand(cmd, dev);
   }
 
   async setActivity(option: unknown): Promise<void> {
@@ -1278,17 +1287,15 @@ export class RemoteCardStore {
     }
 
     // X1S/X1 path
+    const backend = this._backend;
+    if (!backend) return;
     if (isPoweredOffLabel(selected)) {
-      await this.callService("remote", "turn_off", {
-        entity_id: this._config!.entity,
-      });
+      await backend.stopActivity();
       return;
     }
 
-    await this.callService("remote", "turn_on", {
-      entity_id: this._config!.entity,
-      activity: selected,
-    });
+    const target = this.activities().find((activity) => activity.name === selected);
+    await backend.startActivity({ id: target?.id ?? null, name: selected });
   }
 
   // ---------- runtime derivation (the state half of the legacy _update) ----------

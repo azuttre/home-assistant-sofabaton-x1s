@@ -105,6 +105,16 @@ class StateStore:
             path.unlink()
 
 
+class UiDocumentStore(StateStore):
+    """One ``ui-remote-card-<hub_id>.json`` per hub: the web remote's card
+    configuration document (web-remote plan, section 7). Same atomic
+    write, rename on re-key and delete on remove as the state store."""
+
+    def path(self, hub_id: str) -> Path:
+        safe = "".join(ch if ch.isalnum() or ch in "-._" else "_" for ch in hub_id)
+        return self.data_dir / f"ui-remote-card-{safe}.json"
+
+
 APPLIES_DIR = "applies"
 APPLY_RECORD_KIND = "sofabaton_apply_record"
 

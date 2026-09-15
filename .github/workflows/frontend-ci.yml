@@ -53,7 +53,7 @@ jobs:
       - name: Committed frontend artifacts match source
         shell: bash
         run: |
-          changes="$(git status --porcelain --untracked-files=all -- custom_components/sofabaton_x1s/www)"
+          changes="$(git status --porcelain --untracked-files=all -- custom_components/sofabaton_x1s/www sofabaton-x-server/src/sofabaton_server/ui remote-card/src/shims)"
           if [[ -n "$changes" ]]; then
             printf '%s\n' "$changes"
             exit 1

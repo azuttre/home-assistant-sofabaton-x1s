@@ -200,7 +200,7 @@ dataclasses (each with a `to_dict()`), cached if available, else fetched:
 | `commands(device_id)`    | `list[Command]`: `command_id`, `label`                                                   |
 | `macros(activity_id)`    | `list[Macro]`: `command_id`, `label`                                                     |
 | `favorites(activity_id)` | `list[Favorite]`: `device_id`, `command_id`, `label`                                     |
-| `buttons(entity_id)`     | `list[Button]`: `button_code`, `name`, `device_id`, `command_id`                         |
+| `buttons(entity_id)`     | `list[Button]`: `button_code`, `name`, `device_id`, `command_id`, `long_press_device_id`, `long_press_command_id` |
 | `current_activity()`     | `{activity_id, name}` or `None` when idle                                                |
 
 Lists are sorted by id. `Device.power_state` is the hub's live power byte

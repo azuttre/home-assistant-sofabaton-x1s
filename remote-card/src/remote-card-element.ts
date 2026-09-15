@@ -45,6 +45,7 @@ import {
 import { RemoteCardStore } from "./state/remote-card-store";
 import { AutomationAssistController } from "./state/automation-assist-controller";
 import { EDITOR } from "./remote-card-shared";
+import type { RemoteBackend } from "./backend/remote-backend";
 import type { HassLike, RemoteCardConfig } from "./remote-card-types";
 import { renderActivityRow } from "./sections/activity-row";
 import {
@@ -195,11 +196,24 @@ export class SofabatonRemoteCard extends LitElement {
     const language =
       (hass as { locale?: { language?: string }; language?: string })?.locale
         ?.language ?? (hass as { language?: string })?.language;
+    this.setLanguage(language);
+    this._store.setHass(hass);
+  }
+
+  /** Switch the card's language (HA: from hass.locale; the web remote: from the page). */
+  setLanguage(language: string | undefined): void {
     const languageChanged = setRemoteCardLanguage(language);
     this.lang = remoteCardLanguage();
     this.dir = remoteCardDirection();
-    this._store.setHass(hass);
     if (languageChanged) this.requestUpdate();
+  }
+
+  /**
+   * Install any RemoteBackend (docs/internal/web-remote-plan.md): the web
+   * remote's server adapter. HA dashboards never call this; they set hass.
+   */
+  setBackend(backend: RemoteBackend | null): void {
+    this._store.setBackend(backend);
   }
 
   get hass(): HassLike | null {
@@ -768,7 +782,7 @@ export class SofabatonRemoteCard extends LitElement {
   // ---------- render ----------
 
   render() {
-    if (!this._haElementsReady || !this._store.config || !this._store.hass) {
+    if (!this._haElementsReady || !this._store.config || !this._store.backend) {
       return nothing;
     }
 

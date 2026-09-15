@@ -157,13 +157,19 @@ class Button:
     ``button_code`` is what you send to that entity; ``device_id`` /
     ``command_id`` are the underlying target it maps to, None for an
     unbound slot. ``name`` is the ``ButtonName`` alias when the code has
-    one.
+    one. ``long_press_device_id`` / ``long_press_command_id`` are the
+    hub's long-press binding for the same button, both None when the
+    button has none; the remote hardware fires it on a hold, and a
+    client that wants the same gesture sends the pair with ``send()``
+    (there is no long-press send, the pair is an ordinary command).
     """
 
     button_code: int
     name: Optional[str]
     device_id: Optional[int]
     command_id: Optional[int]
+    long_press_device_id: Optional[int] = None
+    long_press_command_id: Optional[int] = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

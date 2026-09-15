@@ -98,6 +98,9 @@ const REMOTE_CARD_STRINGS_DE = {
     },
   },
   editor: {
+    copyConfigJson: "Konfiguration für die Web-Fernbedienung kopieren",
+    copiedConfigJson: "Kartenkonfiguration als JSON kopiert (Entität, Thema und Home-Assistant-Aktionen weggelassen)",
+    copyConfigJsonFailed: "Kopieren nicht möglich: der Browser hat den Zugriff auf die Zwischenablage verweigert",
     fieldLabels: {
       entity: "Sofabaton-Fernsteuerungsentität auswählen",
       theme: "Theme auf die Karte anwenden",

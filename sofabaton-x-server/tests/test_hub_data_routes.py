@@ -51,10 +51,30 @@ def test_status_info_and_catalog_reads(rig) -> None:
 
     assert client.get(f"{h}/devices/1/commands").json() == [
         {"command_id": 1, "label": "Power"}, {"command_id": 2, "label": "Mute"}]
-    assert client.get(f"{h}/entities/101/buttons").json()[0]["name"] == "UP"
+    buttons = client.get(f"{h}/entities/101/buttons").json()
+    assert buttons[0]["name"] == "UP" and buttons[0]["long_press_device_id"] is None
+    assert (buttons[1]["long_press_device_id"], buttons[1]["long_press_command_id"]) == (2, 5)
     assert client.get(f"{h}/activities/101/macros").json() == [{"command_id": 200, "label": "All On"}]
     assert client.get(f"{h}/activities/101/favorites").json() == [{"device_id": 1, "command_id": 1, "label": "Power"}]
     assert client.get(f"{h}/activity").json() is None
+
+
+def test_device_power_state_is_a_fresh_read(rig) -> None:
+    client, proxy = rig
+    h = f"{HUBS}/192.168.1.50"
+    assert proxy.refreshes == 0
+    r = client.get(f"{h}/devices/2/power-state")
+    assert r.status_code == 200 and r.json() == {"device_id": 2, "power_state": 1}
+    assert proxy.refreshes == 1, "every call re-reads the device list"
+    assert client.get(f"{h}/devices/1/power-state").json() == {"device_id": 1, "power_state": 0}
+    assert proxy.refreshes == 2
+    # A row without a parseable record reads as null, never as off.
+    proxy.devices_data[0] = proxy.devices_data[0].__class__(**{**proxy.devices_data[0].to_dict(), "power_state": None})
+    assert client.get(f"{h}/devices/1/power-state").json()["power_state"] is None
+    r = client.get(f"{h}/devices/99/power-state")
+    assert r.status_code == 404 and r.json()["type"] == "device_not_found"
+    proxy.fail_with = FetchTimeoutError("no burst")
+    assert client.get(f"{h}/devices/2/power-state").status_code == 504
 
 
 def test_unknown_entities_are_404_not_timeouts(rig) -> None:

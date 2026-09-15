@@ -583,7 +583,7 @@
         "type": "object"
       },
       "Button": {
-        "description": "A remote button bound on an activity or device.\n\n``button_code`` is what you send to that entity; ``device_id`` /\n``command_id`` are the underlying target it maps to, None for an\nunbound slot. ``name`` is the ``ButtonName`` alias when the code has\none.",
+        "description": "A remote button bound on an activity or device.\n\n``button_code`` is what you send to that entity; ``device_id`` /\n``command_id`` are the underlying target it maps to, None for an\nunbound slot. ``name`` is the ``ButtonName`` alias when the code has\none. ``long_press_device_id`` / ``long_press_command_id`` are the\nhub's long-press binding for the same button, both None when the\nbutton has none; the remote hardware fires it on a hold, and a\nclient that wants the same gesture sends the pair with ``send()``\n(there is no long-press send, the pair is an ordinary command).",
         "properties": {
           "button_code": {
             "title": "Button Code",
@@ -610,6 +610,28 @@
               }
             ],
             "title": "Device Id"
+          },
+          "long_press_command_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Long Press Command Id"
+          },
+          "long_press_device_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Long Press Device Id"
           },
           "name": {
             "anyOf": [
@@ -1116,6 +1138,32 @@
           "device_class"
         ],
         "title": "DeviceCreateRequest",
+        "type": "object"
+      },
+      "DevicePowerState": {
+        "description": "``GET /hubs/{id}/devices/{did}/power-state``: a fresh read of one power byte.",
+        "properties": {
+          "device_id": {
+            "title": "Device Id",
+            "type": "integer"
+          },
+          "power_state": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Power State"
+          }
+        },
+        "required": [
+          "device_id",
+          "power_state"
+        ],
+        "title": "DevicePowerState",
         "type": "object"
       },
       "DeviceRenameRequest": {
@@ -2489,6 +2537,60 @@
           }
         },
         "title": "RefreshRequest",
+        "type": "object"
+      },
+      "RemoteCardDocument": {
+        "description": "``GET/PUT /hubs/{id}/ui/remote-card``: the web remote's card configuration.",
+        "properties": {
+          "document": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Document"
+          },
+          "hub_id": {
+            "title": "Hub Id",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "hub_id",
+          "document",
+          "updated_at"
+        ],
+        "title": "RemoteCardDocument",
+        "type": "object"
+      },
+      "RemoteCardDocumentBody": {
+        "properties": {
+          "document": {
+            "additionalProperties": true,
+            "description": "the remote card's configuration keys (the HA card's YAML as JSON, minus entity, theme and Home Assistant actions); an empty object resets to defaults",
+            "title": "Document",
+            "type": "object"
+          }
+        },
+        "required": [
+          "document"
+        ],
+        "title": "RemoteCardDocumentBody",
         "type": "object"
       },
       "RenameRequest": {
@@ -7595,6 +7697,98 @@
         ]
       }
     },
+    "/api/v1/hubs/{hub_id}/devices/{device_id}/power-state": {
+      "get": {
+        "description": "A hub round-trip on purpose: the device list is re-read (the\nprotocol's only read of the power byte), then the one row is\nprojected. ``power_state`` is 0 off / 1 on, or null when the row\ncarried no parseable record; a power macro commits the byte with a\nshort lag, so a caller that just fired must not expect an immediate\nflip. A read the hub never answers is a 504, not a null.",
+        "operationId": "getDevicePowerState",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "device_id",
+            "required": true,
+            "schema": {
+              "title": "Device Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DevicePowerState"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Validation error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          },
+          "504": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Gateway Timeout"
+          }
+        },
+        "summary": "Fresh read of one device's power state",
+        "tags": [
+          "hub"
+        ]
+      }
+    },
     "/api/v1/hubs/{hub_id}/devices/{device_id}/rename": {
       "post": {
         "operationId": "renameDevice",
@@ -9512,6 +9706,171 @@
         "summary": "Live connection state (pure state read)",
         "tags": [
           "hub"
+        ]
+      }
+    },
+    "/api/v1/hubs/{hub_id}/ui/remote-card": {
+      "delete": {
+        "operationId": "deleteRemoteCardDocument",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Forget the stored configuration (the web remote falls back to the card's defaults)",
+        "tags": [
+          "ui"
+        ]
+      },
+      "get": {
+        "operationId": "getRemoteCardDocument",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteCardDocument"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "The web remote's card configuration for this hub (document is null until one is stored)",
+        "tags": [
+          "ui"
+        ]
+      },
+      "put": {
+        "operationId": "putRemoteCardDocument",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "hub_id",
+            "required": true,
+            "schema": {
+              "title": "Hub Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RemoteCardDocumentBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteCardDocument"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Content Too Large"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            },
+            "description": "Validation error"
+          }
+        },
+        "summary": "Store the web remote's card configuration for this hub (replaces the whole document)",
+        "tags": [
+          "ui"
         ]
       }
     },

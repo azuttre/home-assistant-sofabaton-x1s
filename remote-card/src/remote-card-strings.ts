@@ -97,6 +97,9 @@ export const REMOTE_CARD_STRINGS_EN = {
     },
   },
   editor: {
+    copyConfigJson: "Copy config for the web remote",
+    copiedConfigJson: "Card config copied as JSON (entity, theme and Home Assistant actions left out)",
+    copyConfigJsonFailed: "Could not copy: the browser refused clipboard access",
     fieldLabels: {
       entity: "Select a Sofabaton remote entity",
       theme: "Apply a theme to the card",
