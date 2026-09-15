@@ -41,6 +41,7 @@ export class SbHaSelect extends HTMLElement {
   private _value = "";
   private _options: SelectOption[] = [];
   private _connected = false;
+  private readonly _onViewportChange = (): void => this._placeMenu();
 
   constructor() {
     super();
@@ -100,11 +101,16 @@ export class SbHaSelect extends HTMLElement {
           color: var(--secondary-text-color, #5e5e5e);
         }
         .caret svg { width: 100%; height: 100%; fill: currentColor; }
+        /* Fixed, not absolute: the card clips the host (overflow: hidden
+           ellipsizes long names and rounds the field), which would swallow
+           an in-flow popup. HA's own select floats its menu surface the
+           same way. Placed from the trigger's rect on open; see _placeMenu. */
         .menu {
-          position: absolute;
+          position: fixed;
           left: 0;
-          right: 0;
-          top: calc(100% + 4px);
+          top: 0;
+          width: 0;
+          box-sizing: border-box;
           display: none;
           max-height: 60vh;
           overflow-y: auto;
@@ -187,6 +193,7 @@ export class SbHaSelect extends HTMLElement {
 
   disconnectedCallback(): void {
     this._observer.disconnect();
+    this._closeMenu();
   }
 
   attributeChangedCallback(name: string): void {
@@ -276,15 +283,56 @@ export class SbHaSelect extends HTMLElement {
   private _openMenu(): void {
     this.setAttribute("open", "");
     this._trigger?.setAttribute("aria-expanded", "true");
+    this._placeMenu();
+    window.addEventListener("scroll", this._onViewportChange, true);
+    window.addEventListener("resize", this._onViewportChange);
     this.dispatchEvent(new Event("opened", { bubbles: true, composed: true }));
   }
 
   private _closeMenu(): void {
+    window.removeEventListener("scroll", this._onViewportChange, true);
+    window.removeEventListener("resize", this._onViewportChange);
     if (!this.hasAttribute("open")) return;
     this.removeAttribute("open");
     this._trigger?.setAttribute("aria-expanded", "false");
     this.dispatchEvent(new Event("closed", { bubbles: true, composed: true }));
   }
+
+  /**
+   * Put the fixed menu under the trigger. Measured as a delta from where
+   * the menu lands at (0, 0): a transformed ancestor (the card animates
+   * with one) makes itself the containing block for fixed descendants,
+   * and a zoomed ancestor (the page's zoom= parameter) scales the length
+   * units, so absolute viewport coordinates would be wrong in both cases.
+   */
+  private _placeMenu(): void {
+    const menu = this._menu;
+    const trigger = this._trigger;
+    if (!menu || !trigger || !this.hasAttribute("open")) return;
+    menu.style.left = "0px";
+    menu.style.top = "0px";
+    menu.style.width = "0px";
+    const origin = menu.getBoundingClientRect();
+    const anchor = trigger.getBoundingClientRect();
+    const zoom = effectiveZoom(this);
+    menu.style.left = `${(anchor.left - origin.left) / zoom}px`;
+    menu.style.top = `${(anchor.bottom + 4 - origin.top) / zoom}px`;
+    menu.style.width = `${anchor.width / zoom}px`;
+  }
+}
+
+/** Cumulative CSS zoom on the element (1 where the browser has none). */
+function effectiveZoom(element: Element): number {
+  const current = (element as Element & { currentCSSZoom?: number }).currentCSSZoom;
+  if (typeof current === "number" && current > 0) return current;
+  let zoom = 1;
+  let node: Element | null = element;
+  while (node) {
+    const value = parseFloat(getComputedStyle(node).zoom);
+    if (Number.isFinite(value) && value > 0) zoom *= value;
+    node = node.parentElement ?? ((node.getRootNode() as ShadowRoot).host ?? null);
+  }
+  return zoom;
 }
 
 export function defineHaSelectShim(): void {

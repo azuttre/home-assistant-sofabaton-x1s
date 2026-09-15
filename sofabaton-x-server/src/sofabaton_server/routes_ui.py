@@ -97,7 +97,10 @@ async def get_remote_card_document(request: Request, hub_id: str) -> RemoteCardD
 
 @router.put("/remote-card", operation_id="putRemoteCardDocument", response_model=RemoteCardDocument,
             summary="Store the web remote's card configuration for this hub (replaces the whole document)",
-            responses={404: {"model": Problem}, 413: {"model": Problem}})
+            # The committed openapi.json must not depend on the interpreter:
+            # FastAPI's default description is http.HTTPStatus(413).phrase,
+            # which Python 3.13 renamed from "Request Entity Too Large".
+            responses={404: {"model": Problem}, 413: {"model": Problem, "description": "Content Too Large"}})
 async def put_remote_card_document(request: Request, hub_id: str, body: RemoteCardDocumentBody) -> RemoteCardDocument:
     manager = _manager(request)
     _require_hub(manager, hub_id)

@@ -138,10 +138,34 @@ test.describe("web remote page", () => {
 
     // Choosing an activity from the shim's menu starts it on the server.
     await select.locator(".trigger").click();
-    await select.locator(".option", { hasText: "Watch TV" }).click();
+    // The card clips the select host (overflow: hidden); the menu must
+    // float clear of it or it is painted nowhere (IntersectionObserver
+    // honours ancestor clipping, a plain visibility check does not).
+    const option = select.locator(".option", { hasText: "Watch TV" });
+    await expect(option).toBeInViewport({ ratio: 1 });
+    await option.click();
     await expect.poll(() => calls.some((c) => c.key === `POST /hubs/${HUB}/activities/101/start`)).toBe(true);
     // A reference capture of the page for review (not a baseline).
     await page.screenshot({ path: "test-results/web-remote-page.png", fullPage: true });
+  });
+
+  test("the select's menu lines up under the trigger when the page is zoomed", async ({ page }) => {
+    await mockServer(page, { document: null, running: STATUS.status.running_activity });
+    await page.goto(`${PAGE}?hub=${encodeURIComponent(HUB)}&zoom=1.5`);
+    const select = card(page).locator("ha-select.sb-activity-select >> visible=true").first();
+    await expect(select).toBeVisible();
+    await select.locator(".trigger").click();
+    const option = select.locator(".option", { hasText: "Listen" });
+    await expect(option).toBeInViewport({ ratio: 1 });
+    // The menu is fixed-positioned and placed by measurement, so a zoomed
+    // ancestor must not skew it: same left edge and width as the trigger,
+    // hanging just below it.
+    const trigger = await select.locator(".trigger").boundingBox();
+    const menu = await select.locator(".menu").boundingBox();
+    expect(Math.abs(menu.x - trigger.x)).toBeLessThan(2);
+    expect(Math.abs(menu.width - trigger.width)).toBeLessThan(2);
+    expect(menu.y - (trigger.y + trigger.height)).toBeGreaterThan(2);
+    expect(menu.y - (trigger.y + trigger.height)).toBeLessThan(12);
   });
 
   test("a stored background override paints the card without Home Assistant", async ({ page }) => {
