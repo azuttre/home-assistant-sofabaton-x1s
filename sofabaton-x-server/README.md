@@ -534,11 +534,10 @@ DELETE /hubs/{id}/ui/remote-card        back to the card's defaults
 The document holds the same keys as the Home Assistant card's YAML,
 minus `entity`, `theme` and Home Assistant actions (custom favourites
 that call a Home Assistant action are dropped; those that name a hub
-command stay). Two ways to author it without writing JSON by hand: the
-Home Assistant card editor has a "Copy config for the web remote"
-button that puts the document on the clipboard, and the `/harness`
-console has a Web remote pane that loads, edits and saves it. Reload the
-page after saving. The page never stores anything in the browser.
+command stay). The `/harness` console has a Web remote pane that loads,
+edits and saves it; a Home Assistant user can paste the card's YAML
+converted to JSON. Reload the page after saving. The page never stores
+anything in the browser.
 
 **Icons.** The page bundles the icons the card itself uses plus a set of
 common `mdi:` names for favourites and shortcuts; an icon outside that

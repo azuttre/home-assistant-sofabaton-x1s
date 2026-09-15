@@ -992,9 +992,6 @@ var REMOTE_CARD_STRINGS_EN = {
     }
   },
   editor: {
-    copyConfigJson: "Copy config for the web remote",
-    copiedConfigJson: "Card config copied as JSON (entity, theme and Home Assistant actions left out)",
-    copyConfigJsonFailed: "Could not copy: the browser refused clipboard access",
     fieldLabels: {
       entity: "Select a Sofabaton remote entity",
       theme: "Apply a theme to the card",
@@ -1470,33 +1467,6 @@ async function ensureHaElements() {
     })
     // optional
   ]);
-}
-
-// remote-card/src/remote-web-config.ts
-var DROPPED_KEYS = /* @__PURE__ */ new Set(["type", "entity", "theme", "show_automation_assist", "preview_activity"]);
-var DROPPED_FAVORITE_KEYS = /* @__PURE__ */ new Set(["action", "tap_action", "hold_action", "double_tap_action"]);
-function isPlainObject2(value) {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
-function webRemoteConfigFromCardConfig(config) {
-  const out = {};
-  if (!isPlainObject2(config)) return out;
-  for (const [key, value] of Object.entries(config)) {
-    if (DROPPED_KEYS.has(key) || value === void 0) continue;
-    if (key === "custom_favorites" && Array.isArray(value)) {
-      const kept = value.filter((item) => isPlainObject2(item) && item.command_id != null && item.device_id != null).map((item) => {
-        const favorite = {};
-        for (const [k2, v3] of Object.entries(item)) {
-          if (!DROPPED_FAVORITE_KEYS.has(k2)) favorite[k2] = v3;
-        }
-        return favorite;
-      });
-      if (kept.length) out.custom_favorites = kept;
-      continue;
-    }
-    out[key] = value;
-  }
-  return out;
 }
 
 // remote-card/src/remote-card-styles.ts
@@ -4337,28 +4307,6 @@ var SofabatonRemoteCardEditor = class extends i4 {
     this._fireChanged();
     this.requestUpdate();
   }
-  /**
-   * Copy this card's config as the JSON document the web remote takes
-   * (docs/internal/web-remote-plan.md, section 7): the same keys minus
-   * entity, theme and Home Assistant actions.
-   */
-  async _copyWebRemoteConfig() {
-    const document2 = webRemoteConfigFromCardConfig(this._config);
-    const text = JSON.stringify(document2, null, 2);
-    let message = str().editor.copiedConfigJson;
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch (_err) {
-      message = str().editor.copyConfigJsonFailed;
-    }
-    this.dispatchEvent(
-      new CustomEvent("hass-notification", {
-        detail: { message },
-        bubbles: true,
-        composed: true
-      })
-    );
-  }
   // ---------- render ----------
   render() {
     if (!this._hass) return A;
@@ -4460,15 +4408,6 @@ var SofabatonRemoteCardEditor = class extends i4 {
       this._mergeFormValue(ev.detail.value);
     }}
         ></ha-form>
-        <div style="padding: 8px 0 0; display: flex; justify-content: flex-end;">
-          <button
-            type="button"
-            class="sb-copy-web-config"
-            style="font: inherit; font-size: 13px; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--divider-color); background: transparent; color: var(--primary-color); cursor: pointer;"
-            title=${str().editor.copyConfigJson}
-            @click=${() => void this._copyWebRemoteConfig()}
-          >${str().editor.copyConfigJson}</button>
-        </div>
       </div>
       <div class="sb-general-wrap" style="padding: 0 0 12px 0;">
         ${renderGeneralOptionsSection({
@@ -9414,9 +9353,6 @@ var REMOTE_CARD_STRINGS_AR = {
     }
   },
   editor: {
-    copyConfigJson: "\u0646\u0633\u062E \u0627\u0644\u0625\u0639\u062F\u0627\u062F\u0627\u062A \u0644\u062C\u0647\u0627\u0632 \u0627\u0644\u062A\u062D\u0643\u0645 \u0639\u0628\u0631 \u0627\u0644\u0648\u064A\u0628",
-    copiedConfigJson: "\u062A\u0645 \u0646\u0633\u062E \u0625\u0639\u062F\u0627\u062F\u0627\u062A \u0627\u0644\u0628\u0637\u0627\u0642\u0629 \u0628\u0635\u064A\u063A\u0629 JSON (\u0628\u062F\u0648\u0646 \u0627\u0644\u0643\u064A\u0627\u0646 \u0648\u0627\u0644\u0633\u0645\u0629 \u0648\u0625\u062C\u0631\u0627\u0621\u0627\u062A Home Assistant)",
-    copyConfigJsonFailed: "\u062A\u0639\u0630\u0631 \u0627\u0644\u0646\u0633\u062E: \u0631\u0641\u0636 \u0627\u0644\u0645\u062A\u0635\u0641\u062D \u0627\u0644\u0648\u0635\u0648\u0644 \u0625\u0644\u0649 \u0627\u0644\u062D\u0627\u0641\u0638\u0629",
     fieldLabels: {
       entity: `\u0627\u062E\u062A\u0631 \u0643\u064A\u0627\u0646 \u062C\u0647\u0627\u0632 \u062A\u062D\u0643\u0645 \u0639\u0646 \u0628\u064F\u0639\u062F \u0645\u0646 ${SOFABATON}`,
       theme: "\u062A\u0637\u0628\u064A\u0642 \u0633\u0645\u0629 \u0639\u0644\u0649 \u0627\u0644\u0628\u0637\u0627\u0642\u0629",
@@ -9633,9 +9569,6 @@ var REMOTE_CARD_STRINGS_DE = {
     }
   },
   editor: {
-    copyConfigJson: "Konfiguration f\xFCr die Web-Fernbedienung kopieren",
-    copiedConfigJson: "Kartenkonfiguration als JSON kopiert (Entit\xE4t, Thema und Home-Assistant-Aktionen weggelassen)",
-    copyConfigJsonFailed: "Kopieren nicht m\xF6glich: der Browser hat den Zugriff auf die Zwischenablage verweigert",
     fieldLabels: {
       entity: "Sofabaton-Fernsteuerungsentit\xE4t ausw\xE4hlen",
       theme: "Theme auf die Karte anwenden",
@@ -9831,9 +9764,6 @@ var REMOTE_CARD_STRINGS_ES = {
     }
   },
   editor: {
-    copyConfigJson: "Copiar la configuraci\xF3n para el mando web",
-    copiedConfigJson: "Configuraci\xF3n de la tarjeta copiada como JSON (entidad, tema y acciones de Home Assistant excluidos)",
-    copyConfigJsonFailed: "No se pudo copiar: el navegador deneg\xF3 el acceso al portapapeles",
     fieldLabels: {
       entity: "Seleccionar una entidad de mando a distancia Sofabaton",
       theme: "Aplicar un tema a la tarjeta",
@@ -10029,9 +9959,6 @@ var REMOTE_CARD_STRINGS_FR = {
     }
   },
   editor: {
-    copyConfigJson: "Copier la configuration pour la t\xE9l\xE9commande web",
-    copiedConfigJson: "Configuration de la carte copi\xE9e en JSON (entit\xE9, th\xE8me et actions Home Assistant exclus)",
-    copyConfigJsonFailed: "Copie impossible : le navigateur a refus\xE9 l'acc\xE8s au presse-papiers",
     fieldLabels: {
       entity: "S\xE9lectionner une entit\xE9 de t\xE9l\xE9commande Sofabaton",
       theme: "Appliquer un th\xE8me \xE0 la carte",
@@ -10226,9 +10153,6 @@ var REMOTE_CARD_STRINGS_NL = {
     }
   },
   editor: {
-    copyConfigJson: "Configuratie voor de webafstandsbediening kopi\xEBren",
-    copiedConfigJson: "Kaartconfiguratie als JSON gekopieerd (entiteit, thema en Home Assistant-acties weggelaten)",
-    copyConfigJsonFailed: "Kopi\xEBren mislukt: de browser weigerde toegang tot het klembord",
     fieldLabels: {
       entity: "Selecteer een Sofabaton-entiteit voor afstandsbediening",
       theme: "Pas een thema toe op de kaart",
@@ -10423,9 +10347,6 @@ var REMOTE_CARD_STRINGS_ZH_HANS = {
     }
   },
   editor: {
-    copyConfigJson: "\u590D\u5236\u7F51\u9875\u9065\u63A7\u5668\u914D\u7F6E",
-    copiedConfigJson: "\u5DF2\u5C06\u5361\u7247\u914D\u7F6E\u590D\u5236\u4E3A JSON\uFF08\u4E0D\u542B\u5B9E\u4F53\u3001\u4E3B\u9898\u548C Home Assistant \u52A8\u4F5C\uFF09",
-    copyConfigJsonFailed: "\u65E0\u6CD5\u590D\u5236\uFF1A\u6D4F\u89C8\u5668\u62D2\u7EDD\u8BBF\u95EE\u526A\u8D34\u677F",
     fieldLabels: {
       entity: "\u9009\u62E9 Sofabaton \u9065\u63A7\u5B9E\u4F53",
       theme: "\u4E3A\u5361\u7247\u5E94\u7528\u4E3B\u9898",

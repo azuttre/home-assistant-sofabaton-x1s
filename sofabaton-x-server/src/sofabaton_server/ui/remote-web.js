@@ -1684,9 +1684,6 @@ var REMOTE_CARD_STRINGS_EN = {
     }
   },
   editor: {
-    copyConfigJson: "Copy config for the web remote",
-    copiedConfigJson: "Card config copied as JSON (entity, theme and Home Assistant actions left out)",
-    copyConfigJsonFailed: "Could not copy: the browser refused clipboard access",
     fieldLabels: {
       entity: "Select a Sofabaton remote entity",
       theme: "Apply a theme to the card",
@@ -9074,9 +9071,6 @@ var REMOTE_CARD_STRINGS_AR = {
     }
   },
   editor: {
-    copyConfigJson: "\u0646\u0633\u062E \u0627\u0644\u0625\u0639\u062F\u0627\u062F\u0627\u062A \u0644\u062C\u0647\u0627\u0632 \u0627\u0644\u062A\u062D\u0643\u0645 \u0639\u0628\u0631 \u0627\u0644\u0648\u064A\u0628",
-    copiedConfigJson: "\u062A\u0645 \u0646\u0633\u062E \u0625\u0639\u062F\u0627\u062F\u0627\u062A \u0627\u0644\u0628\u0637\u0627\u0642\u0629 \u0628\u0635\u064A\u063A\u0629 JSON (\u0628\u062F\u0648\u0646 \u0627\u0644\u0643\u064A\u0627\u0646 \u0648\u0627\u0644\u0633\u0645\u0629 \u0648\u0625\u062C\u0631\u0627\u0621\u0627\u062A Home Assistant)",
-    copyConfigJsonFailed: "\u062A\u0639\u0630\u0631 \u0627\u0644\u0646\u0633\u062E: \u0631\u0641\u0636 \u0627\u0644\u0645\u062A\u0635\u0641\u062D \u0627\u0644\u0648\u0635\u0648\u0644 \u0625\u0644\u0649 \u0627\u0644\u062D\u0627\u0641\u0638\u0629",
     fieldLabels: {
       entity: `\u0627\u062E\u062A\u0631 \u0643\u064A\u0627\u0646 \u062C\u0647\u0627\u0632 \u062A\u062D\u0643\u0645 \u0639\u0646 \u0628\u064F\u0639\u062F \u0645\u0646 ${SOFABATON}`,
       theme: "\u062A\u0637\u0628\u064A\u0642 \u0633\u0645\u0629 \u0639\u0644\u0649 \u0627\u0644\u0628\u0637\u0627\u0642\u0629",
@@ -9293,9 +9287,6 @@ var REMOTE_CARD_STRINGS_DE = {
     }
   },
   editor: {
-    copyConfigJson: "Konfiguration f\xFCr die Web-Fernbedienung kopieren",
-    copiedConfigJson: "Kartenkonfiguration als JSON kopiert (Entit\xE4t, Thema und Home-Assistant-Aktionen weggelassen)",
-    copyConfigJsonFailed: "Kopieren nicht m\xF6glich: der Browser hat den Zugriff auf die Zwischenablage verweigert",
     fieldLabels: {
       entity: "Sofabaton-Fernsteuerungsentit\xE4t ausw\xE4hlen",
       theme: "Theme auf die Karte anwenden",
@@ -9491,9 +9482,6 @@ var REMOTE_CARD_STRINGS_ES = {
     }
   },
   editor: {
-    copyConfigJson: "Copiar la configuraci\xF3n para el mando web",
-    copiedConfigJson: "Configuraci\xF3n de la tarjeta copiada como JSON (entidad, tema y acciones de Home Assistant excluidos)",
-    copyConfigJsonFailed: "No se pudo copiar: el navegador deneg\xF3 el acceso al portapapeles",
     fieldLabels: {
       entity: "Seleccionar una entidad de mando a distancia Sofabaton",
       theme: "Aplicar un tema a la tarjeta",
@@ -9689,9 +9677,6 @@ var REMOTE_CARD_STRINGS_FR = {
     }
   },
   editor: {
-    copyConfigJson: "Copier la configuration pour la t\xE9l\xE9commande web",
-    copiedConfigJson: "Configuration de la carte copi\xE9e en JSON (entit\xE9, th\xE8me et actions Home Assistant exclus)",
-    copyConfigJsonFailed: "Copie impossible : le navigateur a refus\xE9 l'acc\xE8s au presse-papiers",
     fieldLabels: {
       entity: "S\xE9lectionner une entit\xE9 de t\xE9l\xE9commande Sofabaton",
       theme: "Appliquer un th\xE8me \xE0 la carte",
@@ -9886,9 +9871,6 @@ var REMOTE_CARD_STRINGS_NL = {
     }
   },
   editor: {
-    copyConfigJson: "Configuratie voor de webafstandsbediening kopi\xEBren",
-    copiedConfigJson: "Kaartconfiguratie als JSON gekopieerd (entiteit, thema en Home Assistant-acties weggelaten)",
-    copyConfigJsonFailed: "Kopi\xEBren mislukt: de browser weigerde toegang tot het klembord",
     fieldLabels: {
       entity: "Selecteer een Sofabaton-entiteit voor afstandsbediening",
       theme: "Pas een thema toe op de kaart",
@@ -10083,9 +10065,6 @@ var REMOTE_CARD_STRINGS_ZH_HANS = {
     }
   },
   editor: {
-    copyConfigJson: "\u590D\u5236\u7F51\u9875\u9065\u63A7\u5668\u914D\u7F6E",
-    copiedConfigJson: "\u5DF2\u5C06\u5361\u7247\u914D\u7F6E\u590D\u5236\u4E3A JSON\uFF08\u4E0D\u542B\u5B9E\u4F53\u3001\u4E3B\u9898\u548C Home Assistant \u52A8\u4F5C\uFF09",
-    copyConfigJsonFailed: "\u65E0\u6CD5\u590D\u5236\uFF1A\u6D4F\u89C8\u5668\u62D2\u7EDD\u8BBF\u95EE\u526A\u8D34\u677F",
     fieldLabels: {
       entity: "\u9009\u62E9 Sofabaton \u9065\u63A7\u5B9E\u4F53",
       theme: "\u4E3A\u5361\u7247\u5E94\u7528\u4E3B\u9898",

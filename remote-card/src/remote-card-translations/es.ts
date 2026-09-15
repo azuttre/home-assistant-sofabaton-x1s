@@ -99,9 +99,6 @@ export const REMOTE_CARD_STRINGS_ES = {
     },
   },
   editor: {
-    copyConfigJson: "Copiar la configuración para el mando web",
-    copiedConfigJson: "Configuración de la tarjeta copiada como JSON (entidad, tema y acciones de Home Assistant excluidos)",
-    copyConfigJsonFailed: "No se pudo copiar: el navegador denegó el acceso al portapapeles",
     fieldLabels: {
       entity: "Seleccionar una entidad de mando a distancia Sofabaton",
       theme: "Aplicar un tema a la tarjeta",

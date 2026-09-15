@@ -99,9 +99,6 @@ export const REMOTE_CARD_STRINGS_FR = {
     },
   },
   editor: {
-    copyConfigJson: "Copier la configuration pour la télécommande web",
-    copiedConfigJson: "Configuration de la carte copiée en JSON (entité, thème et actions Home Assistant exclus)",
-    copyConfigJsonFailed: "Copie impossible : le navigateur a refusé l'accès au presse-papiers",
     fieldLabels: {
       entity: "Sélectionner une entité de télécommande Sofabaton",
       theme: "Appliquer un thème à la carte",
