@@ -4,8 +4,8 @@ import {
   applyLayoutConfigPatch,
   layoutSelectionNote,
   moveVisibleGroup,
-} from "../../custom_components/sofabaton_x1s/www/src/remote-card-editor-layout";
-import { DEFAULT_GROUP_ORDER } from "../../custom_components/sofabaton_x1s/www/src/remote-card-layout";
+} from "../../remote-card/src/remote-card-editor-layout";
+import { DEFAULT_GROUP_ORDER } from "../../remote-card/src/remote-card-layout";
 
 test("selection note names the scope of the applicable layout", () => {
   const config = {

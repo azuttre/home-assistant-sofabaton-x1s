@@ -17,7 +17,7 @@ standalone PyPI library, and two Lovelace cards.
 | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `custom_components/sofabaton_x1s/`     | The Home Assistant integration (entities, config flow, services, websocket APIs).                                                                                                                                                                                                                        |
 | `custom_components/sofabaton_x1s/lib/` | The hub protocol engine. This directory is also the **source of truth for the `sofabaton-x` PyPI package**: the root `pyproject.toml` remaps it into the wheel as the top-level `sofabaton` package. It must stay importable without Home Assistant — no HA imports allowed, enforced by boundary tests. |
-| `custom_components/sofabaton_x1s/www/` | Frontend cards. `src/**/*.ts` is the TypeScript source; `tools-card.js` and `remote-card.js` are **generated esbuild bundles — never edit them by hand**.                                                                                                                                                |
+| `custom_components/sofabaton_x1s/www/` | Frontend cards. `src/**/*.ts` is the tools-card TypeScript source (the remote card's source lives in `remote-card/src/`); `tools-card.js` and `remote-card.js` are **generated esbuild bundles — never edit them by hand**.                                                                                                                                                |
 | `sofabaton-x/`                         | PyPI-facing README and runnable examples for the library.                                                                                                                                                                                                                                                |
 | `docs/`                                | User-facing documentation. `docs/protocol/` is the reverse-engineered wire protocol reference.                                                                                                                                                                                                           |
 | `IrScrutinizer/`                       | IrScrutinizer export formats for producing hub-compatible IR command payloads.                                                                                                                                                                                                                                      |
@@ -56,12 +56,12 @@ TypeScript sources:
 
 ```powershell
 npm run build:tools-card    # www/src/tools-card.ts  -> www/tools-card.js
-npm run build:remote-card   # www/src/remote-card.ts -> www/remote-card.js
+npm run build:remote-card   # remote-card/src/remote-card.ts -> www/remote-card.js
 npm run build:frontend      # both bundles
-npm run typecheck           # tsc --noEmit over www/src + frontend tests
+npm run typecheck           # tsc --noEmit over www/src, remote-card/src + frontend tests
 ```
 
-After changing anything under `www/src/`, rebuild the affected bundle and
+After changing anything under `www/src/` or `remote-card/src/`, rebuild the affected bundle and
 commit **both** the source and the regenerated `.js` file — frontend CI
 fails on drift between the two. Run `npm run typecheck` too; all frontend
 code must pass strict type checking.
@@ -194,7 +194,7 @@ CI (`sofabaton-x-ci.yml`) runs on PRs and pushes to `main`/`dev` that touch
 the library, the packaging metadata, or the tests: boundary lint, lib tests
 across supported Python versions, the full suite, and a wheel
 build-and-install smoke test. `hassfest.yaml` and `hacs.yaml` validate the
-integration side. `frontend-ci.yml` runs on changes under `www/` or the
+integration side. `frontend-ci.yml` runs on changes under `www/`, `remote-card/` or the
 frontend test/build files: typecheck, both card builds with a
 committed-bundle drift check, the node test suite, and Playwright on a
 Windows runner (the committed screenshot baselines are `*-win32.png`).

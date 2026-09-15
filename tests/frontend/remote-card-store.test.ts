@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import {
   RemoteCardStore,
   normalizeRemoteCardConfig,
-} from "../../custom_components/sofabaton_x1s/www/src/state/remote-card-store";
-import type { HassLike, RemoteCardConfig } from "../../custom_components/sofabaton_x1s/www/src/remote-card-types";
+} from "../../remote-card/src/state/remote-card-store";
+import type { HassLike, RemoteCardConfig } from "../../remote-card/src/remote-card-types";
 
 const ENTITY = "remote.living_room";
 
@@ -379,7 +379,7 @@ test("key style and tinted panels resolve independently, with legacy panel fallb
   const {
     keyStyleFromConfig,
     tintedPanelsFromConfig,
-  } = await import("../../custom_components/sofabaton_x1s/www/src/remote-card-layout");
+  } = await import("../../remote-card/src/remote-card-layout");
 
   // The four real key styles pass through; unknown values floor to flat.
   assert.equal(keyStyleFromConfig({ key_style: "tinted" }), "tinted");

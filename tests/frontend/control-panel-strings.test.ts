@@ -777,14 +777,15 @@ function isTechnicalHtmlExpressionLiteral(node: ts.StringLiteralLike): boolean {
 
 test("western locale source uses compact ellipses and French non-breaking punctuation", () => {
   const sourceRoot = path.resolve("custom_components/sofabaton_x1s/www/src");
+  const remoteCardRoot = path.resolve("remote-card/src");
   const offenders: string[] = [];
   const catalogues = [
     ...["de", "es", "fr", "nl"].map((locale) => ({
       locale,
       file: path.join(sourceRoot, "control-panel-translations", `${locale}.ts`),
     })),
-    { locale: "fr", file: path.join(sourceRoot, "remote-card-translations", "fr.ts") },
-    { locale: "nl", file: path.join(sourceRoot, "remote-card-translations", "nl.ts") },
+    { locale: "fr", file: path.join(remoteCardRoot, "remote-card-translations", "fr.ts") },
+    { locale: "nl", file: path.join(remoteCardRoot, "remote-card-translations", "nl.ts") },
   ];
 
   for (const { locale, file } of catalogues) {

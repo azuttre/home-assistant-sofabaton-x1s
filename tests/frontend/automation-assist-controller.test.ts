@@ -6,9 +6,9 @@ import {
   normalizeHubMac,
   parseMqttPayload,
   type AutomationAssistHost,
-} from "../../custom_components/sofabaton_x1s/www/src/state/automation-assist-controller";
-import { AUTOMATION_ASSIST_SESSION_KEY } from "../../custom_components/sofabaton_x1s/www/src/remote-card-shared";
-import type { HassLike } from "../../custom_components/sofabaton_x1s/www/src/remote-card-types";
+} from "../../remote-card/src/state/automation-assist-controller";
+import { AUTOMATION_ASSIST_SESSION_KEY } from "../../remote-card/src/remote-card-shared";
+import type { HassLike } from "../../remote-card/src/remote-card-types";
 
 // Minimal window for the per-tab session state.
 const win = ((globalThis as Record<string, unknown>).window ??= {

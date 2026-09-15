@@ -4,23 +4,23 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { RemoteCardStore } from "../../custom_components/sofabaton_x1s/www/src/state/remote-card-store";
+import { RemoteCardStore } from "../../remote-card/src/state/remote-card-store";
 import {
   layoutConfigForDevice,
   deviceLayoutKey,
   isDeviceLayoutKey,
   parseDeviceLayoutKey,
-} from "../../custom_components/sofabaton_x1s/www/src/remote-card-layout";
-import { previewSelection } from "../../custom_components/sofabaton_x1s/www/src/remote-card-state";
+} from "../../remote-card/src/remote-card-layout";
+import { previewSelection } from "../../remote-card/src/remote-card-state";
 import {
   applyLayoutConfigPatch,
   editorDevicesFromState,
   layoutConfigForSelection,
-} from "../../custom_components/sofabaton_x1s/www/src/remote-card-editor-layout";
+} from "../../remote-card/src/remote-card-editor-layout";
 import type {
   HassLike,
   RemoteCardConfig,
-} from "../../custom_components/sofabaton_x1s/www/src/remote-card-types";
+} from "../../remote-card/src/remote-card-types";
 
 const ENTITY = "remote.living_room";
 

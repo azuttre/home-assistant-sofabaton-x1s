@@ -8,22 +8,22 @@ import {
   remoteCardLanguage,
   setRemoteCardLanguage,
   str,
-} from "../../custom_components/sofabaton_x1s/www/src/remote-card-strings";
-import { isPoweredOffLabel } from "../../custom_components/sofabaton_x1s/www/src/remote-card-state";
-import { drawerTabChevronIcon } from "../../custom_components/sofabaton_x1s/www/src/sections/macro-favorites";
+} from "../../remote-card/src/remote-card-strings";
+import { isPoweredOffLabel } from "../../remote-card/src/remote-card-state";
+import { drawerTabChevronIcon } from "../../remote-card/src/sections/macro-favorites";
 import { TOOLS_CARD_STRINGS } from "../../custom_components/sofabaton_x1s/www/src/strings";
 import TOOLS_CARD_STRINGS_DE from "../../custom_components/sofabaton_x1s/www/src/control-panel-translations/de";
 import TOOLS_CARD_STRINGS_ES from "../../custom_components/sofabaton_x1s/www/src/control-panel-translations/es";
 import TOOLS_CARD_STRINGS_FR from "../../custom_components/sofabaton_x1s/www/src/control-panel-translations/fr";
 import TOOLS_CARD_STRINGS_NL from "../../custom_components/sofabaton_x1s/www/src/control-panel-translations/nl";
 import TOOLS_CARD_STRINGS_ZH_HANS from "../../custom_components/sofabaton_x1s/www/src/control-panel-translations/zh-hans";
-import "../../custom_components/sofabaton_x1s/www/src/remote-card-translations/ar";
-import "../../custom_components/sofabaton_x1s/www/src/remote-card-translations/de";
-import "../../custom_components/sofabaton_x1s/www/src/remote-card-translations/en-gb";
-import "../../custom_components/sofabaton_x1s/www/src/remote-card-translations/es";
-import "../../custom_components/sofabaton_x1s/www/src/remote-card-translations/fr";
-import "../../custom_components/sofabaton_x1s/www/src/remote-card-translations/nl";
-import "../../custom_components/sofabaton_x1s/www/src/remote-card-translations/zh-hans";
+import "../../remote-card/src/remote-card-translations/ar";
+import "../../remote-card/src/remote-card-translations/de";
+import "../../remote-card/src/remote-card-translations/en-gb";
+import "../../remote-card/src/remote-card-translations/es";
+import "../../remote-card/src/remote-card-translations/fr";
+import "../../remote-card/src/remote-card-translations/nl";
+import "../../remote-card/src/remote-card-translations/zh-hans";
 
 test("defaults to the English table", () => {
   setRemoteCardLanguage("en");

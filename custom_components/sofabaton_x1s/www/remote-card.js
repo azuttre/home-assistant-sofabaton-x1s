@@ -550,7 +550,7 @@ var o4 = s3.litElementPolyfillSupport;
 o4?.({ LitElement: i4 });
 (s3.litElementVersions ?? (s3.litElementVersions = [])).push("4.2.2");
 
-// custom_components/sofabaton_x1s/www/src/remote-card-layout.ts
+// remote-card/src/remote-card-layout.ts
 var DEFAULT_GROUP_ORDER = [
   "activity",
   "macro_favorites",
@@ -917,7 +917,7 @@ var X2_ONLY_HARD_BUTTON_IDS = /* @__PURE__ */ new Set([
   ID.GUIDE
 ]);
 
-// custom_components/sofabaton_x1s/www/src/remote-card-strings.ts
+// remote-card/src/remote-card-strings.ts
 var REMOTE_CARD_STRINGS_EN = {
   card: {
     selectEntityError: "Select a Sofabaton remote entity",
@@ -1170,7 +1170,7 @@ function isLocalizedPoweredOffLabel(label) {
   return s7 === currentStrings.card.poweredOff.toLowerCase();
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-editor-layout.ts
+// remote-card/src/remote-card-editor-layout.ts
 function deviceStoredLayerKey(selection) {
   const id = parseDeviceLayoutKey(selection);
   return id == null ? "default" : String(id);
@@ -1424,7 +1424,7 @@ function moveVisibleGroup(order, isVisible, fromVisible, toVisible) {
   return order.map((key) => isVisible(key) ? nextVisible[vi++] : key);
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-compat.ts
+// remote-card/src/remote-card-compat.ts
 function hubVersionFor(hass, entityId) {
   const resolved = String(entityId || "").trim();
   if (!resolved) return "";
@@ -1468,7 +1468,7 @@ async function ensureHaElements() {
   ]);
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-styles.ts
+// remote-card/src/remote-card-styles.ts
 var REMOTE_CARD_CSS = `
       :host {
         --sb-group-radius: var(--ha-card-border-radius, 18px);
@@ -2804,7 +2804,7 @@ var REMOTE_CARD_EDITOR_CSS = `
           }
         `;
 
-// custom_components/sofabaton_x1s/www/src/remote-card-shared.ts
+// remote-card/src/remote-card-shared.ts
 var CARD_NAME = "Sofabaton Virtual Remote";
 var CARD_VERSION = "0.2.3";
 var KEY_CAPTURE_HELP_URL = "https://github.com/m3tac0de/sofabaton-virtual-remote/blob/main/docs/keycapture.md";
@@ -2860,7 +2860,7 @@ function stableJsonSignature(value) {
   }
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-long-press.ts
+// remote-card/src/remote-card-long-press.ts
 var LONG_PRESS_GROUPS = ["volume", "channel", "dpad"];
 var LONG_PRESS_GROUP_FOR_KEY = {
   volup: "volume",
@@ -2935,7 +2935,7 @@ function hubLongPressBinding(attributes, scopeId, buttonId) {
   return { device_id: device, command_id: command };
 }
 
-// custom_components/sofabaton_x1s/www/src/editor-sections/expander.ts
+// remote-card/src/editor-sections/expander.ts
 function renderEditorExpander(params) {
   const toggle = (ev) => {
     ev.preventDefault();
@@ -2964,7 +2964,7 @@ function renderEditorExpander(params) {
   `;
 }
 
-// custom_components/sofabaton_x1s/www/src/editor-sections/option-row.ts
+// remote-card/src/editor-sections/option-row.ts
 function renderOptionRow(params) {
   const onSwitchChange = (ev) => {
     ev.preventDefault();
@@ -3009,7 +3009,7 @@ function renderFormRow(form, className = "") {
   return b2`<div class="sb-opt-row sb-opt-row--form ${className}">${form}</div>`;
 }
 
-// custom_components/sofabaton_x1s/www/src/editor-sections/general-options.ts
+// remote-card/src/editor-sections/general-options.ts
 var INITIAL_VIEW_FIELD = "open_device";
 var LONG_PRESS_BUTTONS_FIELD = "long_press_buttons";
 var computeSubFormLabel = (schema) => {
@@ -3122,7 +3122,7 @@ function renderGeneralOptionsSection(params) {
   });
 }
 
-// custom_components/sofabaton_x1s/www/src/editor-sections/shortcuts.ts
+// remote-card/src/editor-sections/shortcuts.ts
 var SHORTCUT_ICON_FIELD = "icon";
 var SHORTCUT_COMMAND_FIELD = "command";
 function slotLabel(slot) {
@@ -3245,7 +3245,7 @@ function renderShortcutsRowPanel(params) {
   `;
 }
 
-// custom_components/sofabaton_x1s/www/src/editor-sections/styling-options.ts
+// remote-card/src/editor-sections/styling-options.ts
 var computeEditorFieldLabel = (schema) => str().editor.fieldLabels[schema.name] || schema.name;
 var DEFAULT_BACKGROUND_OVERRIDE = [255, 255, 255];
 function renderStylingOptionsSection(params) {
@@ -3527,7 +3527,7 @@ var n6 = e4(class extends f3 {
   }
 });
 
-// custom_components/sofabaton_x1s/www/src/editor-sections/group-order.ts
+// remote-card/src/editor-sections/group-order.ts
 var stopEvent = (ev) => {
   ev.preventDefault();
   ev.stopPropagation();
@@ -3816,7 +3816,7 @@ function renderGroupOrderSection(params) {
   });
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-editor-element.ts
+// remote-card/src/remote-card-editor-element.ts
 var CARD_SETTING_DEFAULTS = {
   theme: "",
   max_width: 360,
@@ -4561,7 +4561,7 @@ var c6 = e4(class extends i6 {
   }
 });
 
-// custom_components/sofabaton_x1s/www/src/remote-card-ui-helpers.ts
+// remote-card/src/remote-card-ui-helpers.ts
 function automationAssistLabelForKey(key, label) {
   const trimmed = String(label ?? "").trim();
   if (trimmed) return trimmed;
@@ -4588,7 +4588,7 @@ function rgbToCss(rgb) {
   return "";
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-runtime-display.ts
+// remote-card/src/remote-card-runtime-display.ts
 function midModeState({
   showVolume,
   showChannel,
@@ -4667,7 +4667,7 @@ function macroFavoriteDisplayState({
   };
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-drawer-display.ts
+// remote-card/src/remote-card-drawer-display.ts
 function drawerVisibilityState({
   activeDrawer,
   showMacrosButton,
@@ -4698,7 +4698,7 @@ function drawerVisibilityState({
   };
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-gestures.ts
+// remote-card/src/remote-card-gestures.ts
 function createPrimaryActionGate() {
   return { ts: 0, pointerId: null, type: null };
 }
@@ -4920,7 +4920,7 @@ var LongPressTimer = class {
   }
 };
 
-// custom_components/sofabaton_x1s/www/src/remote-card-state.ts
+// remote-card/src/remote-card-state.ts
 function hasOwn(obj, key) {
   return obj != null && Object.prototype.hasOwnProperty.call(obj, key);
 }
@@ -5085,7 +5085,7 @@ function resolveHubActivityData({
   };
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-activity-state.ts
+// remote-card/src/remote-card-activity-state.ts
 function buildActivitySelectState({
   editMode,
   preview,
@@ -5158,7 +5158,7 @@ function noActivitiesWarning(isUnavailable, activitiesLength, loadState) {
   return "";
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-hub.ts
+// remote-card/src/remote-card-hub.ts
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -5218,7 +5218,7 @@ function stopActivityCommand(activityId) {
   return ["type:stop_activity", `activity_id:${Number(activityId)}`];
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-actions.ts
+// remote-card/src/remote-card-actions.ts
 function hubAssignedKeyCommand(activityId, commandId) {
   const activity = Number(activityId);
   const key = Number(commandId);
@@ -5260,7 +5260,7 @@ function remoteSendCommandData(entityId, commandId, deviceId) {
   };
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-editor-helpers.ts
+// remote-card/src/remote-card-editor-helpers.ts
 function normalizeCustomFavorite(item, idx = 0) {
   if (!item || typeof item !== "object") return null;
   const name = String(item.name ?? item.label ?? "").trim();
@@ -5303,7 +5303,7 @@ function customFavoritesSignature(items) {
   return `${parts.length}:${parts.join(";;")}`;
 }
 
-// custom_components/sofabaton_x1s/www/src/state/remote-card-store.ts
+// remote-card/src/state/remote-card-store.ts
 var POWER_ON_KEY_ID = 198;
 var POWER_OFF_KEY_ID = 199;
 var POWER_ASSUMPTION_TTL_MS = 15e3;
@@ -6354,7 +6354,7 @@ var RemoteCardStore = class {
   }
 };
 
-// custom_components/sofabaton_x1s/www/src/remote-card-assist-yaml.ts
+// remote-card/src/remote-card-assist-yaml.ts
 function automationAssistRemoteYaml(capture, entityId, hubIntegration) {
   if (!capture || !entityId) return "";
   const kind = capture.kind || "button";
@@ -6471,7 +6471,7 @@ function automationAssistNotificationBody(capture, entityId, hubIntegration, fal
   ].join("\n");
 }
 
-// custom_components/sofabaton_x1s/www/src/state/automation-assist-controller.ts
+// remote-card/src/state/automation-assist-controller.ts
 function normalizeHubMac(value) {
   if (!value) return null;
   const normalized = String(value).replace(/[^a-fA-F0-9]/g, "").toUpperCase();
@@ -7178,7 +7178,7 @@ var AutomationAssistController = class {
   }
 };
 
-// custom_components/sofabaton_x1s/www/src/sections/wire.ts
+// remote-card/src/sections/wire.ts
 function primaryActionRef(handler) {
   return n6((el) => {
     if (!el) return;
@@ -7213,7 +7213,7 @@ function listenersRef(wire) {
   });
 }
 
-// custom_components/sofabaton_x1s/www/src/sections/activity-row.ts
+// remote-card/src/sections/activity-row.ts
 function renderActivityRow(params) {
   const itemTag = s4(selectItemTagName());
   const options = params.unavailable ? [] : params.options;
@@ -7279,7 +7279,7 @@ function renderActivityRow(params) {
   `;
 }
 
-// custom_components/sofabaton_x1s/www/src/components/sb-key-button.ts
+// remote-card/src/components/sb-key-button.ts
 var CONTROL_CSS = `
   :host {
     display: block;
@@ -7650,7 +7650,7 @@ if (!customElements.get("sb-key-button")) {
   customElements.define("sb-key-button", SbKeyButton);
 }
 
-// custom_components/sofabaton_x1s/www/src/sections/key-groups.ts
+// remote-card/src/sections/key-groups.ts
 var X2_ONLY_KEY_IDS = /* @__PURE__ */ new Set([
   ID.C,
   ID.B,
@@ -7812,7 +7812,7 @@ function renderAbc(params, visible) {
   `;
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-render-models.ts
+// remote-card/src/remote-card-render-models.ts
 function drawerCommandType(type) {
   if (type === "macros") return "macro";
   if (type === "favorites") return "favorite";
@@ -7840,7 +7840,7 @@ function customFavoriteButtonModel(favorite, fallbackDeviceId) {
   };
 }
 
-// custom_components/sofabaton_x1s/www/src/sections/macro-favorites.ts
+// remote-card/src/sections/macro-favorites.ts
 function renderDrawerButton(params, item, type) {
   const model = drawerButtonModel(item, type, params.currentActivityId);
   return b2`
@@ -8136,7 +8136,7 @@ function renderCommandsDrawer(params) {
   `;
 }
 
-// custom_components/sofabaton_x1s/www/src/sections/assist.ts
+// remote-card/src/sections/assist.ts
 function renderAssistRow(params) {
   return b2`
     <div
@@ -8234,7 +8234,7 @@ function renderAssistModal(params) {
   `;
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-element.ts
+// remote-card/src/remote-card-element.ts
 function hexToRgbTriplet(value) {
   const hex = value.trim().slice(1);
   const full = hex.length === 3 ? hex.split("").map((c7) => c7 + c7).join("") : hex;
@@ -9156,7 +9156,7 @@ SofabatonRemoteCard.styles = [
     `
 ];
 
-// custom_components/sofabaton_x1s/www/src/remote-card-translations/ar.ts
+// remote-card/src/remote-card-translations/ar.ts
 var isolate = (value) => `\u2068${value}\u2069`;
 var SOFABATON = isolate("Sofabaton");
 var MQTT = isolate("MQTT");
@@ -9360,7 +9360,7 @@ var REMOTE_CARD_STRINGS_AR = {
 };
 registerRemoteCardTranslation("ar", REMOTE_CARD_STRINGS_AR);
 
-// custom_components/sofabaton_x1s/www/src/remote-card-translations/en-gb.ts
+// remote-card/src/remote-card-translations/en-gb.ts
 registerRemoteCardTranslation("en-gb", {
   card: {
     favoritesTab: "Favourites",
@@ -9382,7 +9382,7 @@ registerRemoteCardTranslation("en-gb", {
   }
 });
 
-// custom_components/sofabaton_x1s/www/src/remote-card-translations/de.ts
+// remote-card/src/remote-card-translations/de.ts
 var REMOTE_CARD_STRINGS_DE = {
   card: {
     selectEntityError: "W\xE4hle eine Sofabaton-Fernsteuerungsentit\xE4t aus",
@@ -9576,7 +9576,7 @@ var REMOTE_CARD_STRINGS_DE = {
 };
 registerRemoteCardTranslation("de", REMOTE_CARD_STRINGS_DE);
 
-// custom_components/sofabaton_x1s/www/src/remote-card-translations/es.ts
+// remote-card/src/remote-card-translations/es.ts
 var plural = (count, singular, pluralForm = `${singular}s`) => count === 1 ? singular : pluralForm;
 var REMOTE_CARD_STRINGS_ES = {
   card: {
@@ -9771,7 +9771,7 @@ var REMOTE_CARD_STRINGS_ES = {
 };
 registerRemoteCardTranslation("es", REMOTE_CARD_STRINGS_ES);
 
-// custom_components/sofabaton_x1s/www/src/remote-card-translations/fr.ts
+// remote-card/src/remote-card-translations/fr.ts
 var plural2 = (count, singular, pluralForm = `${singular}s`) => count > 1 ? pluralForm : singular;
 var REMOTE_CARD_STRINGS_FR = {
   card: {
@@ -9966,7 +9966,7 @@ var REMOTE_CARD_STRINGS_FR = {
 };
 registerRemoteCardTranslation("fr", REMOTE_CARD_STRINGS_FR);
 
-// custom_components/sofabaton_x1s/www/src/remote-card-translations/nl.ts
+// remote-card/src/remote-card-translations/nl.ts
 var REMOTE_CARD_STRINGS_NL = {
   card: {
     selectEntityError: "Selecteer een Sofabaton-entiteit voor afstandsbediening",
@@ -10160,7 +10160,7 @@ var REMOTE_CARD_STRINGS_NL = {
 };
 registerRemoteCardTranslation("nl", REMOTE_CARD_STRINGS_NL);
 
-// custom_components/sofabaton_x1s/www/src/remote-card-translations/zh-hans.ts
+// remote-card/src/remote-card-translations/zh-hans.ts
 var REMOTE_CARD_STRINGS_ZH_HANS = {
   card: {
     selectEntityError: "\u8BF7\u9009\u62E9 Sofabaton \u9065\u63A7\u5B9E\u4F53",
@@ -10354,7 +10354,7 @@ var REMOTE_CARD_STRINGS_ZH_HANS = {
 };
 registerRemoteCardTranslation("zh-hans", REMOTE_CARD_STRINGS_ZH_HANS);
 
-// custom_components/sofabaton_x1s/www/src/remote-card.ts
+// remote-card/src/remote-card.ts
 var win = window;
 logPillsOnce();
 if (!customElements.get(EDITOR))
