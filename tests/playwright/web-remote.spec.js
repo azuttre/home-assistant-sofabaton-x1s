@@ -69,6 +69,8 @@ async function mockServer(page, state) {
     const body = request.postDataJSON ? request.postDataJSON() : null;
     calls.push({ key, body });
     const handler = routes[key];
+    // A test can hold one route's answer (a promise it resolves later).
+    if (state.holds && state.holds[key]) await state.holds[key];
     if (!handler) {
       await route.fulfill({ status: 404, contentType: "application/json", body: JSON.stringify({ type: "not_found" }) });
       return;
@@ -147,6 +149,92 @@ test.describe("web remote page", () => {
     await expect.poll(() => calls.some((c) => c.key === `POST /hubs/${HUB}/activities/101/start`)).toBe(true);
     // A reference capture of the page for review (not a baseline).
     await page.screenshot({ path: "test-results/web-remote-page.png", fullPage: true });
+  });
+
+  test("nothing alarming shows before the server's first answer", async ({ page }) => {
+    let releaseStatus;
+    const held = new Promise((resolve) => (releaseStatus = resolve));
+    const state = {
+      document: null,
+      running: STATUS.status.running_activity,
+      holds: { [`GET /hubs/${HUB}/status`]: held },
+    };
+    await mockServer(page, state);
+    await page.goto(`${PAGE}?hub=${encodeURIComponent(HUB)}`);
+    const remote = card(page);
+    await expect(remote).toBeVisible();
+    const row = remote.locator(".activityRow >> visible=true").first();
+    await expect(row.locator(".loadIndicator")).toHaveClass(/is-loading/);
+    // Give any flash a chance to paint, then assert it never did.
+    await page.waitForTimeout(300);
+    await expect(page.locator("sofabaton-remote-web .banner")).toBeHidden();
+    await expect(remote.locator(".sb-notice")).toHaveCount(0);
+    await expect(remote.locator(".dpad .area-up >> visible=true").first()).toHaveClass(/disabled/);
+
+    releaseStatus();
+    await expect(row.locator("ha-select .value")).toHaveText("Watch TV");
+    await expect(row.locator(".loadIndicator")).not.toHaveClass(/is-loading/);
+    await expect(remote.locator(".sb-notice")).toHaveCount(0);
+  });
+
+  test("keys stay disabled and the indicator runs until the activity's keys arrive", async ({ page }) => {
+    let releaseButtons;
+    const held = new Promise((resolve) => (releaseButtons = resolve));
+    const state = {
+      document: null,
+      running: STATUS.status.running_activity,
+      holds: { [`GET /hubs/${HUB}/entities/101/buttons`]: held },
+    };
+    await mockServer(page, state);
+    await page.goto(`${PAGE}?hub=${encodeURIComponent(HUB)}`);
+    const remote = card(page);
+    await expect(remote).toBeVisible();
+    const select = remote.locator("ha-select.sb-activity-select >> visible=true").first();
+    await expect(select.locator(".value")).toHaveText("Watch TV");
+    const up = remote.locator(".dpad .area-up >> visible=true").first();
+    // Scoped to the shown row: the indicator itself is invisible when idle.
+    const indicator = remote.locator(".activityRow >> visible=true").first().locator(".loadIndicator");
+    // The catalog is in and the running activity is shown, but its key
+    // page is still on its way: no button is enabled yet.
+    await expect(up).toHaveClass(/disabled/);
+    await expect(indicator).toHaveClass(/is-loading/);
+    await expect(select).toBeEnabled();
+
+    releaseButtons();
+    await expect(up).not.toHaveClass(/disabled/);
+    await expect(indicator).not.toHaveClass(/is-loading/);
+  });
+
+  test("the mode toggle's line follows the shimmed select's focus and open state", async ({ page }) => {
+    await mockServer(page, { document: null, running: STATUS.status.running_activity });
+    await page.goto(`${PAGE}?hub=${encodeURIComponent(HUB)}`);
+    const remote = card(page);
+    const row = remote.locator(".activityRow >> visible=true").first();
+    const toggle = row.locator(".sb-mode-toggle");
+    const trigger = row.locator("ha-select .trigger");
+    const lit = (locator) =>
+      // Chrome serializes the color first and "inset" last; the line
+      // transitions over 180 ms, hence the polling below.
+      locator.evaluate((el) => /inset/.test(getComputedStyle(el).boxShadow) && /-2px/.test(getComputedStyle(el).boxShadow));
+    await expect(toggle).toBeVisible();
+    await expect.poll(() => lit(toggle)).toBe(false);
+    await expect.poll(() => lit(trigger)).toBe(false);
+
+    // Mouse click opens the menu: field and toggle light together.
+    await trigger.click();
+    await expect.poll(() => lit(trigger)).toBe(true);
+    await expect.poll(() => lit(toggle)).toBe(true);
+
+    // Menu closed by Escape, field still focused (HA keeps it): both stay lit.
+    await page.keyboard.press("Escape");
+    await expect(row.locator("ha-select")).not.toHaveAttribute("open", "");
+    await expect.poll(() => lit(trigger)).toBe(true);
+    await expect.poll(() => lit(toggle)).toBe(true);
+
+    // Focus leaves the field: both go dark.
+    await remote.locator(".dpad .area-up >> visible=true").first().click();
+    await expect.poll(() => lit(trigger)).toBe(false);
+    await expect.poll(() => lit(toggle)).toBe(false);
   });
 
   test("the select's menu lines up under the trigger when the page is zoomed", async ({ page }) => {

@@ -199,6 +199,8 @@ export class ServerRemoteBackend implements RemoteBackend {
   /** The catalog has been read at least once (a disabled hub answers 409 to reads). */
   private catalogLoaded = false;
   private _lastError: string | null = null;
+  /** True until the server has answered (or failed) once for this target. */
+  private firstAnswerPending = true;
 
   // Load ordering
   private loadEpoch = 0;
@@ -379,6 +381,7 @@ export class ServerRemoteBackend implements RemoteBackend {
 
   private resetState(): void {
     this.hubStatus = null;
+    this.firstAnswerPending = true;
     this.activities = [];
     this.devices = [];
     this.running = null;
@@ -485,6 +488,7 @@ export class ServerRemoteBackend implements RemoteBackend {
       const status = await this.get<ServerHubStatusView>(`/status`);
       if (!current()) return; // superseded or target moved
       this.hubStatus = status;
+      this.firstAnswerPending = false;
       this._lastError = null;
       if (ServerRemoteBackend.readable(status)) {
         const [activities, devices, running] = await Promise.all([
@@ -507,6 +511,7 @@ export class ServerRemoteBackend implements RemoteBackend {
       if (!current()) return;
       this._lastError = errorText(err);
       this.hubStatus = null;
+      this.firstAnswerPending = false;
       this.loaded = false;
       this.scheduleRetry();
     }
@@ -541,6 +546,7 @@ export class ServerRemoteBackend implements RemoteBackend {
       const status = await this.get<ServerHubStatusView>(`/status`);
       if (!current()) return;
       this.hubStatus = status;
+      this.firstAnswerPending = false;
       this._lastError = null;
       if (ServerRemoteBackend.readable(status)) {
         if (!this.catalogLoaded) {
@@ -558,6 +564,7 @@ export class ServerRemoteBackend implements RemoteBackend {
       if (!current()) return;
       this._lastError = errorText(err);
       this.hubStatus = null;
+      this.firstAnswerPending = false;
       this.scheduleRetry();
     }
     this.invalidate();
@@ -739,7 +746,9 @@ export class ServerRemoteBackend implements RemoteBackend {
         }
         if (message.hub_id !== this.hubId) return;
         if (message.kind === "hub_removed") {
+          // A verdict, not a wait: the page shows the hub as gone.
           this.hubStatus = null;
+          this.firstAnswerPending = false;
           this.invalidate();
           this.notify();
         } else {
@@ -809,10 +818,19 @@ export class ServerRemoteBackend implements RemoteBackend {
 
   // ---------- the attribute contract ----------
 
+  private runningPagesReady(): boolean {
+    return !this.running || Boolean(this.activityPages[String(this.running.activity_id)]);
+  }
+
   private buildSnapshot(): RemoteSnapshot | undefined {
     const status = this.hubStatus?.status ?? null;
     const enabled = this.hubStatus?.enabled ?? false;
     const available = Boolean(this.hubStatus && enabled && status?.controllable);
+    // Nothing heard from the server yet: a quiet "loading" entity (off, no
+    // catalog, load_state loading), never "unavailable". Unavailable is a
+    // verdict (a failed read, a disabled or removed hub), and it paints the
+    // page with the banner and the card's warning until the answer lands.
+    const pending = this.firstAnswerPending && !this.hubStatus;
     const runningId = this.running?.activity_id ?? null;
 
     const activities = this.activities.map((activity) => ({
@@ -859,7 +877,11 @@ export class ServerRemoteBackend implements RemoteBackend {
       hub_version: String(status?.hub_version ?? "").toUpperCase(),
       current_activity: available ? currentName : undefined,
       current_activity_id: available ? runningId : null,
-      load_state: this.loaded ? "ready" : "loading",
+      // "loading" until the running activity's pages are in as well: the
+      // card disables its keys while the backend says it is still loading
+      // and holds no keys for the activity (HA reports the same while it
+      // primes an activity's buttons after a switch).
+      load_state: this.loaded && this.runningPagesReady() ? "ready" : "loading",
       activities,
       devices,
       assigned_keys: assignedKeys,
@@ -871,7 +893,7 @@ export class ServerRemoteBackend implements RemoteBackend {
     };
 
     return {
-      state: !available ? "unavailable" : runningId != null ? "on" : "off",
+      state: pending ? "off" : !available ? "unavailable" : runningId != null ? "on" : "off",
       attributes,
     };
   }

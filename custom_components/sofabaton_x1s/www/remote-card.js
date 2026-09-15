@@ -5458,6 +5458,7 @@ var RemoteCardStore = class {
     this.enabledButtonsCache = [];
     this.enabledButtonsCacheKey = null;
     this.enabledButtonsInvalid = false;
+    this.loadPending = false;
     // Activity switching / load indicator
     this.pendingActivity = null;
     this.pendingActivityAt = null;
@@ -6025,7 +6026,7 @@ var RemoteCardStore = class {
   isLoadingActive() {
     const isActivityLoading = Boolean(this.activityLoadActive);
     const isPulse = this.commandPulseUntil && Date.now() < this.commandPulseUntil;
-    return isActivityLoading || Boolean(isPulse);
+    return isActivityLoading || Boolean(isPulse) || this.loadPending;
   }
   triggerCommandPulse() {
     this.commandPulseUntil = Date.now() + 1e3;
@@ -6393,6 +6394,8 @@ var RemoteCardStore = class {
       this.enabledButtonsInvalid = Array.isArray(rawAssignedKeys) && parsed.length === 0;
       this.enabledButtonsCache = parsed;
     }
+    const loadPending = mode !== "device" && !isUnavailable && !preview && loadState === "loading" && (activityId == null ? activities.length === 0 : rawAssignedKeys == null);
+    this.loadPending = loadPending;
     const pendingAge = this.pendingActivityAt ? Date.now() - this.pendingActivityAt : null;
     const pendingExpired = pendingAge != null && pendingAge > 15e3;
     let selectState = null;
@@ -6452,6 +6455,7 @@ var RemoteCardStore = class {
       deviceId,
       keymapEntry,
       keymapLoading: keymapEntry?.status === "loading",
+      loadPending,
       commands,
       commandFilter: this.commandFilter,
       showCommandsButton: commandsButtonEnabled(layoutConfig),
@@ -8927,7 +8931,7 @@ var SofabatonRemoteCard = class extends i4 {
     const commandsVisible = deviceMode && derived.showCommandsButton;
     const showCommandsDrawer = commandsVisible && !asRows;
     const commandsAsRow = commandsVisible && asRows;
-    const disableAll = deviceMode ? derived.isUnavailable || !this._editMode && derived.deviceId == null : derived.isUnavailable || store.activityLoadingActive() || !this._editMode && derived.isPoweredOff;
+    const disableAll = deviceMode ? derived.isUnavailable || !this._editMode && derived.deviceId == null : derived.isUnavailable || store.activityLoadingActive() || derived.loadPending || !this._editMode && derived.isPoweredOff;
     if (deviceMode && (store.activeDrawer === "macros" || store.activeDrawer === "favorites") || !deviceMode && store.activeDrawer === "commands") {
       this._retainClosingDrawer(store.activeDrawer);
       this._scheduleDrawerDirectionReset();

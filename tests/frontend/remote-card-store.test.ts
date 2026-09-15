@@ -222,6 +222,66 @@ test("deriveRuntimeState fails open when assigned keys are absent", async () => 
   assert.equal(store.isEnabled(151), true); // fail-open
 });
 
+test("keys are pending, not fail-open, while the entity loads without keys for the activity", async () => {
+  const state = activeState();
+  const attrs = state.attributes as Record<string, unknown>;
+  attrs.assigned_keys = {};
+  attrs.load_state = "loading";
+  const { store } = createStore(createHass({ state }));
+  await flush();
+
+  const pending = store.deriveRuntimeState();
+  assert.equal(pending.loadPending, true);
+  assert.equal(store.isLoadingActive(), true, "load indicator runs");
+  assert.equal(store.activityLoadingActive(), false, "not an activity switch");
+
+  // Keys for the activity arrive while the entity still reports loading
+  // (other work in flight): real data wins, buttons come back.
+  attrs.assigned_keys = { "101": [151] };
+  store.setHass(createHass({ state }));
+  await flush();
+  const landed = store.deriveRuntimeState();
+  assert.equal(landed.loadPending, false);
+  assert.equal(store.isLoadingActive(), false);
+  assert.equal(store.isEnabled(151), true);
+  assert.equal(store.isEnabled(199), false);
+
+  // Loading over with no list at all: the old fail-open still applies.
+  attrs.assigned_keys = {};
+  attrs.load_state = "ready";
+  store.setHass(createHass({ state }));
+  await flush();
+  assert.equal(store.deriveRuntimeState().loadPending, false);
+  assert.equal(store.isEnabled(151), true);
+});
+
+test("the first load (no catalog yet, loading) is pending, not a warning", async () => {
+  const state = activeState();
+  const attrs = state.attributes as Record<string, unknown>;
+  state.state = "off";
+  attrs.activities = [];
+  attrs.assigned_keys = {};
+  attrs.current_activity_id = null;
+  attrs.current_activity = undefined;
+  attrs.load_state = "loading";
+  const { store } = createStore(createHass({ state }));
+  await flush();
+
+  const derived = store.deriveRuntimeState();
+  assert.equal(derived.isUnavailable, false);
+  assert.equal(derived.loadPending, true);
+  assert.equal(derived.noActivitiesMessage, "", "no warning while loading");
+  assert.equal(store.isLoadingActive(), true);
+
+  // Loading over with an empty catalog is the real no-activities case.
+  attrs.load_state = "ready";
+  store.setHass(createHass({ state }));
+  await flush();
+  const settled = store.deriveRuntimeState();
+  assert.equal(settled.loadPending, false);
+  assert.notEqual(settled.noActivitiesMessage, "");
+});
+
 test("no-activities warning appears only while available and not loading", async () => {
   // Unavailable: no warning (the select is simply disabled).
   const unavailable = createStore(createHass({ state: { state: "unavailable", attributes: {} } }));

@@ -73,7 +73,12 @@ export class SbHaSelect extends HTMLElement {
           box-shadow: inset 0 -1px 0 var(--ha-color-border-neutral-loud, rgba(0, 0, 0, 0.55));
           transition: box-shadow 180ms ease-in-out;
         }
-        .trigger:focus-visible {
+        /* HA's field lights its line on any focus (mouse included) and
+           keeps it while the menu is open; the card's mode toggle mirrors
+           the field through :focus-within and the open state, so the two
+           must light together. */
+        .trigger:focus,
+        :host([open]) .trigger {
           outline: none;
           box-shadow: inset 0 -2px 0 var(--mdc-theme-primary, var(--primary-color, #009ac7));
         }

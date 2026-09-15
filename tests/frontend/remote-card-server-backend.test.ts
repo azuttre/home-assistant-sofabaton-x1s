@@ -189,7 +189,10 @@ const flush = async (rounds = 4) => {
 test("server adapter: initial load produces the entity attribute contract", async () => {
   const { backend, sockets } = createRig();
   backend.setTarget(HUB);
-  assert.equal(backend.snapshot()?.state, "unavailable", "nothing loaded yet");
+  // Nothing heard yet: a quiet loading entity, not an unavailable verdict.
+  assert.equal(backend.snapshot()?.state, "off", "nothing loaded yet");
+  assert.equal(backend.snapshot()?.attributes?.load_state, "loading");
+  assert.deepEqual(backend.snapshot()?.attributes?.activities, []);
   const changes: number[] = [];
   backend.subscribe(() => changes.push(Date.now()));
   assert.equal(await backend.probeIntegration(), "x1s");
@@ -220,6 +223,26 @@ test("server adapter: initial load produces the entity attribute contract", asyn
     sockets[0].url,
     `ws://server.test${SERVER_API_PREFIX}/events?hub_id=${encodeURIComponent(HUB)}`,
   );
+});
+
+test("server adapter: load_state stays loading until the running activity's pages are in", async () => {
+  const gate = new Gate();
+  gate.hold();
+  const { backend } = createRig({}, { "/entities/101/buttons": gate });
+  backend.setTarget(HUB);
+  backend.subscribe(() => undefined);
+  await flush();
+  let snapshot = backend.snapshot();
+  assert.equal(snapshot?.state, "on", "catalog and running activity are known");
+  assert.equal(snapshot?.attributes?.current_activity_id, 101);
+  assert.equal(snapshot?.attributes?.load_state, "loading", "keys not in yet");
+  assert.deepEqual(snapshot?.attributes?.assigned_keys, {});
+
+  gate.release();
+  await flush();
+  snapshot = backend.snapshot();
+  assert.equal(snapshot?.attributes?.load_state, "ready");
+  assert.deepEqual(snapshot?.attributes?.assigned_keys, { "101": [174, 175] });
 });
 
 test("server adapter: unavailable when the hub is not controllable or the load fails", async () => {
@@ -393,7 +416,10 @@ test("server adapter: retargeting resets state and reconnects", async () => {
   await flush();
   assert.equal(backend.snapshot()?.state, "on");
   backend.setTarget("AA:BB");
-  assert.equal(backend.snapshot()?.state, "unavailable");
+  // A new target is a new first load: quiet, not unavailable.
+  assert.equal(backend.snapshot()?.state, "off");
+  assert.equal(backend.snapshot()?.attributes?.load_state, "loading");
+  assert.deepEqual(backend.snapshot()?.attributes?.activities, []);
   assert.equal(sockets[0].closed, true);
   await flush();
   assert.equal(sockets.length, 2);

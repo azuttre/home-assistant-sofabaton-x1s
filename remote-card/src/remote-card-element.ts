@@ -832,6 +832,7 @@ export class SofabatonRemoteCard extends LitElement {
       ? derived.isUnavailable || (!this._editMode && derived.deviceId == null)
       : derived.isUnavailable ||
         store.activityLoadingActive() ||
+        derived.loadPending ||
         (!this._editMode && derived.isPoweredOff);
 
     // Mode switches close any drawer belonging to the other mode.

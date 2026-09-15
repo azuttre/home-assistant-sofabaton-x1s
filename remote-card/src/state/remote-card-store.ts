@@ -202,6 +202,7 @@ export class RemoteCardStore {
   private enabledButtonsCache: EnabledButtonEntry[] = [];
   private enabledButtonsCacheKey: string | null = null;
   private enabledButtonsInvalid = false;
+  private loadPending = false;
 
   // Activity switching / load indicator
   private pendingActivity: string | null = null;
@@ -899,7 +900,7 @@ export class RemoteCardStore {
   isLoadingActive(): boolean {
     const isActivityLoading = Boolean(this.activityLoadActive);
     const isPulse = this.commandPulseUntil && Date.now() < this.commandPulseUntil;
-    return isActivityLoading || Boolean(isPulse);
+    return isActivityLoading || Boolean(isPulse) || this.loadPending;
   }
 
   triggerCommandPulse(): void {
@@ -1434,6 +1435,20 @@ export class RemoteCardStore {
         Array.isArray(rawAssignedKeys) && parsed.length === 0;
       this.enabledButtonsCache = parsed;
     }
+    // The backend is still loading and holds no data for what it shows:
+    // no catalog yet (first load), or no keys for the running activity
+    // (HA primes an activity's buttons after a switch, the server adapter
+    // reads its pages lazily). A transition, not "nothing bound" and not a
+    // fault: every button is disabled and the load indicator runs until
+    // the data lands, instead of the fail-open that an absent key list
+    // means once loading is over.
+    const loadPending =
+      mode !== "device" &&
+      !isUnavailable &&
+      !preview &&
+      loadState === "loading" &&
+      (activityId == null ? activities.length === 0 : rawAssignedKeys == null);
+    this.loadPending = loadPending;
 
     // Activity select state + pending-activity bookkeeping
     const pendingAge = this.pendingActivityAt
@@ -1522,6 +1537,7 @@ export class RemoteCardStore {
       deviceId,
       keymapEntry,
       keymapLoading: keymapEntry?.status === "loading",
+      loadPending,
       commands,
       commandFilter: this.commandFilter,
       showCommandsButton: commandsButtonEnabled(layoutConfig),

@@ -38,6 +38,8 @@ var ServerRemoteBackend = class _ServerRemoteBackend {
     /** The catalog has been read at least once (a disabled hub answers 409 to reads). */
     this.catalogLoaded = false;
     this._lastError = null;
+    /** True until the server has answered (or failed) once for this target. */
+    this.firstAnswerPending = true;
     // Load ordering
     this.loadEpoch = 0;
     this.loadPromise = null;
@@ -180,6 +182,7 @@ var ServerRemoteBackend = class _ServerRemoteBackend {
   }
   resetState() {
     this.hubStatus = null;
+    this.firstAnswerPending = true;
     this.activities = [];
     this.devices = [];
     this.running = null;
@@ -272,6 +275,7 @@ var ServerRemoteBackend = class _ServerRemoteBackend {
       const status = await this.get(`/status`);
       if (!current()) return;
       this.hubStatus = status;
+      this.firstAnswerPending = false;
       this._lastError = null;
       if (_ServerRemoteBackend.readable(status)) {
         const [activities, devices, running] = await Promise.all([
@@ -293,6 +297,7 @@ var ServerRemoteBackend = class _ServerRemoteBackend {
       if (!current()) return;
       this._lastError = errorText(err);
       this.hubStatus = null;
+      this.firstAnswerPending = false;
       this.loaded = false;
       this.scheduleRetry();
     }
@@ -325,6 +330,7 @@ var ServerRemoteBackend = class _ServerRemoteBackend {
       const status = await this.get(`/status`);
       if (!current()) return;
       this.hubStatus = status;
+      this.firstAnswerPending = false;
       this._lastError = null;
       if (_ServerRemoteBackend.readable(status)) {
         if (!this.catalogLoaded) {
@@ -341,6 +347,7 @@ var ServerRemoteBackend = class _ServerRemoteBackend {
       if (!current()) return;
       this._lastError = errorText(err);
       this.hubStatus = null;
+      this.firstAnswerPending = false;
       this.scheduleRetry();
     }
     this.invalidate();
@@ -502,6 +509,7 @@ var ServerRemoteBackend = class _ServerRemoteBackend {
         if (message.hub_id !== this.hubId) return;
         if (message.kind === "hub_removed") {
           this.hubStatus = null;
+          this.firstAnswerPending = false;
           this.invalidate();
           this.notify();
         } else {
@@ -558,10 +566,14 @@ var ServerRemoteBackend = class _ServerRemoteBackend {
     }
   }
   // ---------- the attribute contract ----------
+  runningPagesReady() {
+    return !this.running || Boolean(this.activityPages[String(this.running.activity_id)]);
+  }
   buildSnapshot() {
     const status = this.hubStatus?.status ?? null;
     const enabled = this.hubStatus?.enabled ?? false;
     const available = Boolean(this.hubStatus && enabled && status?.controllable);
+    const pending = this.firstAnswerPending && !this.hubStatus;
     const runningId = this.running?.activity_id ?? null;
     const activities = this.activities.map((activity) => ({
       id: activity.activity_id,
@@ -600,7 +612,11 @@ var ServerRemoteBackend = class _ServerRemoteBackend {
       hub_version: String(status?.hub_version ?? "").toUpperCase(),
       current_activity: available ? currentName : void 0,
       current_activity_id: available ? runningId : null,
-      load_state: this.loaded ? "ready" : "loading",
+      // "loading" until the running activity's pages are in as well: the
+      // card disables its keys while the backend says it is still loading
+      // and holds no keys for the activity (HA reports the same while it
+      // primes an activity's buttons after a switch).
+      load_state: this.loaded && this.runningPagesReady() ? "ready" : "loading",
       activities,
       devices,
       assigned_keys: assignedKeys,
@@ -611,7 +627,7 @@ var ServerRemoteBackend = class _ServerRemoteBackend {
       hub_id: this.hubId
     };
     return {
-      state: !available ? "unavailable" : runningId != null ? "on" : "off",
+      state: pending ? "off" : !available ? "unavailable" : runningId != null ? "on" : "off",
       attributes
     };
   }
@@ -4115,6 +4131,7 @@ var RemoteCardStore = class {
     this.enabledButtonsCache = [];
     this.enabledButtonsCacheKey = null;
     this.enabledButtonsInvalid = false;
+    this.loadPending = false;
     // Activity switching / load indicator
     this.pendingActivity = null;
     this.pendingActivityAt = null;
@@ -4682,7 +4699,7 @@ var RemoteCardStore = class {
   isLoadingActive() {
     const isActivityLoading = Boolean(this.activityLoadActive);
     const isPulse = this.commandPulseUntil && Date.now() < this.commandPulseUntil;
-    return isActivityLoading || Boolean(isPulse);
+    return isActivityLoading || Boolean(isPulse) || this.loadPending;
   }
   triggerCommandPulse() {
     this.commandPulseUntil = Date.now() + 1e3;
@@ -5050,6 +5067,8 @@ var RemoteCardStore = class {
       this.enabledButtonsInvalid = Array.isArray(rawAssignedKeys) && parsed.length === 0;
       this.enabledButtonsCache = parsed;
     }
+    const loadPending = mode !== "device" && !isUnavailable && !preview && loadState === "loading" && (activityId == null ? activities.length === 0 : rawAssignedKeys == null);
+    this.loadPending = loadPending;
     const pendingAge = this.pendingActivityAt ? Date.now() - this.pendingActivityAt : null;
     const pendingExpired = pendingAge != null && pendingAge > 15e3;
     let selectState = null;
@@ -5109,6 +5128,7 @@ var RemoteCardStore = class {
       deviceId,
       keymapEntry,
       keymapLoading: keymapEntry?.status === "loading",
+      loadPending,
       commands,
       commandFilter: this.commandFilter,
       showCommandsButton: commandsButtonEnabled(layoutConfig),
@@ -7610,7 +7630,7 @@ var SofabatonRemoteCard = class extends i4 {
     const commandsVisible = deviceMode && derived.showCommandsButton;
     const showCommandsDrawer = commandsVisible && !asRows;
     const commandsAsRow = commandsVisible && asRows;
-    const disableAll = deviceMode ? derived.isUnavailable || !this._editMode && derived.deviceId == null : derived.isUnavailable || store.activityLoadingActive() || !this._editMode && derived.isPoweredOff;
+    const disableAll = deviceMode ? derived.isUnavailable || !this._editMode && derived.deviceId == null : derived.isUnavailable || store.activityLoadingActive() || derived.loadPending || !this._editMode && derived.isPoweredOff;
     if (deviceMode && (store.activeDrawer === "macros" || store.activeDrawer === "favorites") || !deviceMode && store.activeDrawer === "commands") {
       this._retainClosingDrawer(store.activeDrawer);
       this._scheduleDrawerDirectionReset();
@@ -8837,7 +8857,12 @@ var SbHaSelect = class extends HTMLElement {
           box-shadow: inset 0 -1px 0 var(--ha-color-border-neutral-loud, rgba(0, 0, 0, 0.55));
           transition: box-shadow 180ms ease-in-out;
         }
-        .trigger:focus-visible {
+        /* HA's field lights its line on any focus (mouse included) and
+           keeps it while the menu is open; the card's mode toggle mirrors
+           the field through :focus-within and the open state, so the two
+           must light together. */
+        .trigger:focus,
+        :host([open]) .trigger {
           outline: none;
           box-shadow: inset 0 -2px 0 var(--mdc-theme-primary, var(--primary-color, #009ac7));
         }
