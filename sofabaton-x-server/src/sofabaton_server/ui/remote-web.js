@@ -6,6 +6,9 @@ function toNumber(value) {
   const n7 = Number(value);
   return Number.isFinite(n7) ? n7 : null;
 }
+function errorText(err) {
+  return err instanceof Error ? err.message : String(err);
+}
 function longPressPairs(buttons) {
   const out = {};
   for (const button of buttons) {
@@ -29,12 +32,22 @@ var ServerRemoteBackend = class _ServerRemoteBackend {
     this.running = null;
     this.activityPages = {};
     this.devicePages = {};
+    /** Bumped when a device page is re-read; the store refetches on a change. */
+    this.devicePageVersions = {};
     this.loaded = false;
     /** The catalog has been read at least once (a disabled hub answers 409 to reads). */
     this.catalogLoaded = false;
-    this.loadPromise = null;
-    this.pagePromises = {};
     this._lastError = null;
+    // Load ordering
+    this.loadEpoch = 0;
+    this.loadPromise = null;
+    this.loadDirty = false;
+    this.runningEpoch = 0;
+    this.statusPromise = null;
+    this.statusDirty = false;
+    this.pagePromises = {};
+    // Retry of failed HTTP work (independent of the socket)
+    this.retryTimer = null;
     // Snapshot cache: rebuilt lazily, invalidated on every mutation
     this.snapshotCache = null;
     // Stream
@@ -45,8 +58,9 @@ var ServerRemoteBackend = class _ServerRemoteBackend {
     this.baseUrl = String(options.baseUrl ?? "").replace(/\/+$/, "");
     this.fetchImpl = options.fetch ?? ((input, init) => globalThis.fetch(input, init));
     this.wsFactory = options.webSocket ?? (typeof WebSocket === "function" ? (url) => new WebSocket(url) : null);
-    this.reconnectDelayMs = Math.max(100, options.reconnectDelayMs ?? 1e3);
-    this.reconnectDelay = this.reconnectDelayMs;
+    this.retryBaseMs = Math.max(100, options.reconnectDelayMs ?? 1e3);
+    this.reconnectDelay = this.retryBaseMs;
+    this.retryDelay = this.retryBaseMs;
   }
   // ---------- RemoteBackend ----------
   get target() {
@@ -94,20 +108,22 @@ var ServerRemoteBackend = class _ServerRemoteBackend {
       return null;
     }
   }
+  /**
+   * `null` ("cannot fetch yet, ask again") until the catalog has been read
+   * from a healthy hub; a device missing from a loaded catalog is a real
+   * miss. The page is fetched once and re-read when `snapshot_changed`
+   * names the device; the store follows through `keymap_versions`.
+   */
   async deviceKeymap(deviceId) {
     if (!this.hubId) return null;
     await this.ensureLoaded();
+    if (!this.hubStatus || !this.loaded || !this.catalogLoaded) return null;
     const device = this.devices.find((entry) => entry.device_id === deviceId);
     if (!device) return { keymap: null, reason: "cache_miss" };
     const key = String(deviceId);
     if (!this.devicePages[key]) {
-      const [buttons, commands] = await Promise.all([
-        this.get(`/entities/${deviceId}/buttons`),
-        this.get(`/devices/${deviceId}/commands`)
-      ]);
-      this.devicePages[key] = { buttons, commands };
-      this.invalidate();
-      this.notify();
+      await this.readDevicePage(deviceId);
+      if (!this.devicePages[key]) return null;
     }
     const page = this.devicePages[key];
     return {
@@ -160,6 +176,7 @@ var ServerRemoteBackend = class _ServerRemoteBackend {
   }
   stop() {
     this.closeSocket();
+    this.cancelRetry();
   }
   resetState() {
     this.hubStatus = null;
@@ -168,11 +185,16 @@ var ServerRemoteBackend = class _ServerRemoteBackend {
     this.running = null;
     this.activityPages = {};
     this.devicePages = {};
+    this.devicePageVersions = {};
     this.loaded = false;
     this.catalogLoaded = false;
-    this.loadPromise = null;
-    this.pagePromises = {};
     this._lastError = null;
+    this.loadEpoch += 1;
+    this.runningEpoch += 1;
+    this.loadDirty = false;
+    this.statusDirty = false;
+    this.pagePromises = {};
+    this.cancelRetry();
     this.invalidate();
   }
   /**
@@ -209,27 +231,46 @@ var ServerRemoteBackend = class _ServerRemoteBackend {
     if (!response.ok) throw new Error(`POST ${path} -> ${response.status}`);
   }
   // ---------- loading ----------
+  /** Load once; a load already in flight is shared. */
   ensureLoaded() {
     if (this.loaded) return Promise.resolve();
-    if (!this.loadPromise) {
-      this.loadPromise = this.loadAll().finally(() => {
-        this.loadPromise = null;
-      });
+    return this.loadPromise ?? this.reload();
+  }
+  /**
+   * Request a full reload. A load in flight is superseded: its results are
+   * discarded when they arrive and the load runs again, so a request that
+   * lands mid-load is never lost.
+   */
+  reload() {
+    this.loadEpoch += 1;
+    if (this.loadPromise) {
+      this.loadDirty = true;
+      return this.loadPromise;
     }
+    this.loadPromise = (async () => {
+      do {
+        this.loadDirty = false;
+        await this.loadAll(this.loadEpoch);
+      } while (this.loadDirty);
+    })().finally(() => {
+      this.loadPromise = null;
+    });
     return this.loadPromise;
   }
   /**
-   * Full reload: status first, then (only while the hub is readable) the
+   * Full load: status first, then (only while the hub is readable) the
    * catalog, the running activity, and the running activity's pages. A
    * disabled or app-held hub keeps whatever catalog was read before and
    * shows as unavailable, not as unreachable.
    */
-  async loadAll() {
+  async loadAll(epoch) {
     if (!this.hubId) return;
     const hubId = this.hubId;
+    const runningEpoch = this.runningEpoch;
+    const current = () => epoch === this.loadEpoch && hubId === this.hubId;
     try {
       const status = await this.get(`/status`);
-      if (hubId !== this.hubId) return;
+      if (!current()) return;
       this.hubStatus = status;
       this._lastError = null;
       if (_ServerRemoteBackend.readable(status)) {
@@ -238,43 +279,69 @@ var ServerRemoteBackend = class _ServerRemoteBackend {
           this.get(`/devices`),
           this.get(`/activity`)
         ]);
-        if (hubId !== this.hubId) return;
+        if (!current()) return;
         this.activities = activities;
         this.devices = devices;
-        this.running = running;
+        if (runningEpoch === this.runningEpoch) this.running = running;
         this.catalogLoaded = true;
       } else {
         this.running = null;
       }
       this.loaded = true;
+      this.cancelRetry();
     } catch (err) {
-      if (hubId !== this.hubId) return;
-      this._lastError = err instanceof Error ? err.message : String(err);
+      if (!current()) return;
+      this._lastError = errorText(err);
       this.hubStatus = null;
       this.loaded = false;
+      this.scheduleRetry();
     }
     this.invalidate();
     this.notify();
-    if (this.running) await this.ensureActivityPages(this.running.activity_id);
+    if (current() && this.running) await this.ensureActivityPages(this.running.activity_id);
   }
-  async refreshStatus() {
+  /** Re-read /status (and the running activity); one in flight, one pending. */
+  refreshStatus() {
+    if (this.statusPromise) {
+      this.statusDirty = true;
+      return this.statusPromise;
+    }
+    this.statusPromise = (async () => {
+      do {
+        this.statusDirty = false;
+        await this.readStatus();
+      } while (this.statusDirty);
+    })().finally(() => {
+      this.statusPromise = null;
+    });
+    return this.statusPromise;
+  }
+  async readStatus() {
+    const hubId = this.hubId;
+    const epoch = this.loadEpoch;
+    const runningEpoch = this.runningEpoch;
+    const current = () => epoch === this.loadEpoch && hubId === this.hubId;
     try {
       const status = await this.get(`/status`);
+      if (!current()) return;
       this.hubStatus = status;
       this._lastError = null;
       if (_ServerRemoteBackend.readable(status)) {
         if (!this.catalogLoaded) {
-          this.loaded = false;
-          void this.ensureLoaded();
+          void this.reload();
           return;
         }
-        this.running = await this.get(`/activity`);
+        const running = await this.get(`/activity`);
+        if (!current()) return;
+        if (runningEpoch === this.runningEpoch) this.running = running;
       } else {
         this.running = null;
       }
     } catch (err) {
-      this._lastError = err instanceof Error ? err.message : String(err);
+      if (!current()) return;
+      this._lastError = errorText(err);
       this.hubStatus = null;
+      this.scheduleRetry();
     }
     this.invalidate();
     this.notify();
@@ -291,27 +358,71 @@ var ServerRemoteBackend = class _ServerRemoteBackend {
   }
   async loadActivityPages(activityId) {
     const hubId = this.hubId;
+    const epoch = this.loadEpoch;
+    const current = () => epoch === this.loadEpoch && hubId === this.hubId;
     try {
       const [buttons, macros, favorites] = await Promise.all([
         this.get(`/entities/${activityId}/buttons`),
         this.get(`/activities/${activityId}/macros`),
         this.get(`/activities/${activityId}/favorites`)
       ]);
-      if (hubId !== this.hubId) return;
+      if (!current()) return;
       this.activityPages[String(activityId)] = { buttons, macros, favorites };
     } catch (err) {
-      if (hubId !== this.hubId) return;
-      this._lastError = err instanceof Error ? err.message : String(err);
+      if (!current()) return;
+      this._lastError = errorText(err);
+      this.scheduleRetry();
       return;
     }
     this.invalidate();
     this.notify();
   }
+  /** Read (or re-read) one device page; bumps its version on success. */
+  async readDevicePage(deviceId) {
+    const key = String(deviceId);
+    const hubId = this.hubId;
+    const epoch = this.loadEpoch;
+    try {
+      const [buttons, commands] = await Promise.all([
+        this.get(`/entities/${deviceId}/buttons`),
+        this.get(`/devices/${deviceId}/commands`)
+      ]);
+      if (epoch !== this.loadEpoch || hubId !== this.hubId) return;
+      this.devicePages[key] = { buttons, commands };
+      this.devicePageVersions[key] = (this.devicePageVersions[key] ?? 0) + 1;
+    } catch (err) {
+      if (epoch !== this.loadEpoch || hubId !== this.hubId) return;
+      this._lastError = errorText(err);
+      return;
+    }
+    this.invalidate();
+    this.notify();
+  }
+  // ---------- retry of failed HTTP work ----------
+  scheduleRetry() {
+    if (!this.listeners.length || this.retryTimer) return;
+    const delay = this.retryDelay;
+    this.retryDelay = Math.min(this.retryDelay * 2, MAX_RECONNECT_DELAY_MS);
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      if (!this.listeners.length || !this.hubId) return;
+      if (!this.loaded || !this.hubStatus) {
+        void this.reload();
+      } else if (this.running && !this.activityPages[String(this.running.activity_id)]) {
+        void this.ensureActivityPages(this.running.activity_id);
+      }
+    }, delay);
+  }
+  cancelRetry() {
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.retryDelay = this.retryBaseMs;
+  }
   // ---------- stream ----------
   wsUrl() {
-    let origin = this.baseUrl;
-    if (!origin && typeof location !== "undefined") origin = location.origin;
-    const ws = origin.replace(/^http/, "ws");
+    let base = this.baseUrl;
+    if (!base && typeof location !== "undefined") base = location.origin;
+    const ws = base.replace(/^http/, "ws");
     return `${ws}${SERVER_API_PREFIX}/events?hub_id=${encodeURIComponent(this.hubId)}`;
   }
   openSocket() {
@@ -322,18 +433,15 @@ var ServerRemoteBackend = class _ServerRemoteBackend {
     try {
       socket = this.wsFactory(this.wsUrl());
     } catch (err) {
-      this._lastError = err instanceof Error ? err.message : String(err);
+      this._lastError = errorText(err);
       this.scheduleReconnect();
       return;
     }
     this.socket = socket;
     socket.onopen = () => {
       if (generation !== this.socketGeneration) return;
-      this.reconnectDelay = this.reconnectDelayMs;
-      if (this.loaded) {
-        this.loaded = false;
-        void this.ensureLoaded();
-      }
+      this.reconnectDelay = this.retryBaseMs;
+      void this.reload();
     };
     socket.onmessage = (event) => {
       if (generation !== this.socketGeneration) return;
@@ -383,14 +491,12 @@ var ServerRemoteBackend = class _ServerRemoteBackend {
       case "hello":
         return;
       case "dropped":
-        this.loaded = false;
-        void this.ensureLoaded();
+        void this.reload();
         return;
       case "server_event":
         if (message.kind === "hub_rekeyed" && message.hub_id && message.hub_id !== this.hubId) {
           this.hubId = String(message.hub_id);
-          this.loaded = false;
-          void this.ensureLoaded();
+          void this.reload();
           return;
         }
         if (message.hub_id !== this.hubId) return;
@@ -416,12 +522,7 @@ var ServerRemoteBackend = class _ServerRemoteBackend {
       case "activity_changed": {
         const id = toNumber(payload.activity_id);
         this.running = id == null ? null : { activity_id: id, name: payload.name ?? null };
-        if (this.hubStatus?.status) {
-          this.hubStatus = {
-            ...this.hubStatus,
-            status: { ...this.hubStatus.status, running_activity: this.running }
-          };
-        }
+        this.runningEpoch += 1;
         this.invalidate();
         this.notify();
         if (id != null) void this.ensureActivityPages(id);
@@ -433,26 +534,23 @@ var ServerRemoteBackend = class _ServerRemoteBackend {
         void this.refreshStatus();
         return;
       case "catalog_ready":
-        if (payload.ready) {
-          this.loaded = false;
-          void this.ensureLoaded();
-        } else {
-          void this.refreshStatus();
-        }
+        if (payload.ready) void this.reload();
+        else void this.refreshStatus();
         return;
       case "snapshot_changed": {
         const deviceIds = Array.isArray(payload.device_ids) ? payload.device_ids : [];
         const activityIds = Array.isArray(payload.activity_ids) ? payload.activity_ids : [];
-        if (!deviceIds.length && !activityIds.length) {
+        const everything = !deviceIds.length && !activityIds.length;
+        const heldDevices = everything ? Object.keys(this.devicePages) : deviceIds.map(String).filter((key) => this.devicePages[key]);
+        if (everything || deviceIds.length) {
           this.activityPages = {};
-          this.devicePages = {};
         } else {
-          for (const id of deviceIds) delete this.devicePages[String(id)];
           for (const id of activityIds) delete this.activityPages[String(id)];
-          if (deviceIds.length) this.activityPages = {};
         }
-        this.loaded = false;
-        void this.ensureLoaded();
+        for (const key of heldDevices) delete this.devicePages[key];
+        void this.reload().then(
+          () => Promise.all(heldDevices.map((key) => this.readDevicePage(Number(key))))
+        );
         return;
       }
       default:
@@ -509,6 +607,7 @@ var ServerRemoteBackend = class _ServerRemoteBackend {
       macro_keys: macroKeys,
       favorite_keys: favoriteKeys,
       long_press_keys: longPressKeys,
+      keymap_versions: { ...this.devicePageVersions },
       hub_id: this.hubId
     };
     return {
@@ -4031,6 +4130,7 @@ var RemoteCardStore = class {
     this._mode = "activity";
     this._deviceId = null;
     this.deviceKeymaps = {};
+    this.deviceKeymapFetching = /* @__PURE__ */ new Set();
     this.initialViewApplied = false;
     this.commandFilter = "";
     // Drawer / menu UI state (direction math stays in the element)
@@ -4171,7 +4271,8 @@ var RemoteCardStore = class {
       this.integration || "",
       this._mode,
       String(this._deviceId ?? ""),
-      keymapEntry ? `${keymapEntry.status}:${keymapEntry.buttons.length}:${keymapEntry.commands.length}` : ""
+      keymapEntry ? `${keymapEntry.status}:${keymapEntry.version ?? 0}:${keymapEntry.buttons.length}:${keymapEntry.commands.length}` : "",
+      stableJsonSignature(attrs?.keymap_versions)
     ].join("|");
   }
   // ---------- integration detection ----------
@@ -4366,16 +4467,38 @@ var RemoteCardStore = class {
    * fetch per device per card lifetime — the remote card never invalidates
    * cache (control panel owns cache management).
    */
+  /** The backend's version for a device's keymap (0 when it publishes none). */
+  keymapVersion(deviceId) {
+    const versions = this.remoteState()?.attributes?.keymap_versions;
+    return Number(versions?.[String(deviceId)] ?? 0) || 0;
+  }
+  /** True when a device's keymap must be (re)fetched: absent, or behind the backend's version. */
+  keymapStale(deviceId) {
+    const entry = this.deviceKeymaps[String(deviceId)];
+    if (!entry) return true;
+    if (entry.status === "loading") return false;
+    return (entry.version ?? 0) !== this.keymapVersion(deviceId);
+  }
   async ensureDeviceKeymap(deviceId) {
     const key = String(deviceId);
-    if (this.deviceKeymaps[key]) return;
+    if (!this.keymapStale(deviceId)) return;
     const backend = this._backend;
     if (!backend) return;
-    this.deviceKeymaps[key] = { status: "loading", buttons: [], commands: [] };
+    if (this.deviceKeymapFetching.has(key)) return;
+    const version = this.keymapVersion(deviceId);
+    const previous = this.deviceKeymaps[key];
+    if (!previous) {
+      this.deviceKeymaps[key] = { status: "loading", buttons: [], commands: [], version };
+    }
+    this.deviceKeymapFetching.add(key);
     try {
       const response = await backend.deviceKeymap(deviceId);
       if (response === null) {
-        delete this.deviceKeymaps[key];
+        if (!previous) {
+          delete this.deviceKeymaps[key];
+          this.invalidateFingerprint();
+          this.onChange();
+        }
         return;
       }
       const keymap = response?.keymap;
@@ -4383,7 +4506,8 @@ var RemoteCardStore = class {
         this.deviceKeymaps[key] = {
           status: "cache_miss",
           buttons: [],
-          commands: []
+          commands: [],
+          version
         };
       } else {
         const buttons = new Set(
@@ -4401,11 +4525,14 @@ var RemoteCardStore = class {
             command_id: Number(command?.command_id),
             name: String(command?.name ?? "")
           })).filter((command) => Number.isFinite(command.command_id) && command.name),
-          powerConfigured: keymap.power_configured === true
+          powerConfigured: keymap.power_configured === true,
+          version
         };
       }
     } catch (_err) {
-      this.deviceKeymaps[key] = { status: "error", buttons: [], commands: [] };
+      this.deviceKeymaps[key] = { status: "error", buttons: [], commands: [], version };
+    } finally {
+      this.deviceKeymapFetching.delete(key);
     }
     this.invalidateFingerprint();
     this.onChange();
@@ -4873,7 +5000,7 @@ var RemoteCardStore = class {
     const activityId = preview ? preview.activityId : this.currentActivityId();
     const deviceId = mode === "device" ? preview ? preview.deviceId ?? null : this._deviceId : null;
     const layoutConfig = mode === "device" ? layoutConfigForDevice(this._config, deviceId) : layoutConfigForActivity(this._config, activityId);
-    if (mode === "device" && deviceId != null && !this.deviceKeymapState(deviceId)) {
+    if (mode === "device" && deviceId != null && this.keymapStale(deviceId)) {
       void this.ensureDeviceKeymap(deviceId);
     }
     const keymapEntry = mode === "device" ? this.deviceKeymapState(deviceId) : null;
@@ -7279,10 +7406,10 @@ var SofabatonRemoteCard = class extends i4 {
   _applyLocalTheme(themeName) {
     const root = this._cardRef.value;
     const hass = this._store.hass;
-    if (!root || !hass) return false;
+    if (!root) return false;
     const bgOverrideCss = rgbToCss(this._store.config?.background_override);
-    const themeDef = themeName ? hass.themes?.themes?.[themeName] : null;
-    const themeMode = hass.themes?.darkMode ? "dark" : "light";
+    const themeDef = themeName ? hass?.themes?.themes?.[themeName] : null;
+    const themeMode = hass?.themes?.darkMode ? "dark" : "light";
     const appliedKey = `${themeName || ""}||${bgOverrideCss}||${themeMode}||${JSON.stringify(themeDef ?? null)}`;
     if (this._appliedThemeKey === appliedKey) return false;
     for (const cssVar of this._appliedThemeVars) {
@@ -7298,7 +7425,7 @@ var SofabatonRemoteCard = class extends i4 {
         vars = def;
         const defWithModes = def;
         if (defWithModes.modes && typeof defWithModes.modes === "object") {
-          const mode = hass.themes?.darkMode ? "dark" : "light";
+          const mode = hass?.themes?.darkMode ? "dark" : "light";
           vars = { ...def, ...defWithModes.modes?.[mode] || {} };
           delete vars.modes;
         }
@@ -7878,13 +8005,25 @@ function webRemoteConfigFromCardConfig(config) {
   }
   return out;
 }
+function normalizeHubId(value) {
+  const raw = String(value ?? "").trim();
+  const compact = raw.replace(/[:\-\s.]/g, "");
+  return /^[0-9a-fA-F]{12}$/.test(compact) ? compact.toLowerCase() : raw;
+}
+function serverBaseFromPageUrl(href) {
+  const url = new URL(href);
+  const marker = "/ui/remote/";
+  const at = url.pathname.indexOf(marker);
+  const root = at >= 0 ? url.pathname.slice(0, at) : "";
+  return `${url.origin}${root}`.replace(/\/+$/, "");
+}
 function parseWebRemoteParams(search, navigatorLanguage) {
   const params = new URLSearchParams(search);
   const device = Number(params.get("device"));
   const zoom = Number(params.get("zoom"));
   const theme = params.get("theme");
   return {
-    hub: (params.get("hub") ?? "").trim(),
+    hub: normalizeHubId(params.get("hub")),
     lang: (params.get("lang") ?? navigatorLanguage ?? "").trim() || void 0,
     device: params.has("device") && Number.isFinite(device) ? device : null,
     zoom: params.has("zoom") && Number.isFinite(zoom) && zoom > 0 ? zoom : null,
@@ -10288,34 +10427,37 @@ var SofabatonRemoteWeb = class extends HTMLElement {
     const params = parseWebRemoteParams(location.search, navigator.language);
     this._params = params;
     if (params.theme) document.documentElement.dataset.theme = params.theme;
+    const serverBase = serverBaseFromPageUrl(location.href);
+    const api = `${serverBase}${SERVER_API_PREFIX}`;
     let hubs = [];
     let hubsError = null;
     try {
-      const response = await fetch(`${SERVER_API_PREFIX}/hubs`, { headers: { accept: "application/json" } });
+      const response = await fetch(`${api}/hubs`, { headers: { accept: "application/json" } });
       if (!response.ok) throw new Error(`GET /hubs -> ${response.status}`);
       hubs = await response.json();
     } catch (err) {
       hubsError = err instanceof Error ? err.message : String(err);
     }
-    const known = hubs.find((hub) => hub.hub_id === params.hub);
+    const known = params.hub ? hubs.find((hub) => normalizeHubId(hub.hub_id) === params.hub) : void 0;
     if (!params.hub || !known) {
       this._renderInstructions(params.hub, hubs, hubsError);
       return;
     }
+    const hubId = known.hub_id;
     let storedDocument = null;
     try {
-      const response = await fetch(`${SERVER_API_PREFIX}/hubs/${encodeURIComponent(params.hub)}/ui/remote-card`, {
+      const response = await fetch(`${api}/hubs/${encodeURIComponent(hubId)}/ui/remote-card`, {
         headers: { accept: "application/json" }
       });
       if (response.ok) storedDocument = (await response.json()).document ?? null;
     } catch (_err) {
       storedDocument = null;
     }
-    const backend = new ServerRemoteBackend({ baseUrl: "" });
-    backend.setTarget(params.hub);
+    const backend = new ServerRemoteBackend({ baseUrl: serverBase });
+    backend.setTarget(hubId);
     this._backend = backend;
     const card = document_createCard();
-    card.setConfig(cardConfigForWebRemote(params.hub, storedDocument, { openDevice: params.device }));
+    card.setConfig(cardConfigForWebRemote(hubId, storedDocument, { openDevice: params.device }));
     card.setLanguage(params.lang);
     card.setBackend(backend);
     this._card = card;
@@ -10350,7 +10492,7 @@ var SofabatonRemoteWeb = class extends HTMLElement {
       const label = `${escapeHtml(hub.config?.name || hub.hub_id)} (${escapeHtml(hub.status?.hub_version || "?")}, ${hub.enabled ? escapeHtml(hub.status?.mode || "starting") : "disabled"})`;
       return `<li><a href="${href}">${label}</a> <code>${escapeHtml(hub.hub_id)}</code></li>`;
     }).join("")}</ul>` : error ? `<p>The server did not answer <code>${SERVER_API_PREFIX}/hubs</code>: ${escapeHtml(error)}.</p>` : `<p>This server has no hubs registered yet. Add one with <code>POST ${SERVER_API_PREFIX}/hubs</code> or from the <a href="/harness">console</a>.</p>`;
-    const why = requested ? `<p>No hub with id <code>${escapeHtml(requested)}</code> is registered on this server.</p>` : `<p>Open this page with <code>?hub=&lt;hub id&gt;</code>. The id is the hub's MAC as the server lists it.</p>`;
+    const why = requested ? `<p>No hub with id <code>${escapeHtml(requested)}</code> is registered on this server.</p>` : `<p>Open this page with <code>?hub=&lt;hub id&gt;</code>. The id is the hub's MAC (any spelling), or the host it was registered by before its first sync.</p>`;
     this._shadow.innerHTML = `<style>${HOST_CSS}</style>
       <div class="notice">
         <h1>Sofabaton web remote</h1>

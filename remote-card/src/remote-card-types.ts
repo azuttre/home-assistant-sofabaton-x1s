@@ -224,6 +224,13 @@ export interface RemoteEntityAttributes {
    * and its services have no long-press concept.
    */
   long_press_keys?: Record<string, Record<string, { device_id: number; command_id: number }>>;
+  /**
+   * Per-device keymap version (web remote only): the server adapter bumps
+   * a device's entry when it re-reads that device's page, and the store
+   * refetches the keymap. HA never publishes it (its keymaps are
+   * fetched once per card lifetime).
+   */
+  keymap_versions?: Record<string, number>;
   macro_keys?: Record<string, Array<Record<string, unknown>>>;
   favorite_keys?: Record<string, Array<Record<string, unknown>>>;
   [key: string]: unknown;

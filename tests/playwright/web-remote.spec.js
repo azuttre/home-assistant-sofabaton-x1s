@@ -144,6 +144,30 @@ test.describe("web remote page", () => {
     await page.screenshot({ path: "test-results/web-remote-page.png", fullPage: true });
   });
 
+  test("a stored background override paints the card without Home Assistant", async ({ page }) => {
+    await mockServer(page, {
+      document: { use_background_override: true, background_override: [20, 20, 20] },
+      running: STATUS.status.running_activity,
+    });
+    await page.goto(`${PAGE}?hub=${encodeURIComponent(HUB)}`);
+    const remote = card(page);
+    await expect(remote).toBeVisible();
+    await expect.poll(async () =>
+      remote.evaluate((el) => {
+        const root = el.shadowRoot?.querySelector("ha-card");
+        return root ? getComputedStyle(root).backgroundColor : null;
+      }),
+    ).toBe("rgb(20, 20, 20)");
+  });
+
+  test("the hub id is matched the way the server spells it", async ({ page }) => {
+    const { calls } = await mockServer(page, { document: null, running: STATUS.status.running_activity });
+    // The mock lists the hub in colon form; the URL uses the compact form.
+    await page.goto(`${PAGE}?hub=e26a44861b45`);
+    await expect(card(page)).toBeVisible();
+    await expect.poll(() => calls.some((c) => c.key === `GET /hubs/${HUB}/status`)).toBe(true);
+  });
+
   test("the hub going away shows the banner and dark theme applies", async ({ page }) => {
     const state = { document: null, running: STATUS.status.running_activity };
     const { sockets } = await mockServer(page, state);

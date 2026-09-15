@@ -5473,6 +5473,7 @@ var RemoteCardStore = class {
     this._mode = "activity";
     this._deviceId = null;
     this.deviceKeymaps = {};
+    this.deviceKeymapFetching = /* @__PURE__ */ new Set();
     this.initialViewApplied = false;
     this.commandFilter = "";
     // Drawer / menu UI state (direction math stays in the element)
@@ -5613,7 +5614,8 @@ var RemoteCardStore = class {
       this.integration || "",
       this._mode,
       String(this._deviceId ?? ""),
-      keymapEntry ? `${keymapEntry.status}:${keymapEntry.buttons.length}:${keymapEntry.commands.length}` : ""
+      keymapEntry ? `${keymapEntry.status}:${keymapEntry.version ?? 0}:${keymapEntry.buttons.length}:${keymapEntry.commands.length}` : "",
+      stableJsonSignature(attrs?.keymap_versions)
     ].join("|");
   }
   // ---------- integration detection ----------
@@ -5808,16 +5810,38 @@ var RemoteCardStore = class {
    * fetch per device per card lifetime — the remote card never invalidates
    * cache (control panel owns cache management).
    */
+  /** The backend's version for a device's keymap (0 when it publishes none). */
+  keymapVersion(deviceId) {
+    const versions = this.remoteState()?.attributes?.keymap_versions;
+    return Number(versions?.[String(deviceId)] ?? 0) || 0;
+  }
+  /** True when a device's keymap must be (re)fetched: absent, or behind the backend's version. */
+  keymapStale(deviceId) {
+    const entry = this.deviceKeymaps[String(deviceId)];
+    if (!entry) return true;
+    if (entry.status === "loading") return false;
+    return (entry.version ?? 0) !== this.keymapVersion(deviceId);
+  }
   async ensureDeviceKeymap(deviceId) {
     const key = String(deviceId);
-    if (this.deviceKeymaps[key]) return;
+    if (!this.keymapStale(deviceId)) return;
     const backend = this._backend;
     if (!backend) return;
-    this.deviceKeymaps[key] = { status: "loading", buttons: [], commands: [] };
+    if (this.deviceKeymapFetching.has(key)) return;
+    const version = this.keymapVersion(deviceId);
+    const previous = this.deviceKeymaps[key];
+    if (!previous) {
+      this.deviceKeymaps[key] = { status: "loading", buttons: [], commands: [], version };
+    }
+    this.deviceKeymapFetching.add(key);
     try {
       const response = await backend.deviceKeymap(deviceId);
       if (response === null) {
-        delete this.deviceKeymaps[key];
+        if (!previous) {
+          delete this.deviceKeymaps[key];
+          this.invalidateFingerprint();
+          this.onChange();
+        }
         return;
       }
       const keymap = response?.keymap;
@@ -5825,7 +5849,8 @@ var RemoteCardStore = class {
         this.deviceKeymaps[key] = {
           status: "cache_miss",
           buttons: [],
-          commands: []
+          commands: [],
+          version
         };
       } else {
         const buttons = new Set(
@@ -5843,11 +5868,14 @@ var RemoteCardStore = class {
             command_id: Number(command?.command_id),
             name: String(command?.name ?? "")
           })).filter((command) => Number.isFinite(command.command_id) && command.name),
-          powerConfigured: keymap.power_configured === true
+          powerConfigured: keymap.power_configured === true,
+          version
         };
       }
     } catch (_err) {
-      this.deviceKeymaps[key] = { status: "error", buttons: [], commands: [] };
+      this.deviceKeymaps[key] = { status: "error", buttons: [], commands: [], version };
+    } finally {
+      this.deviceKeymapFetching.delete(key);
     }
     this.invalidateFingerprint();
     this.onChange();
@@ -6315,7 +6343,7 @@ var RemoteCardStore = class {
     const activityId = preview ? preview.activityId : this.currentActivityId();
     const deviceId = mode === "device" ? preview ? preview.deviceId ?? null : this._deviceId : null;
     const layoutConfig = mode === "device" ? layoutConfigForDevice(this._config, deviceId) : layoutConfigForActivity(this._config, activityId);
-    if (mode === "device" && deviceId != null && !this.deviceKeymapState(deviceId)) {
+    if (mode === "device" && deviceId != null && this.keymapStale(deviceId)) {
       void this.ensureDeviceKeymap(deviceId);
     }
     const keymapEntry = mode === "device" ? this.deviceKeymapState(deviceId) : null;
@@ -8695,10 +8723,10 @@ var SofabatonRemoteCard = class extends i4 {
   _applyLocalTheme(themeName) {
     const root = this._cardRef.value;
     const hass = this._store.hass;
-    if (!root || !hass) return false;
+    if (!root) return false;
     const bgOverrideCss = rgbToCss(this._store.config?.background_override);
-    const themeDef = themeName ? hass.themes?.themes?.[themeName] : null;
-    const themeMode = hass.themes?.darkMode ? "dark" : "light";
+    const themeDef = themeName ? hass?.themes?.themes?.[themeName] : null;
+    const themeMode = hass?.themes?.darkMode ? "dark" : "light";
     const appliedKey = `${themeName || ""}||${bgOverrideCss}||${themeMode}||${JSON.stringify(themeDef ?? null)}`;
     if (this._appliedThemeKey === appliedKey) return false;
     for (const cssVar of this._appliedThemeVars) {
@@ -8714,7 +8742,7 @@ var SofabatonRemoteCard = class extends i4 {
         vars = def;
         const defWithModes = def;
         if (defWithModes.modes && typeof defWithModes.modes === "object") {
-          const mode = hass.themes?.darkMode ? "dark" : "light";
+          const mode = hass?.themes?.darkMode ? "dark" : "light";
           vars = { ...def, ...defWithModes.modes?.[mode] || {} };
           delete vars.modes;
         }

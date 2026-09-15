@@ -357,3 +357,52 @@ test("store: setHass installs the HA adapter and keeps the hass getter", async (
     target: undefined,
   });
 });
+
+test("store: a device keymap is refetched when the backend bumps its version, never otherwise", async () => {
+  let keymapCalls = 0;
+  const store = new RemoteCardStore(() => undefined, { fireEvent: () => undefined });
+  store.setConfig({ entity: ENTITY });
+  const backend = createFakeBackend({
+    ...SNAPSHOT,
+    attributes: { ...SNAPSHOT.attributes, keymap_versions: { "8": 1 } },
+  });
+  backend.deviceKeymap = async () => {
+    keymapCalls += 1;
+    return { keymap: { buttons: [151], bindings: [], commands: [{ command_id: keymapCalls, name: `v${keymapCalls}` }], power_configured: true } as never };
+  };
+  store.setBackend(backend);
+  await flush();
+  store.setMode("device");
+  store.setDevice(8);
+  await flush();
+  assert.equal(keymapCalls, 1);
+  assert.equal(store.deviceKeymapState(8)?.commands[0]?.name, "v1");
+  store.deriveRuntimeState();
+  await flush();
+  assert.equal(keymapCalls, 1, "same version: no refetch");
+
+  backend.state = { ...SNAPSHOT, attributes: { ...SNAPSHOT.attributes, keymap_versions: { "8": 2 } } };
+  backend.listeners.forEach((listener) => listener());
+  await flush();
+  store.deriveRuntimeState();
+  await flush();
+  assert.equal(keymapCalls, 2, "bumped version: refetched");
+  assert.equal(store.deviceKeymapState(8)?.commands[0]?.name, "v2");
+  assert.equal(store.deviceKeymapState(8)?.status, "ready", "the old keymap stayed on screen during the refetch");
+});
+
+test("store: a backend that cannot fetch a keymap yet leaves no spinner behind", async () => {
+  let changes = 0;
+  const store = new RemoteCardStore(() => (changes += 1), { fireEvent: () => undefined });
+  store.setConfig({ entity: ENTITY });
+  const backend = createFakeBackend(SNAPSHOT);
+  backend.deviceKeymap = async () => null;
+  store.setBackend(backend);
+  await flush();
+  store.setMode("device");
+  store.setDevice(8);
+  const before = changes;
+  await flush();
+  assert.equal(store.deviceKeymapState(8), null, "no entry cached");
+  assert.ok(changes > before, "the store re-rendered after dropping the loading entry");
+});

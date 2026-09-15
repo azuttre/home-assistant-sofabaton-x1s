@@ -45,6 +45,32 @@ export function webRemoteConfigFromCardConfig(
   return out;
 }
 
+/**
+ * The server spells a hub id as its MAC in `mac_key` form: lower-case hex,
+ * separators stripped. Accept the MAC in any usual spelling; anything
+ * else (a host id before the first sync) passes through trimmed.
+ */
+export function normalizeHubId(value: unknown): string {
+  const raw = String(value ?? "").trim();
+  const compact = raw.replace(/[:\-\s.]/g, "");
+  return /^[0-9a-fA-F]{12}$/.test(compact) ? compact.toLowerCase() : raw;
+}
+
+/**
+ * The server's base URL (origin + root path, no trailing slash) derived
+ * from the page's own location: the page is served at
+ * `<base>/ui/remote/`, so everything before that is the base. A page
+ * served from somewhere else (the Playwright fixtures server) gets the
+ * origin alone.
+ */
+export function serverBaseFromPageUrl(href: string): string {
+  const url = new URL(href);
+  const marker = "/ui/remote/";
+  const at = url.pathname.indexOf(marker);
+  const root = at >= 0 ? url.pathname.slice(0, at) : "";
+  return `${url.origin}${root}`.replace(/\/+$/, "");
+}
+
 export interface WebRemoteParams {
   hub: string;
   lang: string | undefined;
@@ -60,7 +86,7 @@ export function parseWebRemoteParams(search: string, navigatorLanguage?: string)
   const zoom = Number(params.get("zoom"));
   const theme = params.get("theme");
   return {
-    hub: (params.get("hub") ?? "").trim(),
+    hub: normalizeHubId(params.get("hub")),
     lang: (params.get("lang") ?? navigatorLanguage ?? "").trim() || undefined,
     device: params.has("device") && Number.isFinite(device) ? device : null,
     zoom: params.has("zoom") && Number.isFinite(zoom) && zoom > 0 ? zoom : null,

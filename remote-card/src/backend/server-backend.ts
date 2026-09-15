@@ -3,15 +3,22 @@
 // entity attribute contract the HA remote entity publishes, so the store
 // and every pure derivation behind it run unchanged on the web remote.
 //
-// Data flow: one initial load (status, activities, devices, running
-// activity, then the running activity's buttons / macros / favorites),
-// then the `/events` stream keeps it current: `activity_changed` moves the
-// running activity and fetches that activity's pages on first sight,
-// `snapshot_changed` re-reads the catalog and drops the pages it names,
-// connection and status events re-read `/status`, `catalog_ready` and a
-// `dropped` notice reload everything. Per-entity pages (buttons, macros,
-// favorites, device keymaps) are fetched once and kept, like the HA
-// attribute caches; the store never invalidates them either.
+// Data flow: one initial load (status, catalog, running activity, then the
+// running activity's buttons / macros / favorites), then the `/events`
+// stream keeps it current: `activity_changed` moves the running activity
+// and fetches that activity's pages on first sight, `snapshot_changed`
+// re-reads the catalog, drops the pages it names and re-reads the device
+// pages the card has open, connection and status events re-read `/status`,
+// `catalog_ready`, a `dropped` notice and every socket (re)open reload
+// everything.
+//
+// Ordering rules (review of the R3 build): every reload request bumps
+// `loadEpoch`, and an in-flight load whose epoch is no longer current
+// discards its results and runs again, so an event that lands mid-load is
+// never lost. `activity_changed` bumps `runningEpoch`, so a `GET /activity`
+// answer issued before the event can never revert it. Status refreshes are
+// coalesced to one in flight plus one pending. A failed load or page fetch
+// is retried with backoff for as long as someone is subscribed.
 
 import type {
   DeviceKeymapResponse,
@@ -115,11 +122,14 @@ export interface WebSocketLike {
 export type WebSocketFactory = (url: string) => WebSocketLike;
 
 export interface ServerRemoteBackendOptions {
-  /** Origin of the server, "" for same-origin (the page's default). */
+  /**
+   * The server's base URL: origin plus any root path the server is mounted
+   * under, no trailing slash. "" means same origin at the root.
+   */
   baseUrl?: string;
   fetch?: typeof fetch;
   webSocket?: WebSocketFactory;
-  /** First reconnect delay; doubles up to 30 s. */
+  /** First reconnect / retry delay; doubles up to 30 s. */
   reconnectDelayMs?: number;
 }
 
@@ -127,6 +137,11 @@ interface ActivityPages {
   buttons: ServerButton[];
   macros: ServerMacro[];
   favorites: ServerFavorite[];
+}
+
+interface DevicePage {
+  buttons: ServerButton[];
+  commands: ServerCommand[];
 }
 
 const MAX_RECONNECT_DELAY_MS = 30000;
@@ -137,6 +152,15 @@ function toNumber(value: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+function errorText(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * The hub's long-press pair per button. The library already applies the
+ * pairing rule (a pair needs a device and a command; both null otherwise),
+ * so this only maps the non-null pairs into the attribute shape.
+ */
 function longPressPairs(
   buttons: ServerButton[],
 ): Record<string, { device_id: number; command_id: number }> {
@@ -144,7 +168,6 @@ function longPressPairs(
   for (const button of buttons) {
     const device = toNumber(button.long_press_device_id);
     const command = toNumber(button.long_press_command_id);
-    // remote.py's rule: a pair needs a (truthy) device and a command.
     if (device && command != null) {
       out[String(button.button_code)] = { device_id: device, command_id: command };
     }
@@ -158,7 +181,7 @@ export class ServerRemoteBackend implements RemoteBackend {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
   private readonly wsFactory: WebSocketFactory | null;
-  private readonly reconnectDelayMs: number;
+  private readonly retryBaseMs: number;
 
   private hubId = "";
   private listeners: Array<() => void> = [];
@@ -169,13 +192,26 @@ export class ServerRemoteBackend implements RemoteBackend {
   private devices: ServerDevice[] = [];
   private running: ServerRunningActivity | null = null;
   private activityPages: Record<string, ActivityPages> = {};
-  private devicePages: Record<string, { buttons: ServerButton[]; commands: ServerCommand[] }> = {};
+  private devicePages: Record<string, DevicePage> = {};
+  /** Bumped when a device page is re-read; the store refetches on a change. */
+  private devicePageVersions: Record<string, number> = {};
   private loaded = false;
   /** The catalog has been read at least once (a disabled hub answers 409 to reads). */
   private catalogLoaded = false;
-  private loadPromise: Promise<void> | null = null;
-  private pagePromises: Record<string, Promise<void>> = {};
   private _lastError: string | null = null;
+
+  // Load ordering
+  private loadEpoch = 0;
+  private loadPromise: Promise<void> | null = null;
+  private loadDirty = false;
+  private runningEpoch = 0;
+  private statusPromise: Promise<void> | null = null;
+  private statusDirty = false;
+  private pagePromises: Record<string, Promise<void>> = {};
+
+  // Retry of failed HTTP work (independent of the socket)
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private retryDelay: number;
 
   // Snapshot cache: rebuilt lazily, invalidated on every mutation
   private snapshotCache: RemoteSnapshot | undefined | null = null;
@@ -197,8 +233,9 @@ export class ServerRemoteBackend implements RemoteBackend {
       (typeof WebSocket === "function"
         ? (url) => new WebSocket(url) as unknown as WebSocketLike
         : null);
-    this.reconnectDelayMs = Math.max(100, options.reconnectDelayMs ?? 1000);
-    this.reconnectDelay = this.reconnectDelayMs;
+    this.retryBaseMs = Math.max(100, options.reconnectDelayMs ?? 1000);
+    this.reconnectDelay = this.retryBaseMs;
+    this.retryDelay = this.retryBaseMs;
   }
 
   // ---------- RemoteBackend ----------
@@ -255,20 +292,22 @@ export class ServerRemoteBackend implements RemoteBackend {
     }
   }
 
+  /**
+   * `null` ("cannot fetch yet, ask again") until the catalog has been read
+   * from a healthy hub; a device missing from a loaded catalog is a real
+   * miss. The page is fetched once and re-read when `snapshot_changed`
+   * names the device; the store follows through `keymap_versions`.
+   */
   async deviceKeymap(deviceId: number): Promise<DeviceKeymapResponse | null> {
     if (!this.hubId) return null;
     await this.ensureLoaded();
+    if (!this.hubStatus || !this.loaded || !this.catalogLoaded) return null;
     const device = this.devices.find((entry) => entry.device_id === deviceId);
     if (!device) return { keymap: null, reason: "cache_miss" };
     const key = String(deviceId);
     if (!this.devicePages[key]) {
-      const [buttons, commands] = await Promise.all([
-        this.get<ServerButton[]>(`/entities/${deviceId}/buttons`),
-        this.get<ServerCommand[]>(`/devices/${deviceId}/commands`),
-      ]);
-      this.devicePages[key] = { buttons, commands };
-      this.invalidate();
-      this.notify();
+      await this.readDevicePage(deviceId);
+      if (!this.devicePages[key]) return null;
     }
     const page = this.devicePages[key];
     return {
@@ -335,6 +374,7 @@ export class ServerRemoteBackend implements RemoteBackend {
 
   stop(): void {
     this.closeSocket();
+    this.cancelRetry();
   }
 
   private resetState(): void {
@@ -344,11 +384,17 @@ export class ServerRemoteBackend implements RemoteBackend {
     this.running = null;
     this.activityPages = {};
     this.devicePages = {};
+    this.devicePageVersions = {};
     this.loaded = false;
     this.catalogLoaded = false;
-    this.loadPromise = null;
-    this.pagePromises = {};
     this._lastError = null;
+    // Everything in flight belongs to the old target.
+    this.loadEpoch += 1;
+    this.runningEpoch += 1;
+    this.loadDirty = false;
+    this.statusDirty = false;
+    this.pagePromises = {};
+    this.cancelRetry();
     this.invalidate();
   }
 
@@ -396,28 +442,48 @@ export class ServerRemoteBackend implements RemoteBackend {
 
   // ---------- loading ----------
 
+  /** Load once; a load already in flight is shared. */
   private ensureLoaded(): Promise<void> {
     if (this.loaded) return Promise.resolve();
-    if (!this.loadPromise) {
-      this.loadPromise = this.loadAll().finally(() => {
-        this.loadPromise = null;
-      });
+    return this.loadPromise ?? this.reload();
+  }
+
+  /**
+   * Request a full reload. A load in flight is superseded: its results are
+   * discarded when they arrive and the load runs again, so a request that
+   * lands mid-load is never lost.
+   */
+  private reload(): Promise<void> {
+    this.loadEpoch += 1;
+    if (this.loadPromise) {
+      this.loadDirty = true;
+      return this.loadPromise;
     }
+    this.loadPromise = (async () => {
+      do {
+        this.loadDirty = false;
+        await this.loadAll(this.loadEpoch);
+      } while (this.loadDirty);
+    })().finally(() => {
+      this.loadPromise = null;
+    });
     return this.loadPromise;
   }
 
   /**
-   * Full reload: status first, then (only while the hub is readable) the
+   * Full load: status first, then (only while the hub is readable) the
    * catalog, the running activity, and the running activity's pages. A
    * disabled or app-held hub keeps whatever catalog was read before and
    * shows as unavailable, not as unreachable.
    */
-  private async loadAll(): Promise<void> {
+  private async loadAll(epoch: number): Promise<void> {
     if (!this.hubId) return;
     const hubId = this.hubId;
+    const runningEpoch = this.runningEpoch;
+    const current = () => epoch === this.loadEpoch && hubId === this.hubId;
     try {
       const status = await this.get<ServerHubStatusView>(`/status`);
-      if (hubId !== this.hubId) return; // target moved during the load
+      if (!current()) return; // superseded or target moved
       this.hubStatus = status;
       this._lastError = null;
       if (ServerRemoteBackend.readable(status)) {
@@ -426,45 +492,73 @@ export class ServerRemoteBackend implements RemoteBackend {
           this.get<ServerDevice[]>(`/devices`),
           this.get<ServerRunningActivity | null>(`/activity`),
         ]);
-        if (hubId !== this.hubId) return;
+        if (!current()) return;
         this.activities = activities;
         this.devices = devices;
-        this.running = running;
+        // A stream event in the meantime is newer than this answer.
+        if (runningEpoch === this.runningEpoch) this.running = running;
         this.catalogLoaded = true;
       } else {
         this.running = null;
       }
       this.loaded = true;
+      this.cancelRetry();
     } catch (err) {
-      if (hubId !== this.hubId) return;
-      this._lastError = err instanceof Error ? err.message : String(err);
+      if (!current()) return;
+      this._lastError = errorText(err);
       this.hubStatus = null;
       this.loaded = false;
+      this.scheduleRetry();
     }
     this.invalidate();
     this.notify();
-    if (this.running) await this.ensureActivityPages(this.running.activity_id);
+    if (current() && this.running) await this.ensureActivityPages(this.running.activity_id);
   }
 
-  private async refreshStatus(): Promise<void> {
+  /** Re-read /status (and the running activity); one in flight, one pending. */
+  private refreshStatus(): Promise<void> {
+    if (this.statusPromise) {
+      this.statusDirty = true;
+      return this.statusPromise;
+    }
+    this.statusPromise = (async () => {
+      do {
+        this.statusDirty = false;
+        await this.readStatus();
+      } while (this.statusDirty);
+    })().finally(() => {
+      this.statusPromise = null;
+    });
+    return this.statusPromise;
+  }
+
+  private async readStatus(): Promise<void> {
+    const hubId = this.hubId;
+    const epoch = this.loadEpoch;
+    const runningEpoch = this.runningEpoch;
+    const current = () => epoch === this.loadEpoch && hubId === this.hubId;
     try {
       const status = await this.get<ServerHubStatusView>(`/status`);
+      if (!current()) return;
       this.hubStatus = status;
       this._lastError = null;
       if (ServerRemoteBackend.readable(status)) {
         if (!this.catalogLoaded) {
           // Became readable with nothing loaded (opened while disabled).
-          this.loaded = false;
-          void this.ensureLoaded();
+          void this.reload();
           return;
         }
-        this.running = await this.get<ServerRunningActivity | null>(`/activity`);
+        const running = await this.get<ServerRunningActivity | null>(`/activity`);
+        if (!current()) return;
+        if (runningEpoch === this.runningEpoch) this.running = running;
       } else {
         this.running = null;
       }
     } catch (err) {
-      this._lastError = err instanceof Error ? err.message : String(err);
+      if (!current()) return;
+      this._lastError = errorText(err);
       this.hubStatus = null;
+      this.scheduleRetry();
     }
     this.invalidate();
     this.notify();
@@ -483,29 +577,78 @@ export class ServerRemoteBackend implements RemoteBackend {
 
   private async loadActivityPages(activityId: number): Promise<void> {
     const hubId = this.hubId;
+    const epoch = this.loadEpoch;
+    const current = () => epoch === this.loadEpoch && hubId === this.hubId;
     try {
       const [buttons, macros, favorites] = await Promise.all([
         this.get<ServerButton[]>(`/entities/${activityId}/buttons`),
         this.get<ServerMacro[]>(`/activities/${activityId}/macros`),
         this.get<ServerFavorite[]>(`/activities/${activityId}/favorites`),
       ]);
-      if (hubId !== this.hubId) return;
+      if (!current()) return;
       this.activityPages[String(activityId)] = { buttons, macros, favorites };
     } catch (err) {
-      if (hubId !== this.hubId) return;
-      this._lastError = err instanceof Error ? err.message : String(err);
+      if (!current()) return;
+      // Nothing to show for this activity until the read succeeds: retry.
+      this._lastError = errorText(err);
+      this.scheduleRetry();
       return;
     }
     this.invalidate();
     this.notify();
   }
 
+  /** Read (or re-read) one device page; bumps its version on success. */
+  private async readDevicePage(deviceId: number): Promise<void> {
+    const key = String(deviceId);
+    const hubId = this.hubId;
+    const epoch = this.loadEpoch;
+    try {
+      const [buttons, commands] = await Promise.all([
+        this.get<ServerButton[]>(`/entities/${deviceId}/buttons`),
+        this.get<ServerCommand[]>(`/devices/${deviceId}/commands`),
+      ]);
+      if (epoch !== this.loadEpoch || hubId !== this.hubId) return;
+      this.devicePages[key] = { buttons, commands };
+      this.devicePageVersions[key] = (this.devicePageVersions[key] ?? 0) + 1;
+    } catch (err) {
+      if (epoch !== this.loadEpoch || hubId !== this.hubId) return;
+      this._lastError = errorText(err);
+      return;
+    }
+    this.invalidate();
+    this.notify();
+  }
+
+  // ---------- retry of failed HTTP work ----------
+
+  private scheduleRetry(): void {
+    if (!this.listeners.length || this.retryTimer) return;
+    const delay = this.retryDelay;
+    this.retryDelay = Math.min(this.retryDelay * 2, MAX_RECONNECT_DELAY_MS);
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      if (!this.listeners.length || !this.hubId) return;
+      if (!this.loaded || !this.hubStatus) {
+        void this.reload();
+      } else if (this.running && !this.activityPages[String(this.running.activity_id)]) {
+        void this.ensureActivityPages(this.running.activity_id);
+      }
+    }, delay);
+  }
+
+  private cancelRetry(): void {
+    if (this.retryTimer) clearTimeout(this.retryTimer);
+    this.retryTimer = null;
+    this.retryDelay = this.retryBaseMs;
+  }
+
   // ---------- stream ----------
 
   private wsUrl(): string {
-    let origin = this.baseUrl;
-    if (!origin && typeof location !== "undefined") origin = location.origin;
-    const ws = origin.replace(/^http/, "ws");
+    let base = this.baseUrl;
+    if (!base && typeof location !== "undefined") base = location.origin;
+    const ws = base.replace(/^http/, "ws");
     return `${ws}${SERVER_API_PREFIX}/events?hub_id=${encodeURIComponent(this.hubId)}`;
   }
 
@@ -517,19 +660,17 @@ export class ServerRemoteBackend implements RemoteBackend {
     try {
       socket = this.wsFactory(this.wsUrl());
     } catch (err) {
-      this._lastError = err instanceof Error ? err.message : String(err);
+      this._lastError = errorText(err);
       this.scheduleReconnect();
       return;
     }
     this.socket = socket;
     socket.onopen = () => {
       if (generation !== this.socketGeneration) return;
-      this.reconnectDelay = this.reconnectDelayMs;
-      // Anything that happened while we were away is unknown: reload.
-      if (this.loaded) {
-        this.loaded = false;
-        void this.ensureLoaded();
-      }
+      this.reconnectDelay = this.retryBaseMs;
+      // Anything that happened while we were away is unknown, and a load
+      // that failed while we were away must run again: always reload.
+      void this.reload();
     };
     socket.onmessage = (event) => {
       if (generation !== this.socketGeneration) return;
@@ -584,18 +725,16 @@ export class ServerRemoteBackend implements RemoteBackend {
       case "hello":
         return;
       case "dropped":
-        this.loaded = false;
-        void this.ensureLoaded();
+        void this.reload();
         return;
       case "server_event":
         if (message.kind === "hub_rekeyed" && message.hub_id && message.hub_id !== this.hubId) {
           // The stream is narrowed to our hub and follows it to its MAC,
           // so a re-key that arrives here is ours: the page opened the hub
           // by host before its first sync. Move with it; the old id is
-          // gone from the API.
+          // gone from the API, and anything in flight under it is stale.
           this.hubId = String(message.hub_id);
-          this.loaded = false;
-          void this.ensureLoaded();
+          void this.reload();
           return;
         }
         if (message.hub_id !== this.hubId) return;
@@ -625,12 +764,8 @@ export class ServerRemoteBackend implements RemoteBackend {
           id == null
             ? null
             : { activity_id: id, name: (payload.name as string | null) ?? null };
-        if (this.hubStatus?.status) {
-          this.hubStatus = {
-            ...this.hubStatus,
-            status: { ...this.hubStatus.status, running_activity: this.running },
-          };
-        }
+        // Any /activity answer still in flight is older than this.
+        this.runningEpoch += 1;
         this.invalidate();
         this.notify();
         if (id != null) void this.ensureActivityPages(id);
@@ -642,28 +777,29 @@ export class ServerRemoteBackend implements RemoteBackend {
         void this.refreshStatus();
         return;
       case "catalog_ready":
-        if (payload.ready) {
-          this.loaded = false;
-          void this.ensureLoaded();
-        } else {
-          void this.refreshStatus();
-        }
+        if (payload.ready) void this.reload();
+        else void this.refreshStatus();
         return;
       case "snapshot_changed": {
         const deviceIds = Array.isArray(payload.device_ids) ? payload.device_ids : [];
         const activityIds = Array.isArray(payload.activity_ids) ? payload.activity_ids : [];
-        if (!deviceIds.length && !activityIds.length) {
-          this.activityPages = {};
-          this.devicePages = {};
-        } else {
-          for (const id of deviceIds) delete this.devicePages[String(id)];
-          for (const id of activityIds) delete this.activityPages[String(id)];
+        const everything = !deviceIds.length && !activityIds.length;
+        // Device pages the card has open are re-read (the store follows
+        // the version bump); the rest is dropped and read on demand.
+        const heldDevices = everything
+          ? Object.keys(this.devicePages)
+          : deviceIds.map(String).filter((key) => this.devicePages[key]);
+        if (everything || deviceIds.length) {
           // A device edit changes the bindings on every page that maps to
           // it; the per-activity pages are cheap, drop them all.
-          if (deviceIds.length) this.activityPages = {};
+          this.activityPages = {};
+        } else {
+          for (const id of activityIds) delete this.activityPages[String(id)];
         }
-        this.loaded = false;
-        void this.ensureLoaded();
+        for (const key of heldDevices) delete this.devicePages[key];
+        void this.reload().then(() =>
+          Promise.all(heldDevices.map((key) => this.readDevicePage(Number(key)))),
+        );
         return;
       }
       default:
@@ -730,6 +866,7 @@ export class ServerRemoteBackend implements RemoteBackend {
       macro_keys: macroKeys,
       favorite_keys: favoriteKeys,
       long_press_keys: longPressKeys,
+      keymap_versions: { ...this.devicePageVersions },
       hub_id: this.hubId,
     };
 

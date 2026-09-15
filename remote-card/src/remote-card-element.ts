@@ -555,14 +555,16 @@ export class SofabatonRemoteCard extends LitElement {
 
   private _applyLocalTheme(themeName: string | undefined): boolean {
     const root = this._cardRef.value;
+    // hass is null on the web remote: no theme registry there, but the
+    // background override below is plain config and must still apply.
     const hass = this._store.hass as
       | (HassLike & { themes?: { themes?: Record<string, Record<string, unknown>>; darkMode?: boolean } })
       | null;
-    if (!root || !hass) return false;
+    if (!root) return false;
 
     const bgOverrideCss = rgbToCss(this._store.config?.background_override);
-    const themeDef = themeName ? hass.themes?.themes?.[themeName] : null;
-    const themeMode = hass.themes?.darkMode ? "dark" : "light";
+    const themeDef = themeName ? hass?.themes?.themes?.[themeName] : null;
+    const themeMode = hass?.themes?.darkMode ? "dark" : "light";
     const appliedKey = `${themeName || ""}||${bgOverrideCss}||${themeMode}||${JSON.stringify(themeDef ?? null)}`;
     if (this._appliedThemeKey === appliedKey) return false;
 
@@ -583,7 +585,7 @@ export class SofabatonRemoteCard extends LitElement {
         // Support themes with modes (light/dark)
         const defWithModes = def as { modes?: Record<string, Record<string, unknown>> };
         if (defWithModes.modes && typeof defWithModes.modes === "object") {
-          const mode = hass.themes?.darkMode ? "dark" : "light";
+          const mode = hass?.themes?.darkMode ? "dark" : "light";
           vars = { ...def, ...(defWithModes.modes?.[mode] || {}) };
           delete (vars as { modes?: unknown }).modes;
         }

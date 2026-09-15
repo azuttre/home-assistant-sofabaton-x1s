@@ -6,7 +6,9 @@ import test from "node:test";
 
 import {
   cardConfigForWebRemote,
+  normalizeHubId,
   parseWebRemoteParams,
+  serverBaseFromPageUrl,
   webRemoteConfigFromCardConfig,
 } from "../../remote-card/src/remote-web-config";
 
@@ -71,4 +73,25 @@ test("parseWebRemoteParams reads hub, lang, device, zoom and theme", () => {
   assert.equal(junk.zoom, null);
   assert.equal(junk.theme, null);
   assert.equal(junk.lang, undefined);
+});
+
+test("normalizeHubId accepts a MAC in any spelling and passes host ids through", () => {
+  for (const spelling of ["e26a44861b45", "E26A44861B45", "E2:6A:44:86:1B:45", "e2-6a-44-86-1b-45", " e2.6a.44.86.1b.45 "]) {
+    assert.equal(normalizeHubId(spelling), "e26a44861b45", spelling);
+  }
+  assert.equal(normalizeHubId("192.168.1.50"), "192.168.1.50");
+  assert.equal(normalizeHubId(" hub.local "), "hub.local");
+  assert.equal(normalizeHubId(null), "");
+  assert.equal(parseWebRemoteParams("?hub=E2%3A6A%3A44%3A86%3A1B%3A45").hub, "e26a44861b45");
+});
+
+test("serverBaseFromPageUrl keeps the server's root path", () => {
+  assert.equal(serverBaseFromPageUrl("http://nas:8480/ui/remote/?hub=x"), "http://nas:8480");
+  assert.equal(serverBaseFromPageUrl("https://home.example/sofabaton/ui/remote/"), "https://home.example/sofabaton");
+  assert.equal(serverBaseFromPageUrl("https://home.example/a/b/ui/remote/?theme=dark"), "https://home.example/a/b");
+  assert.equal(
+    serverBaseFromPageUrl("http://127.0.0.1:4173/sofabaton-x-server/src/sofabaton_server/ui/index.html?hub=x"),
+    "http://127.0.0.1:4173",
+    "a page served from elsewhere falls back to the origin",
+  );
 });

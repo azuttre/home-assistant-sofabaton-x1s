@@ -118,6 +118,8 @@ export interface DeviceKeymapEntry {
   commands: Array<{ command_id: number; name: string }>;
   /** Power-key capability gate from the backend (fail-closed). */
   powerConfigured?: boolean;
+  /** The backend's `keymap_versions` entry this was fetched under (0 when absent). */
+  version?: number;
 }
 
 /** Device-scope power macro key ids (POWER_ON / POWER_OFF). */
@@ -219,6 +221,7 @@ export class RemoteCardStore {
   private _mode: RemoteCardMode = "activity";
   private _deviceId: number | null = null;
   private deviceKeymaps: Record<string, DeviceKeymapEntry> = {};
+  private readonly deviceKeymapFetching = new Set<string>();
   private initialViewApplied = false;
   commandFilter = "";
 
@@ -384,8 +387,9 @@ export class RemoteCardStore {
       this._mode,
       String(this._deviceId ?? ""),
       keymapEntry
-        ? `${keymapEntry.status}:${keymapEntry.buttons.length}:${keymapEntry.commands.length}`
+        ? `${keymapEntry.status}:${keymapEntry.version ?? 0}:${keymapEntry.buttons.length}:${keymapEntry.commands.length}`
         : "",
+      stableJsonSignature(attrs?.keymap_versions),
     ].join("|");
   }
 
@@ -629,19 +633,47 @@ export class RemoteCardStore {
    * fetch per device per card lifetime — the remote card never invalidates
    * cache (control panel owns cache management).
    */
+  /** The backend's version for a device's keymap (0 when it publishes none). */
+  private keymapVersion(deviceId: number): number {
+    const versions = (this.remoteState()?.attributes as Record<string, unknown> | undefined)
+      ?.keymap_versions as Record<string, number> | undefined;
+    return Number(versions?.[String(deviceId)] ?? 0) || 0;
+  }
+
+  /** True when a device's keymap must be (re)fetched: absent, or behind the backend's version. */
+  private keymapStale(deviceId: number): boolean {
+    const entry = this.deviceKeymaps[String(deviceId)];
+    if (!entry) return true;
+    if (entry.status === "loading") return false;
+    return (entry.version ?? 0) !== this.keymapVersion(deviceId);
+  }
+
   async ensureDeviceKeymap(deviceId: number): Promise<void> {
     const key = String(deviceId);
-    if (this.deviceKeymaps[key]) return;
+    if (!this.keymapStale(deviceId)) return;
     const backend = this._backend;
     if (!backend) return;
+    if (this.deviceKeymapFetching.has(key)) return;
 
-    this.deviceKeymaps[key] = { status: "loading", buttons: [], commands: [] };
+    const version = this.keymapVersion(deviceId);
+    const previous = this.deviceKeymaps[key];
+    // A first fetch shows the spinner; a refetch keeps the old keymap on
+    // screen until the new one lands.
+    if (!previous) {
+      this.deviceKeymaps[key] = { status: "loading", buttons: [], commands: [], version };
+    }
+    this.deviceKeymapFetching.add(key);
     try {
       const response = await backend.deviceKeymap(deviceId);
       if (response === null) {
-        // The backend cannot fetch yet (no entry id published): retry on
-        // the next change instead of caching a miss.
-        delete this.deviceKeymaps[key];
+        // The backend cannot fetch yet (HA: no entry id published; the
+        // server: catalog not read): retry on the next change instead of
+        // caching a miss, and never leave a spinner behind.
+        if (!previous) {
+          delete this.deviceKeymaps[key];
+          this.invalidateFingerprint();
+          this.onChange();
+        }
         return;
       }
       const keymap = response?.keymap;
@@ -650,6 +682,7 @@ export class RemoteCardStore {
           status: "cache_miss",
           buttons: [],
           commands: [],
+          version,
         };
       } else {
         // REQ_BUTTONS is authoritative for the enabled set; bindings add any
@@ -672,10 +705,13 @@ export class RemoteCardStore {
             }))
             .filter((command) => Number.isFinite(command.command_id) && command.name),
           powerConfigured: keymap.power_configured === true,
+          version,
         };
       }
     } catch (_err) {
-      this.deviceKeymaps[key] = { status: "error", buttons: [], commands: [] };
+      this.deviceKeymaps[key] = { status: "error", buttons: [], commands: [], version };
+    } finally {
+      this.deviceKeymapFetching.delete(key);
     }
     this.invalidateFingerprint();
     this.onChange();
@@ -1333,9 +1369,9 @@ export class RemoteCardStore {
         ? layoutConfigForDevice(this._config, deviceId)
         : layoutConfigForActivity(this._config, activityId);
 
-    // Device keymap: single fetch per device per card lifetime (cache-first
-    // backend projection; the card never invalidates).
-    if (mode === "device" && deviceId != null && !this.deviceKeymapState(deviceId)) {
+    // Device keymap: one fetch per device, refetched only when the backend
+    // bumps the device's keymap version (HA never does).
+    if (mode === "device" && deviceId != null && this.keymapStale(deviceId)) {
       void this.ensureDeviceKeymap(deviceId);
     }
     const keymapEntry = mode === "device" ? this.deviceKeymapState(deviceId) : null;

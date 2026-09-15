@@ -11,7 +11,13 @@
 import { ServerRemoteBackend, SERVER_API_PREFIX } from "./backend/server-backend";
 import { SofabatonRemoteCard } from "./remote-card-element";
 import { CARD_VERSION, TYPE, logPillsOnce } from "./remote-card-shared";
-import { cardConfigForWebRemote, parseWebRemoteParams, type WebRemoteParams } from "./remote-web-config";
+import {
+  cardConfigForWebRemote,
+  normalizeHubId,
+  parseWebRemoteParams,
+  serverBaseFromPageUrl,
+  type WebRemoteParams,
+} from "./remote-web-config";
 import { installRemoteWebShims } from "./shims/index";
 import "./remote-card-translations";
 
@@ -104,26 +110,33 @@ export class SofabatonRemoteWeb extends HTMLElement {
     const params = parseWebRemoteParams(location.search, navigator.language);
     this._params = params;
     if (params.theme) document.documentElement.dataset.theme = params.theme;
+    // The server may be mounted under a root path; the page's own URL says where.
+    const serverBase = serverBaseFromPageUrl(location.href);
+    const api = `${serverBase}${SERVER_API_PREFIX}`;
 
     let hubs: HubSummary[] = [];
     let hubsError: string | null = null;
     try {
-      const response = await fetch(`${SERVER_API_PREFIX}/hubs`, { headers: { accept: "application/json" } });
+      const response = await fetch(`${api}/hubs`, { headers: { accept: "application/json" } });
       if (!response.ok) throw new Error(`GET /hubs -> ${response.status}`);
       hubs = (await response.json()) as HubSummary[];
     } catch (err) {
       hubsError = err instanceof Error ? err.message : String(err);
     }
 
-    const known = hubs.find((hub) => hub.hub_id === params.hub);
+    // Match the id the way the server spells it; use its spelling from here on.
+    const known = params.hub
+      ? hubs.find((hub) => normalizeHubId(hub.hub_id) === params.hub)
+      : undefined;
     if (!params.hub || !known) {
       this._renderInstructions(params.hub, hubs, hubsError);
       return;
     }
+    const hubId = known.hub_id;
 
     let storedDocument: Record<string, unknown> | null = null;
     try {
-      const response = await fetch(`${SERVER_API_PREFIX}/hubs/${encodeURIComponent(params.hub)}/ui/remote-card`, {
+      const response = await fetch(`${api}/hubs/${encodeURIComponent(hubId)}/ui/remote-card`, {
         headers: { accept: "application/json" },
       });
       if (response.ok) storedDocument = ((await response.json()) as UiDocumentResponse).document ?? null;
@@ -131,12 +144,12 @@ export class SofabatonRemoteWeb extends HTMLElement {
       storedDocument = null;
     }
 
-    const backend = new ServerRemoteBackend({ baseUrl: "" });
-    backend.setTarget(params.hub);
+    const backend = new ServerRemoteBackend({ baseUrl: serverBase });
+    backend.setTarget(hubId);
     this._backend = backend;
 
     const card = document_createCard();
-    card.setConfig(cardConfigForWebRemote(params.hub, storedDocument, { openDevice: params.device }));
+    card.setConfig(cardConfigForWebRemote(hubId, storedDocument, { openDevice: params.device }));
     card.setLanguage(params.lang);
     card.setBackend(backend);
     this._card = card;
@@ -187,7 +200,7 @@ export class SofabatonRemoteWeb extends HTMLElement {
         : `<p>This server has no hubs registered yet. Add one with <code>POST ${SERVER_API_PREFIX}/hubs</code> or from the <a href="/harness">console</a>.</p>`;
     const why = requested
       ? `<p>No hub with id <code>${escapeHtml(requested)}</code> is registered on this server.</p>`
-      : `<p>Open this page with <code>?hub=&lt;hub id&gt;</code>. The id is the hub's MAC as the server lists it.</p>`;
+      : `<p>Open this page with <code>?hub=&lt;hub id&gt;</code>. The id is the hub's MAC (any spelling), or the host it was registered by before its first sync.</p>`;
     this._shadow.innerHTML = `<style>${HOST_CSS}</style>
       <div class="notice">
         <h1>Sofabaton web remote</h1>
