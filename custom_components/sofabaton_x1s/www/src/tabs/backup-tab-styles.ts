@@ -1214,9 +1214,15 @@ export const backupTabStyles = css`
       --ha-input-padding-top: 0;
       --ha-input-padding-bottom: 0;
     }
-    .dialog-footer { border-top: 1px solid var(--divider-color); justify-content: space-between; }
-    .dialog-footer-actions { display: flex; gap: 8px; }
-    .dialog-footer-note { min-height: 18px; font-size: 13px; color: var(--error-color, #db4437); }
+    /* The footer wraps: when the note's base width (docs link) plus the
+       action buttons no longer fit on one row -- cards between the 360px
+       compact breakpoint and roughly 420px -- the buttons drop to their
+       own right-aligned row instead of overflowing the dialog. The note
+       flexes from that base, so long error text wraps inside it on wide
+       cards rather than pushing the buttons down. */
+    .dialog-footer { border-top: 1px solid var(--divider-color); justify-content: space-between; flex-wrap: wrap; }
+    .dialog-footer-actions { display: flex; gap: 8px; margin-left: auto; }
+    .dialog-footer-note { flex: 1 1 140px; min-height: 18px; min-width: 0; font-size: 13px; color: var(--error-color, #db4437); }
 
     .status-box {
       display: flex;

@@ -1739,7 +1739,8 @@ var TOOLS_CARD_STRINGS_EN = {
   },
   docs: {
     wifiCommandsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/wifi_commands.md",
-    backupUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/backup.md"
+    backupUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/backup.md",
+    commandPayloadsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/command_payloads.md"
   },
   tabs: {
     cache: "Hub",
@@ -1783,7 +1784,7 @@ var TOOLS_CARD_STRINGS_EN = {
     backupUnavailable: "Backup unavailable",
     automationBlockedByProxy: "Automation cannot be used while the Sofabaton app is connected to the hub through the proxy.",
     backupBlockedByProxy: "Backup cannot be used while the Sofabaton app is connected to the hub through the proxy.",
-    blockedByFirmware: (installed, required) => `This hub is running firmware version ${installed}. Version ${required} is the minimum supported version for Control Panel features that change the hub configuration. Update the hub over Bluetooth using the Sofabaton app. This feature becomes available automatically after the hub reports the updated firmware version.`
+    blockedByFirmware: (installed, required) => `This hub is running firmware version ${installed}. Version ${required} is the minimum supported version for Control Panel features that change the hub configuration. Update the hub using the Sofabaton app. This feature becomes available automatically after the hub reports the updated firmware version.`
   },
   buttonNames: {
     151: "C",
@@ -2053,7 +2054,7 @@ var TOOLS_CARD_STRINGS_EN = {
     appConnectedTitle: "The Sofabaton app is connected",
     appConnectedBody: "Close the Sofabaton app to edit the hub configuration.",
     firmwareUnsupportedTitle: "Hub firmware update required",
-    firmwareUnsupportedBody: (installed, required) => `This hub is running firmware version ${installed}. Version ${required} or newer is required to edit the hub configuration safely. Editing is disabled to protect your configuration. Update the hub over Bluetooth using the Sofabaton app. Editing becomes available automatically after the hub reports the updated firmware version.`,
+    firmwareUnsupportedBody: (installed, required) => `This hub is running firmware version ${installed}. Version ${required} or newer is required to edit the hub configuration safely. Editing is disabled to protect your configuration. Update the hub using the Sofabaton app. Editing becomes available automatically after the hub reports the updated firmware version.`,
     operationRunningTitle: "Another operation is running",
     operationRunningBody: "Wait for the current backup, restore, or sync to finish, then try again.",
     // Capture flow (§4.2).
@@ -2436,6 +2437,7 @@ var TOOLS_CARD_STRINGS_EN = {
     verifyPayloadLive: "Verify a changed payload before saving: Test plays the current bytes on the hub without saving. Save folds the payload into the device's next Sync.",
     verifyPayloadBackup: "Verify a changed payload before trusting it: Test plays the bytes on the hub without saving. Save here only once the payload does what you expect.",
     test: "Test",
+    payloadDocsLink: "Payload documentation",
     sendingToHub: "Sending to the hub\u2026",
     sentToHub: "Sent to the hub for one-shot playback.",
     testFailed: "Test failed.",
@@ -2564,7 +2566,7 @@ var TOOLS_CARD_STRINGS_EN = {
     firmwareUpdateRequired: "Firmware update required",
     firmwareUpdateRecommended: "Firmware update recommended",
     firmwareUpdateTooltip: (recommended, required, unsupported) => {
-      const update = "Update the hub over Bluetooth using the Sofabaton app.";
+      const update = "Update the hub using the Sofabaton app.";
       if (unsupported) {
         const recommendation = String(recommended) === String(required) ? "" : ` Firmware version ${recommended} or newer is recommended because it contains fixes for known issues.`;
         return `Firmware version ${required} or newer is required for Control Panel configuration changes.${recommendation} ${update}`;
@@ -7268,9 +7270,15 @@ var backupTabStyles = i`
       --ha-input-padding-top: 0;
       --ha-input-padding-bottom: 0;
     }
-    .dialog-footer { border-top: 1px solid var(--divider-color); justify-content: space-between; }
-    .dialog-footer-actions { display: flex; gap: 8px; }
-    .dialog-footer-note { min-height: 18px; font-size: 13px; color: var(--error-color, #db4437); }
+    /* The footer wraps: when the note's base width (docs link) plus the
+       action buttons no longer fit on one row -- cards between the 360px
+       compact breakpoint and roughly 420px -- the buttons drop to their
+       own right-aligned row instead of overflowing the dialog. The note
+       flexes from that base, so long error text wraps inside it on wide
+       cards rather than pushing the buttons down. */
+    .dialog-footer { border-top: 1px solid var(--divider-color); justify-content: space-between; flex-wrap: wrap; }
+    .dialog-footer-actions { display: flex; gap: 8px; margin-left: auto; }
+    .dialog-footer-note { flex: 1 1 140px; min-height: 18px; min-width: 0; font-size: 13px; color: var(--error-color, #db4437); }
 
     .status-box {
       display: flex;
@@ -12070,7 +12078,15 @@ var SofabatonEditDetailView = class extends i4 {
                 ` : A}
           </div>
           <div class="dialog-footer">
-            <div class="dialog-footer-note">${this._payloadLearnView === "off" ? this._payloadDialogError : ""}</div>
+            <div class="dialog-footer-note payload-dialog-note">
+              <a
+                class="payload-doc-link"
+                href=${TOOLS_CARD_STRINGS.docs.commandPayloadsUrl}
+                target="_blank"
+                rel="noreferrer noopener"
+              >${TOOLS_CARD_STRINGS.backup.payloadDocsLink}</a>
+              ${this._payloadLearnView === "off" && this._payloadDialogError ? b2`<span class="payload-dialog-error">${this._payloadDialogError}</span>` : A}
+            </div>
             <div class="dialog-footer-actions">
               ${this._payloadLearnView !== "off" ? this._renderLearnFooterActions() : A}
               ${this._payloadLearnView === "off" && this.mode === "live" && this._liveDeviceIsIr() && this.testCommandPayload ? b2`
@@ -14660,6 +14676,18 @@ SofabatonEditDetailView.styles = [activityEditorStyles, backupTabStyles, addButt
       background: color-mix(in srgb, #2e7d32 6%, var(--ha-card-background, var(--card-background-color)));
     }
     .payload-test-btn { display: inline-flex; align-items: center; gap: 6px; margin-right: auto; }
+    /* Payload dialog footer: docs link bottom-left on the Cancel/Save row,
+       styled like the control panel's bottom-dock documentation links. */
+    .payload-doc-link {
+      color: var(--sb-accent-text, var(--primary-color));
+      text-decoration: underline;
+      text-decoration-color: var(--primary-color);
+      font-weight: 400;
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    .payload-doc-link:hover { color: var(--primary-text-color); text-decoration: underline; }
+    .payload-dialog-note { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; }
     .payload-test-btn ha-icon { --mdc-icon-size: 16px; }
     /* Device-class indicator in the payload dialog header. */
     .dialog-title-group { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }

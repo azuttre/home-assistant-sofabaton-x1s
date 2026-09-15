@@ -36,7 +36,8 @@ var TOOLS_CARD_STRINGS_ES = {
   },
   docs: {
     wifiCommandsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/wifi_commands.md",
-    backupUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/backup.md"
+    backupUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/backup.md",
+    commandPayloadsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/command_payloads.md"
   },
   tabs: { cache: "Hub", wifiCommands: "Automatizaci\xF3n", backup: "Backup", settings: "Ajustes", logs: "Registros" },
   tabDocs: { wifi_commands: "Documentaci\xF3n de automatizaci\xF3n", backup: "Documentaci\xF3n de copias de seguridad" },
@@ -68,7 +69,7 @@ var TOOLS_CARD_STRINGS_ES = {
     backupUnavailable: "Copia de seguridad no disponible",
     automationBlockedByProxy: "La automatizaci\xF3n no se puede usar mientras la aplicaci\xF3n Sofabaton est\xE1 conectada al hub mediante el proxy.",
     backupBlockedByProxy: "La copia de seguridad no se puede usar mientras la aplicaci\xF3n Sofabaton est\xE1 conectada al hub mediante el proxy.",
-    blockedByFirmware: (installed, required) => `Este hub tiene instalada la versi\xF3n de firmware ${installed}. La versi\xF3n ${required} es la versi\xF3n m\xEDnima compatible con las funciones del Panel de control que modifican la configuraci\xF3n del hub. Actualiza el hub por Bluetooth con la aplicaci\xF3n Sofabaton. Esta funci\xF3n volver\xE1 a estar disponible autom\xE1ticamente cuando el hub comunique la versi\xF3n de firmware actualizada.`
+    blockedByFirmware: (installed, required) => `Este hub tiene instalada la versi\xF3n de firmware ${installed}. La versi\xF3n ${required} es la versi\xF3n m\xEDnima compatible con las funciones del Panel de control que modifican la configuraci\xF3n del hub. Actualiza el hub con la aplicaci\xF3n Sofabaton. Esta funci\xF3n volver\xE1 a estar disponible autom\xE1ticamente cuando el hub comunique la versi\xF3n de firmware actualizada.`
   },
   buttonNames: {
     151: "C",
@@ -299,7 +300,7 @@ var TOOLS_CARD_STRINGS_ES = {
     appConnectedTitle: "La aplicaci\xF3n Sofabaton est\xE1 conectada",
     appConnectedBody: "Cierra la aplicaci\xF3n Sofabaton para editar la configuraci\xF3n del hub.",
     firmwareUnsupportedTitle: "Es necesario actualizar el firmware del hub",
-    firmwareUnsupportedBody: (installed, required) => `Este hub tiene instalada la versi\xF3n de firmware ${installed}. Se necesita la versi\xF3n ${required} o posterior para editar de forma segura la configuraci\xF3n del hub. La edici\xF3n est\xE1 desactivada para proteger tu configuraci\xF3n. Actualiza el hub por Bluetooth con la aplicaci\xF3n Sofabaton. La edici\xF3n volver\xE1 a estar disponible autom\xE1ticamente cuando el hub comunique la versi\xF3n de firmware actualizada.`,
+    firmwareUnsupportedBody: (installed, required) => `Este hub tiene instalada la versi\xF3n de firmware ${installed}. Se necesita la versi\xF3n ${required} o posterior para editar de forma segura la configuraci\xF3n del hub. La edici\xF3n est\xE1 desactivada para proteger tu configuraci\xF3n. Actualiza el hub con la aplicaci\xF3n Sofabaton. La edici\xF3n volver\xE1 a estar disponible autom\xE1ticamente cuando el hub comunique la versi\xF3n de firmware actualizada.`,
     operationRunningTitle: "Hay otra operaci\xF3n en curso",
     operationRunningBody: "Espera a que termine la copia de seguridad, restauraci\xF3n o sincronizaci\xF3n actual y vuelve a intentarlo.",
     captureTitle: "Leyendo tu hub",
@@ -645,6 +646,7 @@ var TOOLS_CARD_STRINGS_ES = {
     verifyPayloadLive: "Verifica una carga \xFAtil modificada antes de guardarla: Probar reproduce los bytes actuales en el hub sin guardarlos. Guardar incorpora la carga \xFAtil a la pr\xF3xima sincronizaci\xF3n del dispositivo.",
     verifyPayloadBackup: "Verifica una carga \xFAtil modificada antes de confiar en ella: Probar reproduce los bytes en el hub sin guardarlos. Gu\xE1rdala aqu\xED solo cuando haga lo que esperas.",
     test: "Probar",
+    payloadDocsLink: "Documentaci\xF3n de cargas \xFAtiles",
     sendingToHub: "Enviando al hub\u2026",
     sentToHub: "Enviado al hub para una reproducci\xF3n \xFAnica.",
     testFailed: "Error en la prueba.",
@@ -773,7 +775,7 @@ var TOOLS_CARD_STRINGS_ES = {
     firmwareUpdateRequired: "Actualizaci\xF3n de firmware necesaria",
     firmwareUpdateRecommended: "Actualizaci\xF3n de firmware recomendada",
     firmwareUpdateTooltip: (recommended, required, unsupported) => {
-      const update = "Actualiza el hub por Bluetooth con la aplicaci\xF3n Sofabaton.";
+      const update = "Actualiza el hub con la aplicaci\xF3n Sofabaton.";
       if (unsupported) {
         const recommendation = String(recommended) === String(required) ? "" : ` Se recomienda la versi\xF3n de firmware ${recommended} o posterior porque contiene correcciones para problemas conocidos.`;
         return `Se necesita la versi\xF3n de firmware ${required} o posterior para modificar la configuraci\xF3n desde el Panel de control.${recommendation} ${update}`;

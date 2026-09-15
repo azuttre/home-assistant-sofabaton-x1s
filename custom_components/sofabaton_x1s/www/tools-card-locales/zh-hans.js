@@ -37,7 +37,8 @@ var TOOLS_CARD_STRINGS_ZH_HANS = {
   },
   docs: {
     wifiCommandsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/wifi_commands.md",
-    backupUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/backup.md"
+    backupUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/backup.md",
+    commandPayloadsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/command_payloads.md"
   },
   tabs: { cache: "Hub", wifiCommands: "\u81EA\u52A8\u5316", backup: "\u5907\u4EFD", settings: "\u8BBE\u7F6E", logs: "\u65E5\u5FD7" },
   tabDocs: { wifi_commands: "\u81EA\u52A8\u5316\u6587\u6863", backup: "\u5907\u4EFD\u6587\u6863" },
@@ -646,6 +647,7 @@ var TOOLS_CARD_STRINGS_ZH_HANS = {
     verifyPayloadLive: "\u4FDD\u5B58\u524D\u8BF7\u9A8C\u8BC1\u4FEE\u6539\u540E\u7684\u6709\u6548\u8F7D\u8377\uFF1A\u201C\u6D4B\u8BD5\u201D\u4F1A\u5728 Hub \u4E0A\u6267\u884C\u5F53\u524D\u5B57\u8282\uFF0C\u4F46\u4E0D\u4F1A\u4FDD\u5B58\uFF1B\u201C\u4FDD\u5B58\u201D\u4F1A\u5728\u4E0B\u6B21\u540C\u6B65\u8BBE\u5907\u65F6\u5199\u5165\u6709\u6548\u8F7D\u8377\u3002",
     verifyPayloadBackup: "\u4F7F\u7528\u4FEE\u6539\u540E\u7684\u6709\u6548\u8F7D\u8377\u524D\u8BF7\u5148\u9A8C\u8BC1\uFF1A\u201C\u6D4B\u8BD5\u201D\u4F1A\u5728 Hub \u4E0A\u6267\u884C\u8FD9\u4E9B\u5B57\u8282\uFF0C\u4F46\u4E0D\u4F1A\u4FDD\u5B58\u3002\u786E\u8BA4\u7ED3\u679C\u7B26\u5408\u9884\u671F\u540E\u518D\u4FDD\u5B58\u3002",
     test: "\u6D4B\u8BD5",
+    payloadDocsLink: "\u6709\u6548\u8F7D\u8377\u6587\u6863",
     sendingToHub: "\u6B63\u5728\u53D1\u9001\u5230 Hub\u2026",
     sentToHub: "\u5DF2\u53D1\u9001\u5230 Hub \u5E76\u6267\u884C\u4E00\u6B21\u3002",
     testFailed: "\u6D4B\u8BD5\u5931\u8D25\u3002",

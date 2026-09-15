@@ -23,6 +23,7 @@ export const TOOLS_CARD_STRINGS_ES = {
   docs: {
     wifiCommandsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/wifi_commands.md",
     backupUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/backup.md",
+    commandPayloadsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/command_payloads.md",
   },
   tabs: { cache: "Hub", wifiCommands: "Automatización", backup: "Backup", settings: "Ajustes", logs: "Registros" },
   tabDocs: { wifi_commands: "Documentación de automatización", backup: "Documentación de copias de seguridad" },
@@ -275,7 +276,7 @@ export const TOOLS_CARD_STRINGS_ES = {
     fetchEditCommandAria: "Obtener y editar la carga útil de este comando", moveUpAria: "Mover hacia arriba", moveDownAria: "Mover hacia abajo", deviceClass: "Clase de dispositivo", name: "Nombre",
     nameHelper: "Se muestra en el mando a distancia y en todos los selectores de comandos.", verifyPayloadLive: "Verifica una carga útil modificada antes de guardarla: Probar reproduce los bytes actuales en el hub sin guardarlos. Guardar incorpora la carga útil a la próxima sincronización del dispositivo.",
     verifyPayloadBackup: "Verifica una carga útil modificada antes de confiar en ella: Probar reproduce los bytes en el hub sin guardarlos. Guárdala aquí solo cuando haga lo que esperas.",
-    test: "Probar", sendingToHub: "Enviando al hub…", sentToHub: "Enviado al hub para una reproducción única.", testFailed: "Error en la prueba.", rawPayload: "Carga útil sin procesar",
+    test: "Probar", payloadDocsLink: "Documentación de cargas útiles", sendingToHub: "Enviando al hub…", sentToHub: "Enviado al hub para una reproducción única.", testFailed: "Error en la prueba.", rawPayload: "Carga útil sin procesar",
     rawPayloadDescription: "No existe un editor estructurado para esta clase de dispositivo; los bytes siguientes se reproducen sin cambios en el hub durante la restauración.", payloadHex: "Carga útil (bytes hexadecimales)",
     payloadHexHelper: "Pares de bytes como «0a 4f 22»; se permiten espacios y prefijos 0x.", rename: "Cambiar nombre", renameActivity: "Cambiar nombre de la actividad", renameDevice: "Cambiar nombre del dispositivo", renameMacro: "Cambiar nombre de la macro",
     prontoHexTab: "Pronto Hex",

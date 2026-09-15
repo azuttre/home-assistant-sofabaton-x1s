@@ -47,6 +47,7 @@ export const TOOLS_CARD_STRINGS_EN = {
   docs: {
     wifiCommandsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/wifi_commands.md",
     backupUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/backup.md",
+    commandPayloadsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/command_payloads.md",
   },
   tabs: {
     cache: "Hub",
@@ -784,6 +785,7 @@ export const TOOLS_CARD_STRINGS_EN = {
     verifyPayloadBackup:
       "Verify a changed payload before trusting it: Test plays the bytes on the hub without saving. Save here only once the payload does what you expect.",
     test: "Test",
+    payloadDocsLink: "Payload documentation",
     sendingToHub: "Sending to the hub…",
     sentToHub: "Sent to the hub for one-shot playback.",
     testFailed: "Test failed.",

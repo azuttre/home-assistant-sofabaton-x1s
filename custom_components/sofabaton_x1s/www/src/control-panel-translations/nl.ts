@@ -44,6 +44,7 @@ export const TOOLS_CARD_STRINGS_NL = {
   docs: {
     wifiCommandsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/wifi_commands.md",
     backupUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/backup.md",
+    commandPayloadsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/command_payloads.md",
   },
   tabs: { cache: "Hub", wifiCommands: "Automatisering", backup: "Back-up", settings: "Instellingen", logs: "Logboeken" },
   tabDocs: { wifi_commands: "Documentatie over automatisering", backup: "Documentatie over back-ups" },
@@ -337,7 +338,7 @@ export const TOOLS_CARD_STRINGS_NL = {
     moveUpAria: "Omhoog verplaatsen", moveDownAria: "Omlaag verplaatsen", deviceClass: "Apparaatklasse", name: "Naam", nameHelper: "Wordt weergegeven op de afstandsbediening en in elke commandokiezer.",
     verifyPayloadLive: "Controleer een gewijzigde payload vóór het opslaan: Test speelt de huidige bytes op de hub af zonder op te slaan. Opslaan neemt de payload mee bij de volgende synchronisatie van het apparaat.",
     verifyPayloadBackup: "Controleer een gewijzigde payload voordat je erop vertrouwt: Test speelt de bytes op de hub af zonder op te slaan. Sla hier pas op wanneer de payload doet wat je verwacht.",
-    test: "Testen", sendingToHub: "Naar de hub sturen…", sentToHub: "Naar de hub gestuurd voor eenmalig afspelen.", testFailed: "Test mislukt.", rawPayload: "Onbewerkte payload",
+    test: "Testen", payloadDocsLink: "Payload-documentatie", sendingToHub: "Naar de hub sturen…", sentToHub: "Naar de hub gestuurd voor eenmalig afspelen.", testFailed: "Test mislukt.", rawPayload: "Onbewerkte payload",
     rawPayloadDescription: "Voor deze apparaatklasse bestaat geen gestructureerde editor; de onderstaande bytes worden bij het herstellen ongewijzigd naar de hub afgespeeld.",
     payloadHex: "Payload (hex-bytes)", payloadHexHelper: "Byteparen zoals \"0a 4f 22\"; witruimte en 0x-voorvoegsels zijn toegestaan.", rename: "Hernoemen",
     prontoHexTab: "Pronto Hex",

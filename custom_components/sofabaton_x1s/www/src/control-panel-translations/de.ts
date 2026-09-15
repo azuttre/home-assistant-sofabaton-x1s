@@ -26,6 +26,7 @@ export const TOOLS_CARD_STRINGS_DE = {
   docs: {
     wifiCommandsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/wifi_commands.md",
     backupUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/backup.md",
+    commandPayloadsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/command_payloads.md",
   },
   tabs: { cache: "Hub", wifiCommands: "Automatisierung", backup: "Backup", settings: "Einstellungen", logs: "Protokolle" },
   tabDocs: { wifi_commands: "Dokumentation zur Automatisierung", backup: "Backup-Dokumentation" },
@@ -290,7 +291,7 @@ export const TOOLS_CARD_STRINGS_DE = {
     renameCommandAria: "Befehl umbenennen", commandId: "Befehls-ID", editPayloadAria: "Nutzdaten bearbeiten", fetchEditCommandAria: "Nutzdaten dieses Befehls abrufen und bearbeiten", moveUpAria: "Nach oben verschieben", moveDownAria: "Nach unten verschieben",
     deviceClass: "Geräteklasse", name: "Name", nameHelper: "Wird auf der Fernbedienung und in jeder Befehlsauswahl angezeigt.", verifyPayloadLive: "Prüfe geänderte Nutzdaten vor dem Speichern: Test spielt die aktuellen Bytes auf dem Hub ab, ohne zu speichern. Speichern übernimmt die Nutzdaten in die nächste Synchronisierung des Geräts.",
     verifyPayloadBackup: "Prüfe geänderte Nutzdaten, bevor du ihnen vertraust: Test spielt die Bytes auf dem Hub ab, ohne zu speichern. Speichere hier erst, wenn die Nutzdaten wie erwartet funktionieren.",
-    test: "Testen", sendingToHub: "Wird an den Hub gesendet…", sentToHub: "Zur einmaligen Wiedergabe an den Hub gesendet.", testFailed: "Test fehlgeschlagen.", rawPayload: "Unformatierte Nutzdaten",
+    test: "Testen", payloadDocsLink: "Dokumentation zu Nutzdaten", sendingToHub: "Wird an den Hub gesendet…", sentToHub: "Zur einmaligen Wiedergabe an den Hub gesendet.", testFailed: "Test fehlgeschlagen.", rawPayload: "Unformatierte Nutzdaten",
     rawPayloadDescription: "Für diese Geräteklasse gibt es keinen strukturierten Editor; die folgenden Bytes werden bei der Wiederherstellung unverändert auf dem Hub wiedergegeben.", payloadHex: "Nutzdaten (Hex-Bytes)",
     payloadHexHelper: "Bytepaare wie \"0a 4f 22\"; Leerzeichen und 0x-Präfixe sind zulässig.", rename: "Umbenennen", renameActivity: "Aktivität umbenennen", renameDevice: "Gerät umbenennen", renameMacro: "Makro umbenennen",
     prontoHexTab: "Pronto Hex",
