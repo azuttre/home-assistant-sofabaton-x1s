@@ -17,7 +17,7 @@ function longPressPairs(buttons) {
   }
   return out;
 }
-var ServerRemoteBackend = class {
+var ServerRemoteBackend = class _ServerRemoteBackend {
   constructor(options = {}) {
     this.kind = "server";
     this.hubId = "";
@@ -30,6 +30,8 @@ var ServerRemoteBackend = class {
     this.activityPages = {};
     this.devicePages = {};
     this.loaded = false;
+    /** The catalog has been read at least once (a disabled hub answers 409 to reads). */
+    this.catalogLoaded = false;
     this.loadPromise = null;
     this.pagePromises = {};
     this._lastError = null;
@@ -167,10 +169,19 @@ var ServerRemoteBackend = class {
     this.activityPages = {};
     this.devicePages = {};
     this.loaded = false;
+    this.catalogLoaded = false;
     this.loadPromise = null;
     this.pagePromises = {};
     this._lastError = null;
     this.invalidate();
+  }
+  /**
+   * Reads other than /status answer 409 while the hub is disabled. An
+   * app-held (observe) hub still answers reads from the cache, so the
+   * catalog is read and shown greyed out.
+   */
+  static readable(status) {
+    return Boolean(status && status.enabled && status.status);
   }
   invalidate() {
     this.snapshotCache = null;
@@ -207,24 +218,35 @@ var ServerRemoteBackend = class {
     }
     return this.loadPromise;
   }
-  /** Full reload: status, catalog, running activity, then its pages. */
+  /**
+   * Full reload: status first, then (only while the hub is readable) the
+   * catalog, the running activity, and the running activity's pages. A
+   * disabled or app-held hub keeps whatever catalog was read before and
+   * shows as unavailable, not as unreachable.
+   */
   async loadAll() {
     if (!this.hubId) return;
     const hubId = this.hubId;
     try {
-      const [status, activities, devices, running] = await Promise.all([
-        this.get(`/status`),
-        this.get(`/activities`),
-        this.get(`/devices`),
-        this.get(`/activity`)
-      ]);
+      const status = await this.get(`/status`);
       if (hubId !== this.hubId) return;
       this.hubStatus = status;
-      this.activities = activities;
-      this.devices = devices;
-      this.running = running;
-      this.loaded = true;
       this._lastError = null;
+      if (_ServerRemoteBackend.readable(status)) {
+        const [activities, devices, running] = await Promise.all([
+          this.get(`/activities`),
+          this.get(`/devices`),
+          this.get(`/activity`)
+        ]);
+        if (hubId !== this.hubId) return;
+        this.activities = activities;
+        this.devices = devices;
+        this.running = running;
+        this.catalogLoaded = true;
+      } else {
+        this.running = null;
+      }
+      this.loaded = true;
     } catch (err) {
       if (hubId !== this.hubId) return;
       this._lastError = err instanceof Error ? err.message : String(err);
@@ -237,13 +259,19 @@ var ServerRemoteBackend = class {
   }
   async refreshStatus() {
     try {
-      const [status, running] = await Promise.all([
-        this.get(`/status`),
-        this.get(`/activity`)
-      ]);
+      const status = await this.get(`/status`);
       this.hubStatus = status;
-      this.running = running;
       this._lastError = null;
+      if (_ServerRemoteBackend.readable(status)) {
+        if (!this.catalogLoaded) {
+          this.loaded = false;
+          void this.ensureLoaded();
+          return;
+        }
+        this.running = await this.get(`/activity`);
+      } else {
+        this.running = null;
+      }
     } catch (err) {
       this._lastError = err instanceof Error ? err.message : String(err);
       this.hubStatus = null;
@@ -359,6 +387,12 @@ var ServerRemoteBackend = class {
         void this.ensureLoaded();
         return;
       case "server_event":
+        if (message.kind === "hub_rekeyed" && message.hub_id && message.hub_id !== this.hubId) {
+          this.hubId = String(message.hub_id);
+          this.loaded = false;
+          void this.ensureLoaded();
+          return;
+        }
         if (message.hub_id !== this.hubId) return;
         if (message.kind === "hub_removed") {
           this.hubStatus = null;

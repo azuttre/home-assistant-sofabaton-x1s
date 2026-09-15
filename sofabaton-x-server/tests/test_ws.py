@@ -6,7 +6,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from sofabaton import ActivityChanged
+from sofabaton import ActivityChanged, ConnectionState, StatusChanged
 
 from sofabaton_server import API_PREFIX
 from sofabaton_server.app import create_app
@@ -145,3 +145,66 @@ def test_host_id_filter_follows_the_hub_to_its_mac(tmp_path: Path) -> None:
             client.portal.call(proxy.emit, "ota")
             msg = ws.receive_json()
             assert msg["hub_id"] == "e26a44861b45" and msg["event"]["kind"] == "ota"
+
+
+def test_availability_sequence_reaches_a_hub_scoped_client(tmp_path: Path) -> None:
+    """S4 of the web-remote plan: a client narrowed to one hub sees the
+    hub drop and come back, and an app session start and end, as the
+    exact ``hub_event`` kinds and payload keys the page's adapter reads
+    (``hub_state`` / ``app_state`` -> ``{connected}``, ``status_changed``
+    -> ``{mode, previous_mode}``), and ``GET /status`` agrees at every
+    step so a reload after a reconnect lands on the same answer."""
+
+    client, factory = _rig(tmp_path)
+    with client:
+        client.post(HUBS, json={"host": "192.168.1.50"})
+        proxy = factory.latest("192.168.1.50")
+        with client.websocket_connect(f"{EVENTS}?hub_id=192.168.1.50") as ws:
+            hello = ws.receive_json()
+            assert hello["hubs"] == [{"hub_id": "192.168.1.50", "enabled": True}]
+            assert hello["instance_id"]
+
+            # The hub link drops: the proxy reports it, then its mode.
+            proxy.started = False
+            client.portal.call(proxy.emit, "hub_state", ConnectionState(connected=False))
+            client.portal.call(proxy.emit, "status_changed", StatusChanged(mode="disconnected", previous_mode="control"))
+            down = [ws.receive_json() for _ in range(2)]
+            assert [(m["type"], m["hub_id"], m["event"]["kind"], m["event"]["payload"]) for m in down] == [
+                ("hub_event", "192.168.1.50", "hub_state", {"connected": False}),
+                ("hub_event", "192.168.1.50", "status_changed", {"mode": "disconnected", "previous_mode": "control"}),
+            ]
+            st = client.get(f"{HUBS}/192.168.1.50/status").json()["status"]
+            assert st["hub_connected"] is False and st["controllable"] is False and st["mode"] == "disconnected"
+
+            # Back, then the Sofabaton app takes the hub (observe), then leaves.
+            proxy.started = True
+            client.portal.call(proxy.emit, "hub_state", ConnectionState(connected=True))
+            client.portal.call(proxy.emit, "status_changed", StatusChanged(mode="control", previous_mode="disconnected"))
+            proxy.refuse = True
+            client.portal.call(proxy.emit, "app_state", ConnectionState(connected=True))
+            client.portal.call(proxy.emit, "status_changed", StatusChanged(mode="observe", previous_mode="control"))
+            kinds = [ws.receive_json()["event"] for _ in range(4)]
+            assert [(e["kind"], e["payload"]) for e in kinds] == [
+                ("hub_state", {"connected": True}),
+                ("status_changed", {"mode": "control", "previous_mode": "disconnected"}),
+                ("app_state", {"connected": True}),
+                ("status_changed", {"mode": "observe", "previous_mode": "control"}),
+            ]
+            assert [e["seq"] for e in kinds] == [3, 4, 5, 6], "the library's seq passes through untouched"
+            st = client.get(f"{HUBS}/192.168.1.50/status").json()["status"]
+            assert st["app_connected"] is True and st["controllable"] is False and st["mode"] == "observe"
+
+            proxy.refuse = False
+            client.portal.call(proxy.emit, "app_state", ConnectionState(connected=False))
+            client.portal.call(proxy.emit, "status_changed", StatusChanged(mode="control", previous_mode="observe"))
+            back = [ws.receive_json()["event"]["kind"] for _ in range(2)]
+            assert back == ["app_state", "status_changed"]
+            assert client.get(f"{HUBS}/192.168.1.50/status").json()["status"]["controllable"] is True
+
+            # Disable and enable are server events on the same hub id; a
+            # disabled hub answers /status with enabled false.
+            client.post(f"{HUBS}/192.168.1.50/disable")
+            assert ws.receive_json() == {"type": "server_event", "hub_id": "192.168.1.50", "kind": "hub_disabled"}
+            assert client.get(f"{HUBS}/192.168.1.50/status").json()["enabled"] is False
+            client.post(f"{HUBS}/192.168.1.50/enable")
+            assert ws.receive_json()["kind"] == "hub_enabled"

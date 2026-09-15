@@ -171,6 +171,8 @@ export class ServerRemoteBackend implements RemoteBackend {
   private activityPages: Record<string, ActivityPages> = {};
   private devicePages: Record<string, { buttons: ServerButton[]; commands: ServerCommand[] }> = {};
   private loaded = false;
+  /** The catalog has been read at least once (a disabled hub answers 409 to reads). */
+  private catalogLoaded = false;
   private loadPromise: Promise<void> | null = null;
   private pagePromises: Record<string, Promise<void>> = {};
   private _lastError: string | null = null;
@@ -343,10 +345,20 @@ export class ServerRemoteBackend implements RemoteBackend {
     this.activityPages = {};
     this.devicePages = {};
     this.loaded = false;
+    this.catalogLoaded = false;
     this.loadPromise = null;
     this.pagePromises = {};
     this._lastError = null;
     this.invalidate();
+  }
+
+  /**
+   * Reads other than /status answer 409 while the hub is disabled. An
+   * app-held (observe) hub still answers reads from the cache, so the
+   * catalog is read and shown greyed out.
+   */
+  private static readable(status: ServerHubStatusView | null): boolean {
+    return Boolean(status && status.enabled && status.status);
   }
 
   private invalidate(): void {
@@ -394,24 +406,35 @@ export class ServerRemoteBackend implements RemoteBackend {
     return this.loadPromise;
   }
 
-  /** Full reload: status, catalog, running activity, then its pages. */
+  /**
+   * Full reload: status first, then (only while the hub is readable) the
+   * catalog, the running activity, and the running activity's pages. A
+   * disabled or app-held hub keeps whatever catalog was read before and
+   * shows as unavailable, not as unreachable.
+   */
   private async loadAll(): Promise<void> {
     if (!this.hubId) return;
     const hubId = this.hubId;
     try {
-      const [status, activities, devices, running] = await Promise.all([
-        this.get<ServerHubStatusView>(`/status`),
-        this.get<ServerActivity[]>(`/activities`),
-        this.get<ServerDevice[]>(`/devices`),
-        this.get<ServerRunningActivity | null>(`/activity`),
-      ]);
+      const status = await this.get<ServerHubStatusView>(`/status`);
       if (hubId !== this.hubId) return; // target moved during the load
       this.hubStatus = status;
-      this.activities = activities;
-      this.devices = devices;
-      this.running = running;
-      this.loaded = true;
       this._lastError = null;
+      if (ServerRemoteBackend.readable(status)) {
+        const [activities, devices, running] = await Promise.all([
+          this.get<ServerActivity[]>(`/activities`),
+          this.get<ServerDevice[]>(`/devices`),
+          this.get<ServerRunningActivity | null>(`/activity`),
+        ]);
+        if (hubId !== this.hubId) return;
+        this.activities = activities;
+        this.devices = devices;
+        this.running = running;
+        this.catalogLoaded = true;
+      } else {
+        this.running = null;
+      }
+      this.loaded = true;
     } catch (err) {
       if (hubId !== this.hubId) return;
       this._lastError = err instanceof Error ? err.message : String(err);
@@ -425,13 +448,20 @@ export class ServerRemoteBackend implements RemoteBackend {
 
   private async refreshStatus(): Promise<void> {
     try {
-      const [status, running] = await Promise.all([
-        this.get<ServerHubStatusView>(`/status`),
-        this.get<ServerRunningActivity | null>(`/activity`),
-      ]);
+      const status = await this.get<ServerHubStatusView>(`/status`);
       this.hubStatus = status;
-      this.running = running;
       this._lastError = null;
+      if (ServerRemoteBackend.readable(status)) {
+        if (!this.catalogLoaded) {
+          // Became readable with nothing loaded (opened while disabled).
+          this.loaded = false;
+          void this.ensureLoaded();
+          return;
+        }
+        this.running = await this.get<ServerRunningActivity | null>(`/activity`);
+      } else {
+        this.running = null;
+      }
     } catch (err) {
       this._lastError = err instanceof Error ? err.message : String(err);
       this.hubStatus = null;
@@ -558,6 +588,16 @@ export class ServerRemoteBackend implements RemoteBackend {
         void this.ensureLoaded();
         return;
       case "server_event":
+        if (message.kind === "hub_rekeyed" && message.hub_id && message.hub_id !== this.hubId) {
+          // The stream is narrowed to our hub and follows it to its MAC,
+          // so a re-key that arrives here is ours: the page opened the hub
+          // by host before its first sync. Move with it; the old id is
+          // gone from the API.
+          this.hubId = String(message.hub_id);
+          this.loaded = false;
+          void this.ensureLoaded();
+          return;
+        }
         if (message.hub_id !== this.hubId) return;
         if (message.kind === "hub_removed") {
           this.hubStatus = null;

@@ -630,6 +630,12 @@ not part of the API contract (absent from the OpenAPI document) and has
 the same reach as the API: anyone who can open the page can change the
 hub.
 
+The web remote page under `src/sofabaton_server/ui/` is built from the
+repository's remote-card sources (`npm run build:remote-web` at the
+repository root; `remote-web.js` is committed and the frontend CI checks
+it for drift), so a server change never needs a frontend toolchain, and a
+card change ships with the next server release.
+
 From the repository root, with the library importable (the tests alias
 the in-tree library automatically):
 

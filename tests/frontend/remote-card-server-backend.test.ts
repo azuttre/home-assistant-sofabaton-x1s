@@ -108,8 +108,10 @@ function createRig(overrides: Record<string, Body> = {}): Rig {
     const method = String(init?.method ?? "GET").toUpperCase();
     const body = init?.body ? JSON.parse(String(init.body)) : undefined;
     requests.push({ url, method, body });
-    assert.ok(url.startsWith(PREFIX), `unexpected origin ${url}`);
-    const key = `${method} ${url.slice(PREFIX.length)}`;
+    // Any hub id: the re-key test moves the target mid-run.
+    const match = url.match(/^http:\/\/server\.test\/api\/v1\/hubs\/[^/]+(\/.*)$/);
+    assert.ok(match, `unexpected url ${url}`);
+    const key = `${method} ${match![1]}`;
     const route = routes[key];
     if (route === undefined) {
       return { ok: false, status: 404, json: async () => ({ type: "not_found" }) } as Response;
@@ -388,4 +390,91 @@ test("store over the server adapter: the card's derivations run unchanged", asyn
   );
   assert.ok(changes > 0);
   store.disconnected();
+});
+
+test("server adapter: disable, dropped notices and a re-key are followed", async () => {
+  const { backend, sockets, routes, requests } = createRig();
+  backend.setTarget(HUB);
+  backend.subscribe(() => undefined);
+  await flush();
+  sockets[0].open();
+  await flush();
+
+  // hub_disabled: status is re-read; enabled=false makes the remote unavailable.
+  routes["GET /status"] = { ...STATUS, enabled: false, status: null };
+  sockets[0].push({ type: "server_event", hub_id: HUB, kind: "hub_disabled" });
+  await flush();
+  assert.equal(backend.snapshot()?.state, "unavailable");
+  routes["GET /status"] = STATUS;
+  sockets[0].push({ type: "server_event", hub_id: HUB, kind: "hub_enabled" });
+  await flush();
+  assert.equal(backend.snapshot()?.state, "on");
+
+  // dropped: everything may have changed while the queue overflowed.
+  requests.length = 0;
+  sockets[0].push({ type: "dropped", count: 12 });
+  await flush();
+  assert.ok(requests.some((request) => request.url.endsWith("/activities")), "catalog reloaded");
+
+  // hub_removed: nothing to show any more.
+  sockets[0].push({ type: "server_event", hub_id: HUB, kind: "hub_removed" });
+  await flush();
+  assert.equal(backend.snapshot()?.state, "unavailable");
+});
+
+test("server adapter: a re-key moves the target to the hub's new id", async () => {
+  const { backend, sockets, requests } = createRig();
+  const NEW = "e26a44861b45";
+  backend.setTarget("192.168.1.50");
+  backend.subscribe(() => undefined);
+  await flush();
+  sockets[0].open();
+  await flush();
+  requests.length = 0;
+  sockets[0].push({ type: "server_event", hub_id: NEW, kind: "hub_rekeyed" });
+  await flush();
+  assert.equal(backend.target, NEW);
+  assert.ok(
+    requests.some((request) => request.url.includes(`/hubs/${NEW}/`)),
+    "reloaded under the new id",
+  );
+  assert.equal(backend.snapshot()?.state, "on");
+});
+
+test("server adapter: a disabled hub is unavailable, not unreachable, and loads once enabled", async () => {
+  const DISABLED = { ...STATUS, enabled: false, status: null };
+  const { backend, sockets, routes, requests } = createRig({
+    "GET /status": DISABLED,
+    // Every other read answers 409 while the hub is disabled.
+    "GET /activities": new Error("409"),
+    "GET /devices": new Error("409"),
+    "GET /activity": new Error("409"),
+  });
+  backend.setTarget(HUB);
+  backend.subscribe(() => undefined);
+  await flush();
+  assert.equal(backend.snapshot()?.state, "unavailable");
+  assert.equal(backend.lastError, null, "a disabled hub is not a reachability error");
+  assert.equal(backend.snapshot()?.attributes?.load_state, "ready");
+  assert.ok(!requests.some((request) => request.url.endsWith("/activities")), "catalog not read while disabled");
+
+  sockets[0].open();
+  await flush();
+  routes["GET /status"] = STATUS;
+  routes["GET /activities"] = defaultRoutes()["GET /activities"];
+  routes["GET /devices"] = defaultRoutes()["GET /devices"];
+  routes["GET /activity"] = defaultRoutes()["GET /activity"];
+  sockets[0].push({ type: "server_event", hub_id: HUB, kind: "hub_enabled" });
+  await flush(8);
+  assert.equal(backend.snapshot()?.state, "on");
+  assert.equal(backend.snapshot()?.attributes?.activities?.length, 2, "catalog loaded on enable");
+
+  // Disabled again mid-run: the catalog is kept, the remote goes unavailable.
+  routes["GET /status"] = DISABLED;
+  routes["GET /activity"] = new Error("409");
+  sockets[0].push({ type: "server_event", hub_id: HUB, kind: "hub_disabled" });
+  await flush();
+  assert.equal(backend.snapshot()?.state, "unavailable");
+  assert.equal(backend.lastError, null);
+  assert.equal(backend.snapshot()?.attributes?.activities?.length, 2);
 });

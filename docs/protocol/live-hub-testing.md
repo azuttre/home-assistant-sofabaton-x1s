@@ -2238,3 +2238,48 @@ The X1 ran the final bench unchanged on its first attempt. Not run: the
 X2 (not offered for this program), the server routes against a live hub
 (the library runner underneath is what they call; the server suite
 drives them through a fake that runs the real planner).
+
+## ◇ Validated: web remote, R7 (X1S, 2026-09-15)
+
+The remote card served by sofabaton-x-server (docs/internal/web-remote-plan.md),
+driven in a real browser against the X1S through a real server process
+on the dev box (launch config `sofabaton-x-server`, port 8482; the X1 and
+X2 records in the harness data dir were disabled for the run so only the
+X1S proxy started; the HA X1S entry disabled for the run and re-enabled
+after, `disabled_by` null verified). No bench script: the page was
+exercised by hand in the Browser pane, the server log is the witness.
+
+| step | what happened |
+| --- | --- |
+| open `/ui/remote/` without `hub=` | instruction page listing the registered hub with a link |
+| open `/ui/remote/?hub=e26a44861b45` | card renders "Powered Off", every key dimmed, device-mode toggle shown; no console errors beyond the version banner |
+| pick "Watch TV" | `POST /activities/102/start` accepted, hub reports `Watch TV` ACTIVE on the next activities burst, the page's select follows from the stream; only VOL_UP / MUTE / VOL_DOWN light up, exactly the hub's 3-row keymap for that activity |
+| tap VOL_UP; tap the disabled OK | `send 102/182` accepted; nothing sent for OK |
+| write a long-press pair onto VOL_UP through the server (`PUT .../buttons/182` with `long_press` 10/2) | job `done` in 3 s; the page picked the pair up from `snapshot_changed` without a reload |
+| hold VOL_UP 900 ms; then tap it | exactly one `send 10/2` (the pair, device scope); then exactly one `send 102/182` |
+| add favourite "Input" (10/1) through the server | job `done`; the Favourites drawer showed "Input"; tapping it sent `10/1` |
+| device mode, pick Soundbar | keymap fetched (`/entities/10/buttons` + `/devices/10/commands`); VOL_UP / VOL_DOWN / MUTE enabled, 17 keys disabled, Commands drawer lists the 4 commands with the filter; tapping "Mute" sent `10/2` |
+| power button | not offered: every device on this hub has `idle_behavior` null, the same gate as the HA projection |
+| pick "Powered Off" | `POST /activities/102/stop`; hub idle; all keys dimmed |
+| `POST .../disable` with the page open | banner shown; first run blamed connectivity ("GET /activity -> 409"), fixed the same session (see below); after the fix the banner reads "not controllable", the catalog is kept |
+| `POST .../enable` | the page recovered by itself from `hub_enabled` on the stream; select and keys back within the hub's reconnect |
+| server stopped and started with the page open (headless observer sampling every second) | socket closed at t=12 s, the page kept its last state with no false alarm, one failed reconnect attempt while the server was down, reconnected at t=19 s and reloaded |
+| cleanup | long-press pair and favourite removed through the server; `/entities/102/buttons` and favourites back to the starting state |
+
+One defect found and fixed: the adapter read `/activity` alongside
+`/status` on every status refresh and on load, and a disabled hub
+answers 409 to everything but `/status`, so the page reported the hub
+as unreachable instead of disabled. The adapter now reads `/status`
+first and touches the catalog and running activity only while the hub
+is enabled (an app-held hub still answers reads from the cache and is
+read, so the greyed card keeps its catalog); a hub that becomes enabled
+with nothing loaded triggers the full load. Covered by
+`tests/frontend/remote-card-server-backend.test.ts`. Two tooling notes:
+the Browser pane's screenshot moves focus and closes the shimmed
+select's menu (the HA select closes on blur too), and `preview_start`
+navigates the pane's tab, which is why the restart was observed from a
+separate headless browser.
+
+Not covered: macros (this hub has none on Watch TV), X1 and X2 (not in
+the run), a phone or tablet (desktop browser only), and a wheel install
+(the server ran from the editable install).

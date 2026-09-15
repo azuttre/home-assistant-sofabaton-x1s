@@ -5,6 +5,12 @@ the hub connection and exposes HTTP and WebSocket interfaces that you can
 use from any language. The examples here are small Python clients of that
 server; they do not connect directly to a hub.
 
+Before writing any code, you can see the hub work from a browser: with
+the server running and a hub registered, open
+`http://<server>:8480/ui/remote/?hub=<hub id>` for the server's own
+remote page (the README's "Web remote" section). Everything the page does
+goes through the same API this guide uses.
+
 This guide gets two things working:
 
 1. **Send a command:** find a device and its command IDs, then send one.

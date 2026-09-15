@@ -490,3 +490,36 @@ Show `target` (the destination already deployed) and
 when a deploy produces no presses, and the listener state from `GET /api/v1/server` when
 `callback_listener.bound` is false (the port is usually taken by a Home
 Assistant install or Emulated Roku on the same host).
+
+## 11. Give users a remote
+
+You do not have to build a remote control UI. The server serves the
+Sofabaton remote card as a page at `<server base URL>/ui/remote/?hub=<hub id>`
+(see the README's "Web remote" section): activity switching, every hard
+key the hub maps for the running activity, macros, favourites, and
+device mode with each device's command list, kept current from the
+server's own event stream. It is the same card the Home Assistant
+integration ships, so the two look and behave alike.
+
+How to hand it to your users depends on what your platform can show:
+
+| platform can | do this |
+| --- | --- |
+| frame a URL in a dashboard (Hubitat dashboards, openHAB MainUI webview, Node-RED dashboards, Home Assistant's iframe card) | frame `/ui/remote/?hub=<hub id>`; add `zoom=` for a wall panel |
+| open a URL (Homey, SmartThings, a phone) | link to the page; it carries a web manifest, so "Add to Home Screen" gives an app-like window |
+| neither | let users open it in a browser on the LAN; the id is `hub_id` from `GET /hubs` |
+
+Two things to know before you link it:
+
+- **No authentication.** The page has the same reach as the API. Tell
+  users to keep the server on the LAN or behind an authenticating
+  reverse proxy, never port-forwarded.
+- **Layout is per hub, stored on the server.** `GET/PUT/DELETE
+  /hubs/{id}/ui/remote-card` holds the card's configuration document
+  (which key groups show, their order, device mode, shortcuts, custom
+  favourites, hold-to-repeat, key style); absent means the card's
+  defaults. If your platform has a settings screen, a JSON text field
+  that reads and writes this document is all the editor a user needs.
+  The `/harness` console has one.
+
+The page is not part of the API contract; only the document routes are.
