@@ -47,7 +47,7 @@ export const TOOLS_CARD_STRINGS_DE = {
     automationBlockedByProxy: "Die Automatisierung kann nicht verwendet werden, während die Sofabaton-App über den Proxy mit dem Hub verbunden ist.",
     backupBlockedByProxy: "Die Backup-Funktion kann nicht verwendet werden, während die Sofabaton-App über den Proxy mit dem Hub verbunden ist.",
     blockedByFirmware: (installed: string | number, required: string | number) =>
-      `Auf diesem Hub ist Firmware-Version ${installed} installiert. Version ${required} oder neuer ist für Funktionen der Sofabaton-Steuerzentrale erforderlich, die die Hub-Konfiguration ändern. Aktualisiere den Hub über Bluetooth mit der Sofabaton-App. Diese Funktion wird automatisch wieder verfügbar, sobald der Hub die aktualisierte Firmware-Version meldet.`,
+      `Auf diesem Hub ist Firmware-Version ${installed} installiert. Version ${required} oder neuer ist für Funktionen der Sofabaton-Steuerzentrale erforderlich, die die Hub-Konfiguration ändern. Aktualisiere den Hub mit der Sofabaton-App. Diese Funktion wird automatisch wieder verfügbar, sobald der Hub die aktualisierte Firmware-Version meldet.`,
   },
   buttonNames: {
     0x97: "C", 0x98: "B", 0x99: "A", 0x9a: "Beenden", 0x9b: "DVR", 0x9c: "Wiedergabe", 0x9d: "Guide",
@@ -159,7 +159,7 @@ export const TOOLS_CARD_STRINGS_DE = {
     appConnectedTitle: "Die Sofabaton-App ist verbunden", appConnectedBody: "Schließe die Sofabaton-App, um die Hub-Konfiguration zu bearbeiten.",
     firmwareUnsupportedTitle: "Update der Hub-Firmware erforderlich",
     firmwareUnsupportedBody: (installed: string | number, required: string | number) =>
-      `Auf diesem Hub ist Firmware-Version ${installed} installiert. Version ${required} oder neuer ist erforderlich, um die Hub-Konfiguration sicher zu bearbeiten. Die Bearbeitung ist zum Schutz deiner Konfiguration deaktiviert. Aktualisiere den Hub über Bluetooth mit der Sofabaton-App. Die Bearbeitung ist automatisch wieder möglich, sobald der Hub die aktualisierte Firmware-Version meldet.`,
+      `Auf diesem Hub ist Firmware-Version ${installed} installiert. Version ${required} oder neuer ist erforderlich, um die Hub-Konfiguration sicher zu bearbeiten. Die Bearbeitung ist zum Schutz deiner Konfiguration deaktiviert. Aktualisiere den Hub mit der Sofabaton-App. Die Bearbeitung ist automatisch wieder möglich, sobald der Hub die aktualisierte Firmware-Version meldet.`,
     operationRunningTitle: "Ein anderer Vorgang wird ausgeführt", operationRunningBody: "Warte, bis das aktuelle Backup, die Wiederherstellung oder die Synchronisierung abgeschlossen ist, und versuche es dann erneut.",
     captureTitle: "Hub wird ausgelesen", captureMessage: "Konfiguration deines Hubs wird ausgelesen…", captureMessageWithStep: (current: number, total: number) => `Konfiguration deines Hubs wird ausgelesen… (Gerät ${current} von ${total})`,
     captureFailedTitle: "Hub konnte nicht ausgelesen werden", captureFailedBody: "Der Hub antwortete nicht mehr, bevor das Auslesen abgeschlossen war.", retry: "Erneut versuchen", back: "Zurück",
@@ -372,7 +372,7 @@ export const TOOLS_CARD_STRINGS_DE = {
     firmwareUpdateRequired: "Firmware-Update erforderlich",
     firmwareUpdateRecommended: "Firmware-Update empfohlen",
     firmwareUpdateTooltip: (recommended: string | number, required: string | number, unsupported: boolean) => {
-      const update = "Aktualisiere den Hub über Bluetooth mit der Sofabaton-App.";
+      const update = "Aktualisiere den Hub mit der Sofabaton-App.";
       if (unsupported) {
         const recommendation = String(recommended) === String(required)
           ? ""

@@ -468,15 +468,15 @@ test("firmware copy distinguishes required updates from recommendations", () => 
   assert.equal(TOOLS_CARD_STRINGS.hub.firmwareUpdateRecommended, "Firmware update recommended");
   assert.equal(
     TOOLS_CARD_STRINGS.hub.firmwareUpdateTooltip(8, 5, true),
-    "Firmware version 5 or newer is required for Control Panel configuration changes. Firmware version 8 or newer is recommended because it contains fixes for known issues. Update the hub over Bluetooth using the Sofabaton app.",
+    "Firmware version 5 or newer is required for Control Panel configuration changes. Firmware version 8 or newer is recommended because it contains fixes for known issues. Update the hub using the Sofabaton app.",
   );
   assert.equal(
     TOOLS_CARD_STRINGS.hub.firmwareUpdateTooltip(8, 5, false),
-    "Firmware version 8 or newer is recommended because it contains fixes for known issues. Your installed firmware remains supported for Control Panel configuration changes. Update the hub over Bluetooth using the Sofabaton app.",
+    "Firmware version 8 or newer is recommended because it contains fixes for known issues. Your installed firmware remains supported for Control Panel configuration changes. Update the hub using the Sofabaton app.",
   );
   assert.equal(
     TOOLS_CARD_STRINGS.hub.firmwareUpdateTooltip(5, 5, true),
-    "Firmware version 5 or newer is required for Control Panel configuration changes. Update the hub over Bluetooth using the Sofabaton app.",
+    "Firmware version 5 or newer is required for Control Panel configuration changes. Update the hub using the Sofabaton app.",
   );
 
   const labels = [

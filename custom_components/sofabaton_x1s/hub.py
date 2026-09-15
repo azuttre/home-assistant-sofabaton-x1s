@@ -428,7 +428,7 @@ class SofabatonHub:
         surface the installed version on the hub's device page and prompt
         the user through Home Assistant's Repairs panel when it falls below
         the minimum we recommend. The prompt is informational: the hub
-        updates over Bluetooth from the Sofabaton app, not from Home
+        is updated from the Sofabaton app, not from Home
         Assistant, so there is nothing for us to "fix" automatically.
         """
 

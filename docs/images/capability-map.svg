@@ -1,0 +1,238 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 620" width="1000" height="620" role="img" aria-label="Capability map: remote button presses travel through the hub into Home Assistant as events; Home Assistant sends commands, edits and backups back to the hub; the hub drives devices over IR and Bluetooth; the official app keeps working through the local proxy; the same engine powers the sofabaton-x library and server for other platforms." font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M1,1 L9,5 L1,9 Z" fill="#f2a93b"/>
+    </marker>
+    <marker id="arrow-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M1,1 L9,5 L1,9 Z" fill="#3fc1f0"/>
+    </marker>
+    <marker id="arrow-muted" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M1,1 L9,5 L1,9 Z" fill="#7f8c9a"/>
+    </marker>
+    <radialGradient id="glow-amber">
+      <stop offset="0" stop-color="#f2a93b" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#f2a93b" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow-blue">
+      <stop offset="0" stop-color="#3fc1f0" stop-opacity="0.9"/>
+      <stop offset="1" stop-color="#3fc1f0" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow-warm">
+      <stop offset="0" stop-color="#ffd27a" stop-opacity="0.95"/>
+      <stop offset="1" stop-color="#ffd27a" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- ground -->
+  <rect width="1000" height="620" rx="18" fill="#0c1218"/>
+
+  <!-- header -->
+  <text x="40" y="44" fill="#e8eef4" font-size="21" font-weight="700">Sofabaton X for Home Assistant</text>
+  <text x="40" y="66" fill="#8b98a6" font-size="13">Local, bidirectional control of X1 · X1S · X2 hubs. Everything below stays on your network.</text>
+
+  <!-- ===================== LEFT COLUMN ===================== -->
+  <!-- Remote -->
+  <rect x="40" y="110" width="170" height="150" rx="12" fill="#141c25" stroke="#273241"/>
+  <g>
+    <rect x="60" y="128" width="40" height="114" rx="11" fill="#1d2731" stroke="#34414f"/>
+    <rect x="67" y="136" width="26" height="22" rx="3" fill="#0c1218" stroke="#34414f"/>
+    <circle cx="80" cy="176" r="8.5" fill="#0c1218" stroke="#3a4857"/>
+    <circle cx="80" cy="176" r="3" fill="#f2a93b">
+      <animate attributeName="opacity" values="0.35;1;0.35;0.35" keyTimes="0;0.03;0.09;1" dur="9s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="80" cy="176" r="14" fill="url(#glow-amber)" opacity="0">
+      <animate attributeName="opacity" values="0;0.9;0;0" keyTimes="0;0.03;0.1;1" dur="9s" repeatCount="indefinite"/>
+    </circle>
+    <circle cx="70" cy="200" r="4" fill="#34414f"/>
+    <circle cx="90" cy="200" r="4" fill="#34414f"/>
+    <circle cx="70" cy="216" r="4" fill="#34414f"/>
+    <circle cx="90" cy="216" r="4" fill="#34414f"/>
+    <rect x="70" y="228" width="20" height="5" rx="2.5" fill="#34414f"/>
+  </g>
+  <text x="114" y="150" fill="#e8eef4" font-size="15" font-weight="700">Remote</text>
+  <text x="114" y="170" fill="#8b98a6" font-size="12">X1 · X1S · X2</text>
+  <text x="114" y="200" fill="#b7c2cd" font-size="12">buttons</text>
+  <text x="114" y="217" fill="#b7c2cd" font-size="12">favorites</text>
+  <text x="114" y="234" fill="#b7c2cd" font-size="12">long press</text>
+
+  <!-- Devices -->
+  <rect x="40" y="300" width="170" height="130" rx="12" fill="#141c25" stroke="#273241"/>
+  <g>
+    <rect x="58" y="322" width="52" height="34" rx="3" fill="#1d2731" stroke="#34414f"/>
+    <rect x="62" y="326" width="44" height="26" rx="1.5" fill="#0c1218"/>
+    <rect x="62" y="326" width="44" height="26" rx="1.5" fill="#3fc1f0" opacity="0">
+      <animate attributeName="opacity" values="0;0;0.55;0.55;0;0" keyTimes="0;0.66;0.69;0.9;0.94;1" dur="9s" repeatCount="indefinite"/>
+    </rect>
+    <rect x="78" y="356" width="12" height="5" fill="#34414f"/>
+    <rect x="58" y="368" width="52" height="8" rx="2" fill="#1d2731" stroke="#34414f"/>
+    <circle cx="66" cy="372" r="1.5" fill="#f2a93b" opacity="0.4">
+      <animate attributeName="opacity" values="0.4;0.4;1;1;0.4;0.4" keyTimes="0;0.66;0.69;0.9;0.94;1" dur="9s" repeatCount="indefinite"/>
+    </circle>
+  </g>
+  <text x="122" y="340" fill="#e8eef4" font-size="15" font-weight="700">Devices</text>
+  <text x="122" y="366" fill="#b7c2cd" font-size="12">TV · receiver</text>
+  <text x="122" y="383" fill="#b7c2cd" font-size="12">console · lights</text>
+  <text x="122" y="408" fill="#8b98a6" font-size="11.5">via IR or Bluetooth</text>
+
+  <!-- ===================== HUB ===================== -->
+  <rect x="270" y="180" width="150" height="140" rx="14" fill="#141c25" stroke="#273241"/>
+  <g>
+    <ellipse cx="345" cy="238" rx="30" ry="9" fill="#1d2731" stroke="#34414f"/>
+    <path d="M315,238 V226 A30,9 0 0 1 375,226 V238" fill="#222d39" stroke="#34414f"/>
+    <ellipse cx="345" cy="226" rx="30" ry="9" fill="#26323f" stroke="#3a4857"/>
+    <circle cx="345" cy="226" r="2.2" fill="#3fc1f0">
+      <animate attributeName="opacity" values="0.5;1;0.5;1;0.5;0.5" keyTimes="0;0.1;0.2;0.6;0.7;1" dur="9s" repeatCount="indefinite"/>
+    </circle>
+  </g>
+  <text x="345" y="206" fill="#e8eef4" font-size="16" font-weight="700" text-anchor="middle">Hub</text>
+  <text x="345" y="272" fill="#8b98a6" font-size="11.5" text-anchor="middle">IR blaster · Bluetooth · Wifi</text>
+  <text x="345" y="290" fill="#8b98a6" font-size="11.5" text-anchor="middle">local TCP protocol</text>
+  <text x="345" y="306" fill="#8b98a6" font-size="11.5" text-anchor="middle">MQTT on X2</text>
+
+  <!-- Official app -->
+  <rect x="270" y="90" width="150" height="58" rx="10" fill="#101820" stroke="#273241" stroke-dasharray="4 3"/>
+  <text x="345" y="113" fill="#c9d3dd" font-size="13" font-weight="700" text-anchor="middle">Official Sofabaton app</text>
+  <text x="345" y="131" fill="#8b98a6" font-size="11" text-anchor="middle">keeps working, unchanged</text>
+  <!-- app -> HA (proxy) -->
+  <path d="M420,119 H560" fill="none" stroke="#7f8c9a" stroke-width="1.5" stroke-dasharray="4 3" marker-end="url(#arrow-muted)"/>
+  <text x="490" y="112" fill="#8b98a6" font-size="11" text-anchor="middle">local proxy</text>
+
+  <!-- remote -> hub -->
+  <path d="M210,185 H240 V222 H268" fill="none" stroke="#f2a93b" stroke-width="1.8" marker-end="url(#arrow-amber)"/>
+  <text x="240" y="177" fill="#f2a93b" font-size="11.5" text-anchor="middle">press</text>
+
+  <!-- hub -> devices -->
+  <path d="M270,285 H240 V360 H212" fill="none" stroke="#7f8c9a" stroke-width="1.8" marker-end="url(#arrow-muted)"/>
+  <text x="248" y="345" fill="#8b98a6" font-size="11.5">IR · Bluetooth</text>
+
+  <!-- ===================== HUB <-> HA LANES ===================== -->
+  <!-- presses lane: hub -> HA -->
+  <path d="M420,215 H578" fill="none" stroke="#f2a93b" stroke-width="2" marker-end="url(#arrow-amber)"/>
+  <text x="490" y="196" fill="#f2a93b" font-size="11.5" text-anchor="middle">presses · hub events</text>
+  <text x="490" y="209" fill="#f2a93b" font-size="11.5" text-anchor="middle">learned IR codes</text>
+  <!-- control lane: HA -> hub -->
+  <path d="M580,268 H422" fill="none" stroke="#3fc1f0" stroke-width="2" marker-end="url(#arrow-blue)"/>
+  <text x="490" y="288" fill="#3fc1f0" font-size="11.5" text-anchor="middle">commands · activities · IR</text>
+  <text x="490" y="301" fill="#3fc1f0" font-size="11.5" text-anchor="middle">live edits · backup · restore</text>
+  <!-- lane caption -->
+  <text x="490" y="246" fill="#5f6d7b" font-size="10.5" text-anchor="middle" font-style="italic">no cloud in between</text>
+
+  <!-- ===================== HOME ASSISTANT ===================== -->
+  <rect x="560" y="90" width="400" height="370" rx="16" fill="#10191f" stroke="#1f5b73"/>
+  <text x="580" y="118" fill="#e8eef4" font-size="16" font-weight="700">Home Assistant</text>
+  <circle cx="946" cy="106" r="4" fill="#3fc1f0"/>
+
+  <!-- integration -->
+  <rect x="580" y="136" width="360" height="98" rx="10" fill="#151f28" stroke="#2a3a48"/>
+  <text x="596" y="160" fill="#e8eef4" font-size="14" font-weight="700">Sofabaton X integration</text>
+  <text x="596" y="181" fill="#b7c2cd" font-size="12">entities: remote · activities · sensors · IR emitter</text>
+  <text x="596" y="199" fill="#b7c2cd" font-size="12">local proxy for the official app</text>
+  <text x="596" y="217" fill="#8b98a6" font-size="12">engine: sofabaton-x</text>
+
+  <!-- integration -> cards / automations connectors -->
+  <path d="M760,234 V254" fill="none" stroke="#2a3a48" stroke-width="1.5"/>
+  <path d="M666,254 H854" fill="none" stroke="#2a3a48" stroke-width="1.5"/>
+  <path d="M666,254 V262" fill="none" stroke="#2a3a48" stroke-width="1.5"/>
+  <path d="M854,254 V262" fill="none" stroke="#2a3a48" stroke-width="1.5"/>
+
+  <!-- control panel card -->
+  <rect x="580" y="262" width="172" height="102" rx="10" fill="#151f28" stroke="#2a3a48"/>
+  <text x="596" y="285" fill="#e8eef4" font-size="13" font-weight="700">Control Panel card</text>
+  <text x="596" y="306" fill="#b7c2cd" font-size="11.5">live hub editor</text>
+  <text x="596" y="323" fill="#b7c2cd" font-size="11.5">automation wiring</text>
+  <text x="596" y="340" fill="#b7c2cd" font-size="11.5">backup and restore</text>
+  <text x="596" y="356" fill="#8b98a6" font-size="11">Wifi Commands · Wifi Events</text>
+
+  <!-- remote card -->
+  <rect x="768" y="262" width="172" height="102" rx="10" fill="#151f28" stroke="#2a3a48"/>
+  <text x="784" y="285" fill="#e8eef4" font-size="13" font-weight="700">Remote card</text>
+  <text x="784" y="306" fill="#b7c2cd" font-size="11.5">virtual remote on any screen</text>
+  <text x="784" y="323" fill="#b7c2cd" font-size="11.5">device mode · shortcuts</text>
+  <text x="784" y="340" fill="#b7c2cd" font-size="11.5">long press</text>
+  <text x="784" y="356" fill="#8b98a6" font-size="11">mirrors the physical remote</text>
+
+  <!-- automations -->
+  <rect x="580" y="382" width="360" height="66" rx="10" fill="#151f28" stroke="#2a3a48"/>
+  <text x="596" y="405" fill="#e8eef4" font-size="13" font-weight="700">Automations and scripts</text>
+  <text x="596" y="424" fill="#b7c2cd" font-size="11.5">any button press becomes a trigger</text>
+  <text x="596" y="440" fill="#b7c2cd" font-size="11.5">any HA action rides on a remote button</text>
+  <!-- lamp -->
+  <g>
+    <circle cx="916" cy="413" r="16" fill="url(#glow-warm)" opacity="0">
+      <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.3;0.34;0.9;0.95;1" dur="9s" repeatCount="indefinite"/>
+    </circle>
+    <path d="M916,402 a8,8 0 0 1 4,15 v3 h-8 v-3 a8,8 0 0 1 4,-15 z" fill="#1d2731" stroke="#6b7887" stroke-width="1.2"/>
+    <path d="M916,402 a8,8 0 0 1 4,15 v3 h-8 v-3 a8,8 0 0 1 4,-15 z" fill="#ffd27a" opacity="0">
+      <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.3;0.34;0.9;0.95;1" dur="9s" repeatCount="indefinite"/>
+    </path>
+    <rect x="912" y="422" width="8" height="3" rx="1" fill="#6b7887"/>
+  </g>
+
+  <!-- ===================== ANIMATED PULSES ===================== -->
+  <!-- press: remote -> hub -> HA -> automations -->
+  <circle r="4.5" fill="#f2a93b" opacity="0">
+    <animateMotion dur="9s" repeatCount="indefinite" calcMode="linear"
+      keyPoints="0;0;1;1" keyTimes="0;0.03;0.3;1"
+      path="M210,185 H240 V222 H270 H420 V215 H576"/>
+    <animate attributeName="opacity" values="0;1;1;0;0;1;1;0;0" keyTimes="0;0.03;0.09;0.095;0.19;0.195;0.29;0.31;1" dur="9s" repeatCount="indefinite"/>
+  </circle>
+  <circle r="9" fill="url(#glow-amber)" opacity="0">
+    <animateMotion dur="9s" repeatCount="indefinite" calcMode="linear"
+      keyPoints="0;0;1;1" keyTimes="0;0.03;0.3;1"
+      path="M210,185 H240 V222 H270 H420 V215 H576"/>
+    <animate attributeName="opacity" values="0;1;1;0;0;1;1;0;0" keyTimes="0;0.03;0.09;0.095;0.19;0.195;0.29;0.31;1" dur="9s" repeatCount="indefinite"/>
+  </circle>
+  <!-- inside HA: integration -> automations (down the connector, to the lamp) -->
+  <circle r="3.5" fill="#f2a93b" opacity="0">
+    <animateMotion dur="9s" repeatCount="indefinite" calcMode="linear"
+      keyPoints="0;0;1;1" keyTimes="0;0.24;0.34;1"
+      path="M760,234 V254 H854 V262 M854,262"/>
+    <animate attributeName="opacity" values="0;0;1;1;0;0" keyTimes="0;0.24;0.25;0.33;0.34;1" dur="9s" repeatCount="indefinite"/>
+  </circle>
+
+  <!-- control: HA -> hub -> devices -->
+  <circle r="4.5" fill="#3fc1f0" opacity="0">
+    <animateMotion dur="9s" repeatCount="indefinite" calcMode="linear"
+      keyPoints="0;0;1;1" keyTimes="0;0.5;0.68;1"
+      path="M580,268 H420 H270 V285 H240 V360 H212"/>
+    <animate attributeName="opacity" values="0;0;1;1;0;0;1;1;0;0" keyTimes="0;0.5;0.51;0.56;0.565;0.62;0.625;0.67;0.69;1" dur="9s" repeatCount="indefinite"/>
+  </circle>
+  <circle r="9" fill="url(#glow-blue)" opacity="0">
+    <animateMotion dur="9s" repeatCount="indefinite" calcMode="linear"
+      keyPoints="0;0;1;1" keyTimes="0;0.5;0.68;1"
+      path="M580,268 H420 H270 V285 H240 V360 H212"/>
+    <animate attributeName="opacity" values="0;0;1;1;0;0;1;1;0;0" keyTimes="0;0.5;0.51;0.56;0.565;0.62;0.625;0.67;0.69;1" dur="9s" repeatCount="indefinite"/>
+  </circle>
+
+  <!-- ===================== BOTTOM ROW: LIBRARY + SERVER ===================== -->
+  <line x1="40" y1="480" x2="960" y2="480" stroke="#1c2631"/>
+  <text x="40" y="503" fill="#8b98a6" font-size="11.5" font-style="italic">Not on Home Assistant? Same engine, different front door.</text>
+
+  <!-- library -->
+  <rect x="40" y="516" width="250" height="76" rx="10" fill="#141c25" stroke="#273241"/>
+  <text x="56" y="540" fill="#e8eef4" font-size="14" font-weight="700">sofabaton-x</text>
+  <text x="150" y="540" fill="#8b98a6" font-size="11.5">Python · PyPI</text>
+  <text x="56" y="560" fill="#b7c2cd" font-size="11.5">protocol engine and proxy</text>
+  <text x="56" y="577" fill="#b7c2cd" font-size="11.5">snapshots · live editing · IR · backups</text>
+
+  <!-- library -> server -->
+  <path d="M290,554 H328" fill="none" stroke="#7f8c9a" stroke-width="1.5" marker-end="url(#arrow-muted)"/>
+
+  <!-- server -->
+  <rect x="330" y="516" width="250" height="76" rx="10" fill="#141c25" stroke="#273241"/>
+  <text x="346" y="540" fill="#e8eef4" font-size="14" font-weight="700">sofabaton-x-server</text>
+  <text x="346" y="560" fill="#b7c2cd" font-size="11.5">REST + WebSocket · OpenAPI</text>
+  <text x="346" y="577" fill="#b7c2cd" font-size="11.5">presses out, commands in</text>
+
+  <!-- server -> hub (same protocol) -->
+  <path d="M455,516 V470 Q455,455 440,455 H415 Q400,455 400,440 V322" fill="none" stroke="#7f8c9a" stroke-width="1.2" stroke-dasharray="3 3" marker-end="url(#arrow-muted)"/>
+
+  <!-- server -> platforms -->
+  <path d="M580,554 H618" fill="none" stroke="#7f8c9a" stroke-width="1.5" marker-end="url(#arrow-muted)"/>
+
+  <!-- platforms -->
+  <rect x="620" y="516" width="340" height="76" rx="10" fill="#101820" stroke="#273241" stroke-dasharray="4 3"/>
+  <text x="636" y="540" fill="#e8eef4" font-size="14" font-weight="700">Other platforms</text>
+  <text x="636" y="560" fill="#b7c2cd" font-size="11.5">Homey · Hubitat · openHAB · Node-RED</text>
+  <text x="636" y="577" fill="#b7c2cd" font-size="11.5">or your own code</text>
+</svg>

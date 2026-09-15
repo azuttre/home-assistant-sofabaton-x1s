@@ -45,7 +45,7 @@ export const TOOLS_CARD_STRINGS_FR = {
     automationBlockedByProxy: "L’automatisation ne peut pas être utilisée lorsque l’application Sofabaton est connectée au hub par le proxy.",
     backupBlockedByProxy: "La sauvegarde ne peut pas être utilisée lorsque l’application Sofabaton est connectée au hub par le proxy.",
     blockedByFirmware: (installed: string | number, required: string | number) =>
-      `Ce hub utilise la version ${installed} du firmware. La version ${required} ou ultérieure est requise pour les fonctions du panneau de contrôle qui modifient la configuration du hub. Mettez à jour le hub via Bluetooth à l’aide de l’application Sofabaton. Cette fonction sera de nouveau disponible automatiquement lorsque le hub aura signalé la version mise à jour du firmware.`,
+      `Ce hub utilise la version ${installed} du firmware. La version ${required} ou ultérieure est requise pour les fonctions du panneau de contrôle qui modifient la configuration du hub. Mettez à jour le hub à l’aide de l’application Sofabaton. Cette fonction sera de nouveau disponible automatiquement lorsque le hub aura signalé la version mise à jour du firmware.`,
   },
   buttonNames: {
     0x97: "C", 0x98: "B", 0x99: "A", 0x9a: "Quitter", 0x9b: "DVR", 0x9c: "Lecture", 0x9d: "Guide",
@@ -154,7 +154,7 @@ export const TOOLS_CARD_STRINGS_FR = {
     appConnectedTitle: "L’application Sofabaton est connectée", appConnectedBody: "Fermez l’application Sofabaton pour modifier la configuration du hub.",
     firmwareUnsupportedTitle: "Mise à jour du firmware du hub requise",
     firmwareUnsupportedBody: (installed: string | number, required: string | number) =>
-      `Ce hub utilise la version ${installed} du firmware. La version ${required} ou ultérieure est nécessaire pour modifier la configuration du hub en toute sécurité. La modification est désactivée afin de protéger votre configuration. Mettez à jour le hub via Bluetooth à l’aide de l’application Sofabaton. La modification de la configuration sera automatiquement réactivée lorsque le hub aura signalé la version mise à jour du firmware.`,
+      `Ce hub utilise la version ${installed} du firmware. La version ${required} ou ultérieure est nécessaire pour modifier la configuration du hub en toute sécurité. La modification est désactivée afin de protéger votre configuration. Mettez à jour le hub à l’aide de l’application Sofabaton. La modification de la configuration sera automatiquement réactivée lorsque le hub aura signalé la version mise à jour du firmware.`,
     operationRunningTitle: "Une autre opération est en cours", operationRunningBody: "Attendez la fin de la sauvegarde, de la restauration ou de la synchronisation en cours, puis réessayez.",
     captureTitle: "Lecture de votre hub", captureMessage: "Lecture de la configuration de votre hub…", captureMessageWithStep: (current: number, total: number) => `Lecture de la configuration de votre hub… (appareil ${current} sur ${total})`,
     captureFailedTitle: "Impossible de lire le hub", captureFailedBody: "Le hub a cessé de répondre avant la fin de la lecture.", retry: "Réessayer", back: "Retour",
@@ -360,7 +360,7 @@ export const TOOLS_CARD_STRINGS_FR = {
     firmwareUpdateRequired: "Mise à jour du firmware requise",
     firmwareUpdateRecommended: "Mise à jour du firmware recommandée",
     firmwareUpdateTooltip: (recommended: string | number, required: string | number, unsupported: boolean) => {
-      const update = "Mettez à jour le hub via Bluetooth à l’aide de l’application Sofabaton.";
+      const update = "Mettez à jour le hub à l’aide de l’application Sofabaton.";
       if (unsupported) {
         const recommendation = String(recommended) === String(required)
           ? ""
