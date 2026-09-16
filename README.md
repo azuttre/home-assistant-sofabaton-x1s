@@ -49,6 +49,7 @@ For ports, firewall rules, containers, VLANs, and iOS discovery behavior, see th
 
 > [!IMPORTANT]
 > Disconnect or fully close the Sofabaton app before installing the integration and adding the hub.
+> While the app is connected directly to the hub, the hub stops advertising and cannot be discovered. Keep the app closed through initial setup.
 
 ### HACS (recommended)
 
@@ -72,7 +73,7 @@ After Home Assistant has restarted:
 
 1. Go to **Settings → Devices & services**.
 2. Home Assistant begins discovery only after it has **fully started**. Then, allow up to one minute for hubs to appear. Select the discovered Sofabaton hub and follow the configuration flow.
-3. If discovery does not find it, select **Add integration**, search for **Sofabaton X**, and enter the hub IP address manually.
+3. If discovery does not find it, confirm the official app is fully closed on all phones/tablets and try again. For manual entry, select **Add integration**, search for **Sofabaton X**, and enter the hub IP address; keep the app closed during setup.
 
 If the hub is on another VLAN or subnet, see the [networking guide](docs/networking.md).
 

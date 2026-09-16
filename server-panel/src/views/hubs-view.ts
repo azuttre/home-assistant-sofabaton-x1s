@@ -180,8 +180,18 @@ export class SbPanelHubs extends LitElement {
     return `(${this.seen.filter((s) => s.present).length} present)`;
   }
 
+  /** The registered hub an advertisement belongs to: the server's answer, or a host / MAC match. */
+  private _registeredFor(s: SeenHub): string | null {
+    if (s.registered_hub_id) return s.registered_hub_id;
+    const c = s.config ?? ({} as SeenHub["config"]);
+    const mac = String(c.mac ?? "").toLowerCase().replace(/[^0-9a-f]/g, "");
+    const hit = this.hubs.find((h) => h.config.host === c.host || (mac && (h.hub_id === mac || String(h.config.mac ?? "").toLowerCase().replace(/[^0-9a-f]/g, "") === mac)));
+    return hit?.hub_id ?? null;
+  }
+
   private _renderSeen(s: SeenHub): TemplateResult {
     const c = s.config ?? ({} as SeenHub["config"]);
+    const registered = this._registeredFor(s);
     return html`<tr>
       <td class="mono">${c.host || "?"}</td>
       <td>${c.hub_version || "?"}</td>
@@ -189,8 +199,8 @@ export class SbPanelHubs extends LitElement {
       <td class="mono sub">${c.mac || ""}</td>
       <td class=${s.present ? "tone-ok" : "sub"} title="first seen ${formatWhen(s.first_seen)}, last seen ${formatWhen(s.last_seen)}">${s.present ? "present" : "gone"}</td>
       <td class="act">
-        ${s.registered_hub_id
-          ? html`<span class="sub">registered as ${s.registered_hub_id}</span>`
+        ${registered
+          ? html`<span class="sub">registered as ${registered}</span>`
           : html`<button class="small primary" ?disabled=${this._adding} @click=${() => this._add({ ...c, enabled: true })}>Add</button>`}
       </td>
     </tr>`;

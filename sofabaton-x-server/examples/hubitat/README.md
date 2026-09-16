@@ -5,8 +5,7 @@ The Python server runs on a separate computer; Hubitat connects to its REST
 API and WebSocket. No Home Assistant, MQTT broker, Maker API token or inbound
 Hubitat HTTP endpoint is needed.
 
-**Development example:** targets this checkout's server 0.2.0 / API 1, which
-is not yet released. The sources are compiled and behavior-tested with
+**Example for server 0.2.0 / API 1.** The sources are compiled and behavior-tested with
 Groovy 2.4.21 and a simulated Hubitat environment. Installation, Hubitat's
 sandbox, actual asynchronous HTTP/WebSocket behavior, and physical devices
 still require validation on a Hubitat hub. Do not interpret the local tests
@@ -25,31 +24,37 @@ as hardware certification.
 - Reconnect backoff, event-gap reconciliation, press deduplication, and
   rejection of HTTP snapshots made obsolete by newer events.
 
-This example consumes existing registered hubs and callback devices. It
-does not include a hub-registration wizard, automatic callback deployment,
-button-binding editor, command catalog browser, backup/restore, or a full
-configuration editor. Use the server tools for those operations. The
-instructions below cover the callback setup needed to receive real presses.
+This example follows the recommended integration scope: consume registered
+hubs and callback devices, and keep setup in the server's control panel.
+Use its Catalog view to find command IDs and its Remote view for the full
+remote and layout editor. The instructions below cover the separate,
+one-time callback setup needed to receive button presses.
 
 ## 1. Start the server
 
-Follow the [server setup](../../README.md#run) and
-[starter guide](../../docs/getting-started.md). Use one server/proxy owner
-per physical hub; disable that hub in any existing Home Assistant proxy
-before registering it here.
+**Fully close the official Sofabaton app on all phones/tablets first.**
+While it is connected directly to the hub, the hub does not advertise and
+the server cannot discover it. Keep the app closed through registration
+and the first control test.
 
-For example, from the repository root on the server host:
+Follow the [server setup](../../README.md#run) and
+[starter guide](../../docs/getting-started.md). Run one server for all your
+hubs and connect Hubitat to that server. If a hub is already managed by
+Home Assistant or another proxy, disable it there before registering it here.
+
+On the server host:
 
 ```sh
-python -m pip install . ./sofabaton-x-server
-sofabaton-x-server --hub 192.168.1.50
+python -m pip install "sofabaton-x-server>=0.2,<0.3"
+sofabaton-x-server
 ```
 
-Use the physical hub's IP for `--hub`. The flag seeds registration only
-when `hubs.json` does not exist; register subsequent hubs through the
-server's `/api/v1/docs` interface. Wait until the hub has a stable MAC ID
-and `catalog_ready: true`. Close the official SofaBaton app during initial
-connection and when sending commands or changing configuration.
+Open `http://<server>:8480/` and add the physical hub in **Hubs**. If it
+does not appear, check that the official app is closed and scan again.
+Wait until the hub has a stable MAC ID
+and `catalog_ready: true`. After setup, the official app can connect
+through the proxy; close it again before sending commands or changing
+configuration from the server or Hubitat.
 
 The Hubitat app needs the **server host's** base URL, for example
 `http://192.168.1.10:8480`, not the physical hub's IP. Reserve both LAN
@@ -175,8 +180,8 @@ generates an event, even if the button number equals the previous one.
   concurrent remote activity change during that interval cannot be fully
   guarded by a client.
 
-For direct command sending, find IDs using the starter client's `devices`
-and `commands --device <id>` actions, then use the hub device's
+For direct command sending, find IDs in the panel's **Catalog** view (or
+the starter client's `devices` and `commands --device <id>` actions), then use the hub device's
 `sendCommand(entityId, commandId)` command in Hubitat. Device and command
 IDs must always stay paired. `startActivity(activityId)` and `findRemote()`
 are also available as custom commands in rules.

@@ -11954,8 +11954,17 @@ The server stops its proxy, hands the hub back, and forgets its record, cached s
     if (!this.seen.length) return "";
     return `(${this.seen.filter((s7) => s7.present).length} present)`;
   }
+  /** The registered hub an advertisement belongs to: the server's answer, or a host / MAC match. */
+  _registeredFor(s7) {
+    if (s7.registered_hub_id) return s7.registered_hub_id;
+    const c7 = s7.config ?? {};
+    const mac = String(c7.mac ?? "").toLowerCase().replace(/[^0-9a-f]/g, "");
+    const hit = this.hubs.find((h6) => h6.config.host === c7.host || mac && (h6.hub_id === mac || String(h6.config.mac ?? "").toLowerCase().replace(/[^0-9a-f]/g, "") === mac));
+    return hit?.hub_id ?? null;
+  }
   _renderSeen(s7) {
     const c7 = s7.config ?? {};
+    const registered = this._registeredFor(s7);
     return b2`<tr>
       <td class="mono">${c7.host || "?"}</td>
       <td>${c7.hub_version || "?"}</td>
@@ -11963,7 +11972,7 @@ The server stops its proxy, hands the hub back, and forgets its record, cached s
       <td class="mono sub">${c7.mac || ""}</td>
       <td class=${s7.present ? "tone-ok" : "sub"} title="first seen ${formatWhen(s7.first_seen)}, last seen ${formatWhen(s7.last_seen)}">${s7.present ? "present" : "gone"}</td>
       <td class="act">
-        ${s7.registered_hub_id ? b2`<span class="sub">registered as ${s7.registered_hub_id}</span>` : b2`<button class="small primary" ?disabled=${this._adding} @click=${() => this._add({ ...c7, enabled: true })}>Add</button>`}
+        ${registered ? b2`<span class="sub">registered as ${registered}</span>` : b2`<button class="small primary" ?disabled=${this._adding} @click=${() => this._add({ ...c7, enabled: true })}>Add</button>`}
       </td>
     </tr>`;
   }

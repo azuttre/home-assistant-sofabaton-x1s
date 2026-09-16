@@ -124,5 +124,6 @@ def test_listener_uses_prefix_and_dispatches_only_deployed_presses(monkeypatch, 
     starter.listen(starter.Client("https://server.example/prefix/"), "hub id")
     output = capsys.readouterr().out
     assert "Connected to server instance test-instance" in output
+    assert '"kind": "activity_changed"' in output
     assert "PRESS: Demo (short)" in output and "PRESS: Old" not in output
     assert "Events were lost" in output

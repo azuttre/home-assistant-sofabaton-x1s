@@ -10,6 +10,7 @@ relay or a message bus wants: one handler, one schema. The kinds:
   hub_state / app_state  ConnectionState(connected)
   status_changed         StatusChanged(mode, previous_mode)   derived, once per flip
   catalog_ready          CatalogReady(ready)                  the initial sync finished
+  snapshot_changed       SnapshotChanged(...)                cached configuration changed
   ota                    no payload
 
 Each consumer owns a bounded queue; falling behind drops the oldest

@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Scan the LAN for Sofabaton hubs.
 
+Fully close the official Sofabaton app before scanning. A hub connected
+directly to the app does not advertise and cannot be discovered.
+
 Equivalent to ``sofabaton discover``. Proxy advertisements (our own
 mDNS announcements, marked with the PROXY_TXT_KEY TXT record) are
 filtered out by default so you only see physical hubs.
@@ -14,7 +17,7 @@ from sofabaton import async_discover_hubs
 async def main() -> None:
     hubs = await async_discover_hubs(timeout=5.0)
     if not hubs:
-        print("no hubs found")
+        print("no hubs found; fully close the official Sofabaton app, then scan again")
     for hub in hubs:
         print(
             f"{hub.name}: {hub.hub_version or 'unknown variant'} at "

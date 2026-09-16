@@ -1,290 +1,220 @@
-# Your first command and your first remote press
+# Your first integration
 
-Start with **sofabaton-x-server** when building an integration. It manages
-the hub connection and exposes HTTP and WebSocket interfaces that you can
-use from any language. The examples here are small Python clients of that
-server; they do not connect directly to a hub.
+Start with **sofabaton-x-server**. It manages hub connections and provides
+HTTP and WebSocket APIs for clients in any language. Use its built-in
+management UI (the **control panel**) for setup, catalog browsing and
+diagnostics, and its web remote for everyday control.
 
-Before writing any code, you can see the hub work from a browser: with
-the server running, open `http://<server>:8480/` for the control panel
-(register the hub there, then its Remote view), or
-`http://<server>:8480/ui/remote/?hub=<hub id>` for the server's own
-remote page (the README's "Web remote" section). Everything the pages do
-goes through the same API this guide uses.
-
-This guide gets two things working:
-
-1. **Send a command:** find a device and its command IDs, then send one.
-2. **Receive a press:** assign a callback command to a remote button and
-   receive a `press` message when someone pushes it.
-
-**Receiving presses requires setup.** The hub does not report ordinary IR
-or Bluetooth presses. We create a *callback device*: a virtual device whose
-commands call the server. You assign its commands to buttons on the remote.
-The server receives those calls and forwards them over WebSocket.
-
-```text
-Send:     your application --HTTP--> server --> hub --> equipment
-Receive:  remote --> hub --HTTP callback--> server --WebSocket--> your application
-```
-
-The server runs the callback listener for you. Your application only needs
-the server's API address; it does not need to expose an HTTP listener.
-
-[Set up the server](#1-set-up-the-server) · [Send a command](#2-send-your-first-command) ·
-[Receive a press](#3-receive-your-first-remote-press) · [Troubleshooting](#if-something-does-not-work)
+Your integration can stay small: let users select an already registered
+hub, expose the actions and state your platform needs, and map remote
+callback presses to automations. Link to the server for management and
+the remote UI. Hub discovery, registration and configuration editors are
+optional features for your client.
 
 ## 1. Set up the server
 
-The current server is **unreleased development software**. These instructions
-use the checkout version of both packages, with Python 3.11 or later.
-Run the server on a host on the hub's LAN. Use one server/proxy owner for a
-hub; if Home Assistant or another proxy already manages it, disable that
-hub there before starting this server.
+**Run one server for all your hubs.** Add each hub to that server in the
+control panel; your integration uses the same server URL for all of them.
 
-From a checkout's repository root:
+**Before starting, fully close the official Sofabaton app on every phone
+or tablet that could connect to this hub.** While the app is connected
+directly to the hub, the hub stops advertising itself. The server cannot
+discover it during that time, even on the same LAN. Keep the app closed
+through discovery, registration and the first control test.
+
+If a hub is already managed by Home Assistant or another proxy, disable
+that hub there before registering it with this server.
+
+Use Python 3.11+ on a host on the hub's LAN:
 
 ```sh
-python -m pip install . ./sofabaton-x-server
-sofabaton-x-server --hub 192.168.1.50
+python -m pip install "sofabaton-x-server>=0.2,<0.3"
+sofabaton-x-server
 ```
 
-Replace `192.168.1.50` with your **physical hub's IP address**. Keep this
-terminal running. Close the official Sofabaton app while connecting,
-reading catalogs, sending commands or setting up button assignments: an
-attached app owns the hub and blocks server control.
+Open `http://<server>:8480/` (or `http://localhost:8480/` on that host).
 
-The `--hub` flag seeds registration only when `hubs.json` does not exist.
-The easier way, and the one to use once you have server data, is the
-control panel at `http://localhost:8480/`: its Hubs view lists the hubs
-discovered on the LAN with an Add button, takes an address by hand, shows
-each hub's state, and enables, disables or removes it. Under the hood
-that is `POST /api/v1/hubs` with `{"host":"192.168.1.50"}`, which you can
-also submit in the interactive API docs at
-`http://localhost:8480/api/v1/docs`.
+1. In **Hubs**, wait for the hub to appear, then add it. If it is missing,
+   confirm the app is fully closed and scan again. You can also enter the
+   physical hub's IP address; manual entry does not replace closing the app.
+2. Wait for the hub to be controllable with its catalogs ready.
+3. In **Remote**, test an activity or command. Its layout editor saves the
+   remote's settings on the server.
+4. In **Catalog**, look up activity, device and command IDs. **Events** shows
+   the live stream; **API** lets you try requests and follow their jobs.
 
-For Docker, use the [Linux host-network deployment instructions](../README.md#docker).
-Keep this LAN service private; it has no built-in authentication.
+Repeat these steps in the same panel for your other hubs.
 
-### Find the registered hub ID
+After setup, the official app can connect **through the proxy**. That is
+a different situation: the server keeps its hub connection but switches
+to observe mode while the app owns control. Close the app again before
+sending server commands or changing configuration.
 
-Open a second terminal at the repository root, using the same Python
-environment, and run the [starter example](../examples/starter.py):
+Keep the server running. Use a persistent data directory (`--data-dir`)
+so registrations and settings survive restarts. `--hub <physical IP>` is
+an alternative for first startup only: it seeds hubs when `hubs.json`
+does not exist. Later, add hubs through the panel.
+
+For a checkout, run `python -m pip install . ./sofabaton-x-server` from
+the repository root instead of the PyPI install. For Docker, follow the
+[Linux host-network recipe](../README.md#docker). The server has no
+built-in authentication; keep it on a trusted LAN or behind an
+authenticating reverse proxy.
+
+### Connect your client
+
+Ask for the **server base URL**, for example `http://192.168.1.10:8480`,
+then list registered hubs with `GET /api/v1/hubs`. Let the user choose one
+and store its `hub_id`. Wait for the stable MAC form (such as
+`e26a44861b45`); an initial IP-based ID can change after the first connection.
+
+The [starter client](../examples/starter.py) makes these calls visible.
+The commands below run from a repository checkout; the examples are not
+installed as commands by pip. They default to `http://localhost:8480`:
 
 ```sh
 python sofabaton-x-server/examples/starter.py hubs
 ```
 
-It calls `GET /api/v1/hubs` and prints the records. Look for your hub and
-copy its `hub_id`. Relevant fields look like this (other fields omitted):
-
-```json
-[
-  {
-    "hub_id": "e26a44861b45",
-    "enabled": true,
-    "status": {"controllable": true, "catalog_ready": true}
-  }
-]
-```
-
-Wait for `controllable` and `catalog_ready` to become true. An ID initially
-based on the IP address can change to the hub's MAC when the connection
-banner arrives; run `hubs` again and use the MAC ID once available.
-
-All commands below use `e26a44861b45` as an **example**. Replace it with your
-registered hub ID. The scripts wait briefly for readiness before reads and
-writes. A timeout reports the last status instead of repeatedly sending a
-write.
-
-If your client runs on another machine, add `--server http://192.168.1.10:8480`
-**before the action**, replacing that IP with the **server host's** address:
+For another host, put `--server` **before the action**:
 
 ```sh
 python sofabaton-x-server/examples/starter.py --server http://192.168.1.10:8480 hubs
 ```
 
-`--server` takes a server base URL without `/api/v1`. A reverse-proxy path
-prefix is allowed. The examples default to `http://localhost:8480`.
+Pass the server's address, not the physical hub's. Exclude `/api/v1` from
+the base URL; preserve a reverse-proxy prefix if there is one. All IDs
+below are examples: replace them with values from your own hub.
 
 ## 2. Send your first command
 
-### Find the device
+In the panel's **Catalog** view, choose a device and copy its device ID
+and a command ID. You can also list them from the starter client:
 
 ```sh
 python sofabaton-x-server/examples/starter.py --hub-id e26a44861b45 devices
-```
-
-Find the intended device by its `name`, and copy its `device_id`. Suppose
-your television is device `7`. These IDs come from your hub; they are not
-universal model numbers.
-
-### Find a command on that device
-
-```sh
 python sofabaton-x-server/examples/starter.py --hub-id e26a44861b45 commands --device 7
 ```
 
-The response lists that device's commands, for example:
-
-```json
-[
-  {"command_id": 3, "label": "Volume Up"},
-  {"command_id": 4, "label": "Volume Down"}
-]
-```
-
-Choose a command whose physical effect you want to test. Always keep its
-**device ID and command ID together**: command `3` on another device can
-mean something entirely different.
-
-### Send the selected command
-
-If your listing really identified device `7`, command `3` as the command
-you want, send it:
+Keep the **device ID and command ID together**. If device `7`, command `3`
+is the command you want to test, send it:
 
 ```sh
 python sofabaton-x-server/examples/starter.py --hub-id e26a44861b45 send --device 7 --command 3
 ```
 
-The control response is:
+This calls `POST /api/v1/hubs/{hub_id}/send` with
+`{"entity_id":7,"command_id":3}`. The response
+`{"accepted":true,"mode":"control"}` confirms acceptance for sending;
+check the equipment for the physical result. No snapshot, backup or job
+is needed for a send.
 
-```json
-{"accepted": true, "mode": "control"}
-```
+### What your integration needs
 
-This confirms acceptance for sending, not proof that the equipment acted.
-Check the physical result. Sending is an immediate request; there is no
-background job to poll and no whole-hub snapshot or backup to prepare.
+Implement the operations your platform exposes. Paths below are relative
+to `<server base URL>/api/v1`.
 
-These are the same calls to implement in your own client:
-
-| Step | HTTP request |
+| Need | Call or link |
 | --- | --- |
-| Read readiness | `GET /api/v1/hubs/{hub_id}/status` |
-| List devices | `GET /api/v1/hubs/{hub_id}/devices` |
-| List commands | `GET /api/v1/hubs/{hub_id}/devices/{device_id}/commands` |
-| Send | `POST /api/v1/hubs/{hub_id}/send` with `{"entity_id":7,"command_id":3}` |
+| Select a registered hub | `GET /hubs` |
+| Read availability and current activity | `GET /hubs/{id}/status`; read `enabled` and the nested `status` (which can be null) |
+| Offer activity switches | `GET /hubs/{id}/activities`; use `POST /hubs/{id}/activities/{aid}/start` and `POST /hubs/{id}/activities/{aid}/stop` |
+| Send a selected command | `POST /hubs/{id}/send` with `entity_id` and `command_id` |
+| Update state and receive callbacks | WebSocket `/events?hub_id={id}`; handle `hub_event`, `server_event` and `press` |
+| Open management | `<server base URL>/ui/` |
+| Open the remote | `<server base URL>/ui/remote/?hub={id}` (URL-encode the hub ID) |
 
-In this device-command workflow, `entity_id` is the selected `device_id`.
-The more general API can also address activity buttons/macros; see
-[read and control](platform-integration.md#4-read-and-control) after this first test.
+An activity-only integration needs no callback device; continue to
+[Before shipping](#before-shipping-your-integration). Add remote presses
+when you want buttons to trigger platform actions.
 
 ## 3. Receive your first remote press
 
-This setup uses one existing activity and one button you choose on it.
-It creates the callback device if the server has none, then assigns its
-first slot's short and long commands to that button. The server persists
-the callback record, so setup is not required on each application launch.
+**The hub does not report ordinary IR or Bluetooth button presses.** To
+trigger your platform, a remote button must run a command on a *callback
+device*: a virtual device that calls the server. The server receives the
+HTTP call and forwards a WebSocket `press` event. Your client does not
+need an HTTP listener.
 
-### Choose an activity and a button
+### Set up callbacks once
 
-```sh
-python sofabaton-x-server/examples/starter.py --hub-id e26a44861b45 activities
-```
+The panel has no dedicated callback-device or button-binding editor in
+0.2.0. Use the setup command below, or the API view and
+[callback routes](platform-integration.md#10-button-events). Once a callback
+device exists, its commands can also be assigned in the official app.
+Keep this setup separate from your integration's normal startup.
 
-Copy an `activity_id` from the returned list. Suppose you choose `101` and
-the `PLAY` button. **The next command replaces that activity button's
-existing short and long assignments.** Choose a button you are comfortable
-reassigning. It does not change that button in other activities.
+Choose an existing activity ID in **Catalog** (or run the starter's
+`activities` action). The following example uses activity `101` and
+`PLAY`. **It replaces that button's short and long assignments in that
+activity.** Choose a button you intend to reassign, then close the official
+app before running:
 
 ```sh
 python sofabaton-x-server/examples/starter.py --hub-id e26a44861b45 setup-presses --activity 101 --button PLAY
 ```
 
-The example waits for each setup job to finish. `202 Accepted` during setup
-means a job has started; it is only successful when its status is `done`.
-When finished, the example prints the callback device ID, labels and
-destination. A new device uses `Demo` and `Demo Long`. If a callback device
-already exists, the example reuses its first slot and its current labels;
-it does not replace the existing specification.
+The script creates a callback device if missing, or reuses its first slot
+and existing labels. It waits for each job to finish and prints the
+device ID, labels and deployed destination. `202 Accepted` starts a job;
+only `status: "done"` means the setup succeeded.
 
-The server's callback port is **8060** by default; the API/WebSocket port
-is **8480**. The hub must reach port 8060 on the server's LAN address.
-These are different connections: your application connects to 8480.
+The hub must reach the server's callback listener on TCP **8060** by
+default; your client uses the API/WebSocket port **8480**. The X1 always
+uses 8060. Allow the physical remote to finish synchronizing its configuration.
 
-### Listen, then press the button
+### Listen and dispatch
 
-The listener uses `websockets`, included when you install the server above.
-On a separate client machine, install that dependency with
-`python -m pip install "websockets>=12"`; the other example actions use
-only Python's standard library.
+The listener uses `websockets`, included with the server installation.
+On a separate client machine, install it with
+`python -m pip install "websockets>=12"`. Other starter actions use only
+Python's standard library.
 
 ```sh
 python sofabaton-x-server/examples/starter.py --hub-id e26a44861b45 listen
 ```
 
-Wait for `Connected to server instance …`. Select activity `101` on the
-physical remote, allow any remote configuration sync to finish, and press
-`PLAY`. You should see a message of this shape, followed by `PRESS: Demo
-(short)` (IDs, sequence, address and timestamp are illustrative):
+Wait for `Connected to server instance …`, select the chosen activity
+on the physical remote, and press the assigned button. A new setup prints
+`PRESS: Demo (short)` along with the complete event. Holding the button
+uses command `11` and `press_type: "long"`; a short press uses command `1`.
 
-```json
-{
-  "type": "press",
-  "seq": 1,
-  "hub_id": "e26a44861b45",
-  "device_id": 12,
-  "command_id": 1,
-  "slot": 1,
-  "label": "Demo",
-  "press_type": "short",
-  "resolution": "deployed",
-  "transport": "http",
-  "source": "192.168.1.50",
-  "received_at": "2026-09-13T12:00:00+00:00"
-}
-```
+In `listen()`, replace the dispatch comment with your platform action.
+Match `hub_id`, `device_id`, `command_id` and `press_type`; labels are
+display text and can change. The example dispatches only
+`resolution: "deployed"` and prints other records for diagnosis.
+Activity changes arrive separately as
+`hub_event` with `event.kind: "activity_changed"`.
 
-Holding the same button uses command `11` and `press_type: "long"` for
-the first slot. In `listen()`, replace the marked dispatch comment with
-your application action. Match `hub_id`, `device_id`, `command_id` and
-`press_type`; labels are display text and can change. The example dispatches
-only `resolution: "deployed"`, while printing other press records for diagnosis.
+## Before shipping your integration
 
-The listener subscribes to `ws://localhost:8480/api/v1/events?hub_id=<hub_id>`
-(`wss://` with HTTPS). A `hello` message confirms the subscription.
-General `hub_event` messages describe hub state; **remote callbacks arrive
-as `type: "press"`**. The server already provides the hub-facing HTTP listener.
+- Reconnect with backoff and re-read selected hubs, status and the catalogs
+  you use. Handle hubs disabled, removed or changed through the panel.
+  Keep last-known state separate from availability.
+- Check failures even after a readiness check: the official app can take
+  control between requests. Do not automatically retry a timed-out control
+  command; its physical effect may already have happened.
+- Choose a missed-press policy. The starter stops on disconnect. Production
+  clients can use bounded press history, or deliberately skip missed actions
+  to avoid executing old button presses. De-duplicate by `(instance_id, seq)`
+  and reset tracking after a server restart. See the
+  [event lifecycle](platform-integration.md#5-events).
 
-For a client in another language, the setup and receive sequence is:
-
-| Step | Call |
-| --- | --- |
-| Reuse an existing callback device | `GET /api/v1/hubs/{hub_id}/callback-device` |
-| If specifically `404 callback_device_not_found`, deploy | `POST /api/v1/hubs/{hub_id}/callback-device` with `{"name":"Starter callbacks","slots":[{"label":"Demo","long_label":"Demo Long"}]}`; follow its job to `done`, then GET the record |
-| Check callback listener | `GET /api/v1/server/callback-listener`; check `bound` |
-| Read activity detail for binding | `POST /api/v1/hubs/{hub_id}/snapshot/refresh` with `{"activity_id":101}`; follow its job to `done` |
-| Get the edit revision | `GET /api/v1/hubs/{hub_id}/snapshot`; keep `snapshot_id` |
-| Bind the selected button | `PUT /api/v1/hubs/{hub_id}/activities/101/buttons/PLAY` with `{"device_id":12,"command_id":1,"long_press":{"device_id":12,"command_id":11}}` and quoted `snapshot_id` as `If-Match`; follow its job to `done` |
-| Receive | Open `/api/v1/events?hub_id=<hub_id>` as a WebSocket; handle `press` messages |
-
-Replace device `12` in the binding body with the returned callback device
-ID. Poll setup jobs at `GET /api/v1/hubs/{hub_id}/jobs/{job_id}` and stop on
-`failed` or `cancelled`. A request timeout does not mean nothing happened;
-inspect the job and callback record before repeating setup.
+The [Hubitat example](../examples/hubitat/README.md) demonstrates this small
+integration scope with activity switches, command sending and button events.
+The [platform guide](platform-integration.md) covers the production contract
+and optional setup/editing APIs.
 
 ## If something does not work
 
 | Symptom | First check |
 | --- | --- |
-| `hubs` returns an empty list | `--hub` only seeds a new data directory. Register the hub from the control panel (`/`, Hubs view) or through `POST /api/v1/hubs`. |
-| `hub_not_found` | Run `hubs` again; the ID may have changed from an IP address to the MAC. |
-| Not ready, `hub_busy` or `send_refused` | Close the official app; check that no other integration owns the hub and that it can connect back to the server. |
-| Send accepted, no equipment response | Verify the selected device/command pair and check the equipment's usual IR/network reachability. |
-| Callback device exists but listener is not bound | Inspect `GET /api/v1/server/callback-listener`; another service may own port 8060. Resolve the conflict, then use `POST /api/v1/server/callback-listener/retry`. |
-| Listening, but no press arrives | Confirm the selected activity/button, the deployed record's `target`, the hub's access to TCP 8060, and completion of the remote's configuration sync. |
-| Ordinary IR button produces no event | Expected: only commands assigned to call the callback device produce these press messages. |
-| Binding job fails | Read its `error` and partial `result`; keep the deployed callback device and inspect the activity before trying another edit. |
+| Physical hub missing from discovery | Fully close the official app on all phones/tablets, then scan again. A hub connected directly to the app does not advertise. |
+| Client lists no registered hubs | Add one in the panel's Hubs view after closing the app. `--hub` only seeds a new data directory. |
+| `hub_not_found` | Re-read `/hubs`; an initial IP-based ID may have changed to the MAC. |
+| Not ready, `hub_busy` or `send_refused` | Close the official app; check hub connectivity and that no other proxy owns it. |
+| Send accepted, no equipment response | Verify the device/command pair and equipment reachability. |
+| Setup job fails | Inspect the job's `error` and partial `result` before another write. |
+| Listening, but no press arrives | Check the assignment, selected activity and remote sync; inspect the callback record's `target` and `GET /api/v1/server/callback-listener` (`bound`). Another service may own port 8060. |
 
-For callbacks, the X1 always uses port 8060. Network/firewall details are
-in the [networking guide](../../docs/networking.md); deployment options are
-in the [server README](../README.md#docker).
-
-The starter listener ends when its connection closes and does not reconnect
-or replay missed presses automatically. For a production integration, add
-reconnect/backoff and press-history reconciliation, using `(instance_id, seq)`
-to avoid duplicate delivery. Continue with the
-[platform integration guide](platform-integration.md#10-button-events) for
-that lifecycle and callback management. Configuration editors, full-document
-writes and restore are separate, advanced workflows.
+See the [networking guide](../../docs/networking.md) for ports and firewalls.

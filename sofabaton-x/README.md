@@ -1,8 +1,8 @@
 # sofabaton-x — Python Library
 
-> **Breaking changes in the upcoming 0.2.0 release.** This README describes
-> the unreleased API. Existing 0.1.x consumers should read the
-> [changelog and migration guide](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/sofabaton-x/CHANGELOG.md#unreleased--020)
+> **0.2.0 has breaking changes from 0.1.x.** This README describes the
+> 0.2 API. Existing 0.1.x consumers should read the
+> [changelog and migration guide](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/sofabaton-x/CHANGELOG.md#020-2026-09-16)
 > before upgrading.
 
 [![PyPI](https://img.shields.io/pypi/v/sofabaton-x)](https://pypi.org/project/sofabaton-x/)
@@ -18,10 +18,12 @@ This is the protocol engine extracted from the
 the integration is its reference consumer.
 
 **Building your first integration? Start with the
-[server starter guide](../sofabaton-x-server/docs/getting-started.md).**
-The server manages this library for you and provides HTTP/WebSocket APIs
-for sending commands and receiving remote presses. Use the library directly
-when you need to embed the hub connection in your Python application.
+[server starter guide](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/sofabaton-x-server/docs/getting-started.md).**
+The server manages this library and supplies a management UI, web remote
+and HTTP/WebSocket APIs. Your platform can select registered hubs and map
+actions and events without rebuilding setup or remote screens. Use the
+library directly when embedding the hub connection in a Python application;
+your application then owns persistence and any callback listener.
 
 > **Disclaimer:** this project is not affiliated with or endorsed by
 > Sofabaton. The protocol was reverse-engineered from network captures;
@@ -64,18 +66,16 @@ when you need to embed the hub connection in your Python application.
 
 Deliberately **out of scope**: executing the HTTP or MQTT callbacks that
 network-class devices define (e.g. a Roku-style ECP listener). The
-library carries the protocol artifacts for those features so applications
-can build them on top — the Home Assistant integration does exactly that.
+library carries the protocol artifacts for those features. The server and
+Home Assistant integration provide their own listeners on top.
 
 ## Install
 
-For the unreleased API documented here, install from the repository root:
-
 ```
-python -m pip install .
+python -m pip install "sofabaton-x>=0.2,<0.3"
 ```
 
-For existing applications using the released 0.1.x API, stay on that series
+For existing applications still on the 0.1.x API, stay on that series
 until you have migrated:
 
 ```
@@ -88,22 +88,29 @@ hub discovery).
 
 ## Quickstart
 
-Find a hub, then proxy it. Blocking work runs in the event loop's
-executor and callbacks (plain functions or coroutines) are delivered on
+**Fully close the official Sofabaton app before discovering a hub.** While
+the app is connected directly to it, the hub stops advertising and
+`async_discover_hubs()` cannot find it. Keep the app closed through the
+first connection and control test. If a server or another proxy already
+manages the hub, release it there before trying these direct-library
+examples. For server integrations, one server manages all your hubs.
+
+Blocking work runs in the event loop's executor and callbacks (plain
+functions or coroutines) are delivered on
 the loop, so application code never touches the engine threads:
 
 ```python
 import asyncio
-from sofabaton import AsyncXProxy, async_discover_hubs
+from sofabaton import AsyncXProxy, HubConfig, async_discover_hubs
 
 async def main():
     hubs = await async_discover_hubs(timeout=5.0)   # physical hubs; proxies filtered
     if not hubs:
-        print("No Sofabaton hub found on this network.")
+        print("No hub found. Fully close the official Sofabaton app, then scan again.")
         return
     hub = hubs[0]
 
-    proxy = AsyncXProxy(hub_ip=hub.host)   # the hub's IP is all you need
+    proxy = AsyncXProxy.from_config(HubConfig.from_discovered(hub))
     proxy.on_activity_change(lambda new, old, name: print(f"activity -> {name}"))
 
     async with proxy:
@@ -118,21 +125,19 @@ async def main():
                 print(f"device {dev.device_id} ({dev.name}): "
                       f"command {cmd.command_id} = {cmd.label}")
 
-        # Fires one real command — command 5 on device 1. Pick your own
-        # (entity_id, command_id) pair from the listing printed above.
-        if not await proxy.send(1, 5):
-            raise RuntimeError("Command refused; check the hub mode")
+        # To send, choose a (device_id, command_id) pair from the listing
+        # whose physical effect you want, then uncomment and replace the IDs:
+        # if not await proxy.send(1, 5):
+        #     raise RuntimeError("Command refused; check the hub mode")
 
 asyncio.run(main())
 ```
 
-`hub_ip` is the only required argument; everything else has a sensible
-default and the hub model is confirmed from the connect banner. The one
-thing worth adding is the proxy's mDNS identity — pass
-`mdns_instance=hub.name` and `mdns_txt=hub.txt` so the proxy advertises
-itself **exactly like the hub it fronts**, letting the official Sofabaton
-app keep working while pointed at the proxy. Skip them and the proxy still
-reads and controls the hub fine; it just advertises under a generic name:
+`HubConfig.from_discovered()` preserves the hub's address and mDNS identity
+so the official app can find the proxy. For manual entry,
+`AsyncXProxy(hub_ip="192.168.1.50")` is enough; the hub model is confirmed
+from its connect banner. Without mDNS identity it advertises under a
+generic name. You can also pass the discovered identity explicitly:
 
 ```python
 proxy = AsyncXProxy(
@@ -263,6 +268,10 @@ gap in `seq`. The `on_*` registrations keep working alongside the stream.
 
 ### Two modes
 
+Initial discovery requires the official app to be disconnected from the
+physical hub so the hub advertises. Once the proxy is connected, the app
+can connect through it and the modes below apply.
+
 The proxy sits transparently between the hub and the official app, which
 gives it two distinct modes:
 
@@ -290,19 +299,10 @@ attached it runs as soon as the app lets go. Pass `initial_sync=False`
 to the constructor to opt out (an application that runs its own
 connect-time sync, as the Home Assistant integration does).
 
-To take a hub out of service while keeping its configuration (so the
-official app can talk to it directly again), stop the proxy with
-`await proxy.stop(release_hub=True)`. A dropped hub keeps dialling the
-shared connect-back port for as long as that port is open for other
-hubs, and while it dials it does not advertise itself; it only gives up
-on a refused connection. The release bounces the shared listener (the
-listening socket closes for a short window and reopens) and, for a
-grace period, bounces again whenever that hub dials back, so one of its
-own retries is guaranteed to meet a closed port. Accepted sessions are
-untouched, so every other hub stays connected straight through; only
-new dial-backs are refused during a window. With no other hub
-registered the port simply closes and the release is a no-op. A plain
-`stop()` is for shutdown.
+To release one hub so the official app can reach it directly again, use
+`await proxy.stop(release_hub=True)`. This briefly closes the shared listener
+to stop that hub retrying the proxy; established sessions for other hubs
+remain connected. Use plain `stop()` for application shutdown.
 
 The mode is not fixed at startup — it follows the app. If the official
 app connects while you hold control, you are demoted to observe mode
@@ -503,7 +503,7 @@ and inspect the hub, then construct a new edit against the reconciled
 snapshot when the intended changes are clear. There is no rollback.
 
 The server adds persistent apply records but has further
-[restart and retry limitations](../sofabaton-x-server/README.md#recovery-and-retention).
+[restart and retry limitations](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/sofabaton-x-server/README.md#recovery-and-retention).
 
 ### Edit helpers
 
@@ -689,6 +689,9 @@ update with the same spec resumes.
 
 A CLI ships as a console script:
 
+Close the official app before `discover` or the first `run`; a hub
+connected directly to the app does not advertise.
+
 ```
 sofabaton discover                   # scan the LAN for hubs
 sofabaton run --hub-ip 192.168.1.50  # proxy + interactive shell
@@ -719,16 +722,25 @@ you want named button codes.
 shown in a backup's `data_hex` fields) and plays it once without saving;
 in the Python API this is `play(IrPayload.from_hex(...))`.
 
-Runnable examples — discovery, accepting a hub record from a platform's
-own discovery, watching the event stream, watching a live session, taking
-control of a hub, reading per-entity detail (commands/macros/favorites),
-schema-versioned backup/restore, provisioning a network device from
-scratch via restore, and building an HTTP callback listener on top of the
-library — live in
-[`sofabaton-x/examples/`](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/tree/main/sofabaton-x/examples).
+Install the library, then download the example files or use a repository
+checkout. Run the paths below from the repository root. These examples
+connect directly to physical hubs; use the server examples when a server
+already manages your hub. Examples that discover hubs choose the first result.
+
+| Example in [sofabaton-x/examples](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/tree/main/sofabaton-x/examples) | Purpose |
+| --- | --- |
+| `discover.py` | List physical hubs without connecting to them. |
+| `minimal_proxy.py` | Connect and list activities/devices; sending is commented out. |
+| `watch_events.py` / `watch.py` | Observe typed events / individual callbacks. |
+| `catalog_details.py` | Fetch commands, macros and favorites. |
+| `from_platform_discovery.py` | Turn a platform's mDNS record into a proxy configuration; replace the sample record. |
+| `edit_activity.py` | Preview a rename; write only with `--apply`. |
+| `backup.py` | Save a full backup; restore code is commented out. |
+| `restore_ip_device.py` | Advanced: create a real network device and send its Ping command; edit the target settings first. |
+| `wifi_http_listener.py` | Advanced: sketch a hub-facing callback listener; the server already supplies one. |
 
 For a complete facade edit workflow, run
-[`examples/edit_activity.py`](examples/edit_activity.py) with a hub address,
+[`examples/edit_activity.py`](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/sofabaton-x/examples/edit_activity.py) with a hub address,
 activity id and name. It connects, refreshes that entity, previews the plan
 and, with `--apply`, syncs and checks the result:
 
@@ -756,7 +768,7 @@ network topology are documented in the repository:
 
 Model support describes implemented protocol paths, not proof that every
 operation has been exercised on every firmware. The
-[live-hub testing notes](../docs/protocol/live-hub-testing.md) record the
+[live-hub testing notes](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/protocol/live-hub-testing.md) record the
 bench coverage and outstanding checks. In particular, the document-write
 bench covers X1/X1S; equivalent X2 and server-route coverage is still pending.
 

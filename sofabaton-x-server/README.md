@@ -1,47 +1,65 @@
 # sofabaton-x-server
 
-> **Unreleased — in development.** The server has not had its first release
-> and needs further work before release. This documentation describes the
-> current development API.
+> **0.2.0 is the first release.** The API is versioned (`api 1`) and the
+> OpenAPI document is committed; before 1.0 a minor release may still
+> change the surface, and the release notes say when it does.
 
-REST + WebSocket server over the [sofabaton-x](../sofabaton-x/README.md)
-library for **Sofabaton X1 / X1S / X2** hubs, with an OpenAPI document
-meant for client generators. It is what an automation platform
-integration (Homey, Hubitat, openHAB, ...) talks to; the server owns
-persistence, discovery policy and network exposure, the library owns the
-hub protocol.
+REST + WebSocket server over the [sofabaton-x](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/sofabaton-x/README.md)
+library for **Sofabaton X1 / X1S / X2** hubs, with a built-in management UI
+and web remote. Register hubs, browse commands, try the remote and inspect
+events in a browser. Automation platforms (Homey, Hubitat, openHAB, …)
+connect to the same HTTP/WebSocket API; the server manages the hub
+connections and persistence.
 
-The development version is **0.2.0**, built against sofabaton-x 0.2.x.
-It supports hub discovery and
-management, reads and control, configuration editing, IR payloads, and
-backup / restore / erase.
+The current version is **0.2.0**, built against sofabaton-x 0.2.x. It
+covers hub discovery and management, reads and control, the event
+stream, button events, configuration editing, IR payloads, backup /
+restore / erase, a web remote and a control panel.
 
 **Building your first integration? Start with
-[your first command and your first remote press](docs/getting-started.md).**
-It walks through finding command IDs, sending a command, assigning a
-callback to a remote button, and receiving its WebSocket event. A runnable
-server client handles the setup steps and shows the underlying HTTP calls.
+[your first integration](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/sofabaton-x-server/docs/getting-started.md).**
+Let users configure hubs in the control panel. Your client can focus on
+activity switches, command actions and remote-button automations, with
+links to management and the web remote. Discovery wizards and configuration
+editors are optional; a runnable starter and a Hubitat example show the path.
 
 > Unofficial; not affiliated with or endorsed by Sofabaton.
 
-[Starter guide](docs/getting-started.md) · [Run](#run) · [Settings](#settings) · [API](#api) · [Jobs](#jobs) ·
+[Starter guide](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/sofabaton-x-server/docs/getting-started.md) · [Run](#run) · [Control panel](#control-panel) · [Web remote](#web-remote) · [Settings](#settings) · [API](#api) · [Jobs](#jobs) ·
 [Writes](#writes) · [Recovery](#recovery-and-retention) ·
 [Button events](#button-events) · [Development](#development)
 
 ## Run
 
-Install both development packages from the repository root (Python 3.11+):
+**Run one server for all your hubs.** Register each hub in its control
+panel; all hubs share the same server URL and WebSocket endpoint.
+
+**Close the official Sofabaton app on all phones/tablets before initial
+setup.** A hub connected directly to the app stops advertising, so the
+server cannot discover it. Keep the app closed until the hub is registered
+and you have tested control. Disable any existing proxy for that hub first.
+
+Install from PyPI (Python 3.11+; the library comes with it):
 
 ```
-python -m pip install . ./sofabaton-x-server
-sofabaton-x-server --hub 192.168.1.50
+python -m pip install "sofabaton-x-server>=0.2,<0.3"
+sofabaton-x-server
 ```
 
-`--hub` is optional: start without it and open the control panel at
-`http://<server>:8480/` (it lives at `/ui/`). Its Hubs view lists the
+From a checkout, install both packages from the repository root instead:
+`python -m pip install . ./sofabaton-x-server`.
+
+Open the control panel at `http://<server>:8480/` (it lives at `/ui/`).
+Use `localhost` when browsing on the server host. Its Hubs view lists the
 hubs advertised on the LAN with an Add button, takes an address by hand,
 and enables, disables and removes hubs later (see
-[Control panel](#control-panel)).
+[Control panel](#control-panel)). If the hub is missing, make sure the app
+is fully closed and scan again. Keep the data directory (default `./data`)
+across restarts. `--hub <physical IP>` is an alternative for seeding the
+first startup, not for adding hubs to an existing data directory.
+
+After setup, the app can connect through the proxy; the server then observes
+the session but refuses control commands until the app disconnects.
 
 The server must sit on the same network segment as the phones running
 the official app (mDNS and UDP broadcast); in Docker that means host
@@ -57,7 +75,7 @@ or use the compose file next to this README:
 ```
 docker build -f sofabaton-x-server/Dockerfile -t sofabaton-x-server .
 docker run -d --name sofabaton-x-server --network host -v ./data:/data \
-  -e SOFABATON_HUBS=192.168.1.50 sofabaton-x-server
+  sofabaton-x-server
 ```
 
 ```
@@ -130,7 +148,8 @@ at `https://home.example/sofabaton/api/v1`; do not include `/api/v1` in
 
 Exposing the server beyond the LAN through a proxy means the **proxy
 must add authentication** (forward-auth or basic auth): the server has
-none in v1 and ignores authorization headers, so any scheme works.
+none in v1. Configure authentication for both HTTP requests and WebSocket
+upgrades, and ensure your clients support the proxy's authentication method.
 
 ## Settings
 
@@ -180,7 +199,85 @@ Control calls are logged with the caller's address. Configuration writes
 run as jobs whose records name the operation; transient control and IR
 play calls return their acceptance immediately.
 
+## Control panel
+
+Open `<server base URL>/ui/`. The root `/` and legacy `/harness` redirect
+there. The sidebar lists registered hubs and their state.
+
+| View | What users can do |
+| --- | --- |
+| **Hubs** | Add discovered hubs or enter an address; inspect status; enable, disable, retry a failed start or remove a registration. Removal also forgets its cached state and remote layout. |
+| **Catalog** | Browse devices, activities, commands, buttons, macros and favorites with their IDs. Fetch missing detail or explicitly refresh one entity or the whole hub. It does not edit configuration. |
+| **Remote** | Control the selected hub and edit its saved remote layout. |
+| **API** | Select an OpenAPI operation or enter a method/path, send a request, inspect the response and follow a returned job. `{hub_id}` uses the selected hub. |
+| **Events** | Inspect the live WebSocket stream, filter by hub/text and identify callback presses. It reconnects after a server restart. |
+
+There is no dedicated callback-device, binding or full-configuration editor
+in 0.2.0. Use the starter's setup command or the API view for those writes;
+deployed callback commands can also be assigned in the official app.
+
+The panel supports light and dark themes. Like the API, it has no built-in
+authentication: anyone who can open it can control and change the hub.
+The UI itself is outside the API contract. See [Development](#development)
+for rebuilding its bundled assets.
+
+## Web remote
+
+The server serves the Sofabaton remote card as a page of its own at
+`/ui/remote/`. The root `/` opens the control panel. It is the same card the Home
+Assistant integration ships, talking to this server's API instead of
+Home Assistant, so a household without Home Assistant gets a phone,
+tablet or wall-panel remote by opening a URL. Bookmark it, add it to a
+phone's home screen (it ships a web manifest), or frame it from a
+dashboard that can show a URL (Hubitat, openHAB, Node-RED dashboards,
+Home Assistant's own iframe card).
+
+The page needs the hub in the URL: `/ui/remote/?hub=<hub id>`, the id
+as `GET /hubs` lists it. Without it, or with an unknown id, the page
+lists the registered hubs as links. Optional parameters: `lang=<bcp47>`
+(the card's language; the browser's by default), `device=<device id>`
+(open in device mode on that device), `zoom=<factor>` for a wall panel,
+and `theme=light|dark` to pin a theme (the system setting by default).
+The page carries the Home Assistant default palette, so it looks like
+the card on a default Home Assistant dashboard; other themes are not
+available outside Home Assistant.
+
+**Configuration.** The card's layout (which key groups show, their
+order, device mode, shortcuts, custom favourites, hold-to-repeat, key
+style) is a per-hub JSON document the server stores:
+
+```text
+GET    /hubs/{id}/ui/remote-card        the document (null until one is stored)
+PUT    /hubs/{id}/ui/remote-card        {"document": {...}} replaces it (64 KB max)
+DELETE /hubs/{id}/ui/remote-card        back to the card's defaults
+```
+
+The document holds the same keys as the Home Assistant card's YAML,
+minus `entity`, `theme` and Home Assistant actions (custom favourites
+that call a Home Assistant action are dropped; those that name a hub
+command stay). The control panel's Remote view (`/ui/`) shows the
+remote next to an editor for this document and applies a saved document
+to the remote at once; a Home Assistant user can paste the card's YAML
+converted to JSON. The page never stores anything in the browser.
+
+**Icons.** The page bundles the icons the card itself uses plus a set of
+common `mdi:` names for favourites and shortcuts; an icon outside that
+set renders as a neutral dot.
+
+**Exposure.** The server has no authentication, and this page is the
+first thing a household will want to reach from a phone. Keep it on the
+LAN, or put the server behind a reverse proxy that authenticates (see
+[Behind a reverse proxy](#behind-a-reverse-proxy-tls)); do not
+port-forward it. The page and its assets are outside the API contract
+(not in the OpenAPI document); the configuration document routes are in
+it.
+
 ## API
+
+For a minimal client, use hub selection, status, control and events as
+described in the [starter guide](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/sofabaton-x-server/docs/getting-started.md).
+The sections below are a reference for optional features as well as the
+core API; implementing the full surface is not required.
 
 `GET /api/v1/server` identifies the server. The OpenAPI document is at
 `/api/v1/openapi.json` (interactive docs at `/api/v1/docs`). Every
@@ -194,11 +291,12 @@ Paths beginning `/hubs`, `/server` or `/events` below are relative to
 device or activity ID. An ellipsis (`...`) abbreviates the preceding
 hub/entity path; it is not an executable URL.
 For an executable refresh/preview/apply workflow, see
-[the integration guide](docs/platform-integration.md#8-complete-edit-workflow).
+[the integration guide](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/sofabaton-x-server/docs/platform-integration.md#8-complete-edit-workflow).
 
 Catalog reads (`.../activities`, `.../devices`, `.../devices/{did}/commands`,
 `.../entities/{eid}/buttons`, `.../activities/{aid}/macros` and `/favorites`)
-answer from the library's cached catalog; `GET .../devices?refresh=true`
+serve cached data when available and fetch missing detail when needed;
+an uncached read therefore requires control mode. `GET .../devices?refresh=true`
 re-reads the device list. `GET .../devices/{did}/power-state` is the one
 read that always goes to the hub: it re-reads the list and returns that
 device's power byte (`0` / `1`, `null` when the row has no parseable
@@ -328,7 +426,7 @@ such as TV or receiver:
 | X2 | X1S classes plus `wifi_mqtt` |
 
 Payloads and device fields must match the class/model. This table describes
-implemented create support; see the [bench notes](../docs/protocol/live-hub-testing.md)
+implemented create support; see the [bench notes](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/protocol/live-hub-testing.md)
 for which workflows have been tested on hardware.
 
 ## Whole-document writes
@@ -346,7 +444,7 @@ shared with `PUT` (`422 dangling_reference` / `out_of_scope` /
 `invalid_request`, `409 entity_not_editable` / `snapshot_incomplete`).
 
 A successful preview does not validate every command's wire encoding or
-guarantee hub acceptance. The [integration guide](docs/platform-integration.md#editing-the-whole-document)
+guarantee hub acceptance. The [integration guide](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/sofabaton-x-server/docs/platform-integration.md#editing-the-whole-document)
 shows the distinct REST payload and document `restore_data` formats.
 
 The `PUT` answers `202` with a cancellable `sync_hub` job. The server
@@ -378,7 +476,7 @@ cases. Preserve the record, refresh and inspect the hub, and construct a
 new edit from that reconciled state when the intended changes are clear.
 Records left `queued` or `running` by an abrupt restart are not reconciled
 on startup and the resume endpoint rejects them. See the
-[library limitations](../sofabaton-x/README.md#current-document-write-limitations).
+[library limitations](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/sofabaton-x/README.md#current-document-write-limitations).
 
 An `Idempotency-Key` can make a repeated `PUT` of the same document return
 the existing job view (`200`), but **control and `If-Match` checks run before
@@ -406,8 +504,9 @@ once with `POST /hubs/{id}/play`, saved as a new command with `POST
 the hub holds. `POST /hubs/{id}/learn` arms the hub's receiver and
 returns the captured code as the job result.
 
-`POST /hubs/{id}/backup` returns a full, restorable bundle as the job
-result (minutes; keep it as a file). `POST /hubs/{id}/restore` with
+`POST /hubs/{id}/backup` returns a full, restorable bundle in the completed
+job's `result.bundle` (minutes; keep that whole bundle as a file).
+`POST /hubs/{id}/restore` with
 `{"bundle": ..., "replace": true}` erases first and then writes the
 bundle back. The bundle and its entity references are validated before erase.
 With `replace` omitted or false, restore is additive and assigns new ids.
@@ -446,7 +545,7 @@ rename safely, copy `name`, `slots`, `power_on_slot`, `power_off_slot` and
 `input_slots` from the GET response's `spec`, change the intended fields,
 and PUT all five back. Preserved IDs and generic bindings do not imply
 preservation of omitted spec fields. The integration guide includes a
-[copy-and-edit example](docs/platform-integration.md#10-button-events).
+[copy-and-edit example](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/sofabaton-x-server/docs/platform-integration.md#10-button-events).
 
 Hook slots are one-based (`1..10`); the callback URL uses a zero-based
 index (`0..9`). The `press.slot` field is one-based when resolved.
@@ -506,58 +605,13 @@ but forgot (a crash before the save, a lost data directory) is adopted
 by that same identity check instead of being created twice
 (`adopted: true` on the record).
 
-## Web remote
-
-The server serves the Sofabaton remote card as a page of its own at
-`/ui/remote/` (`/` redirects there). It is the same card the Home
-Assistant integration ships, talking to this server's API instead of
-Home Assistant, so a household without Home Assistant gets a phone,
-tablet or wall-panel remote by opening a URL. Bookmark it, add it to a
-phone's home screen (it ships a web manifest), or frame it from a
-dashboard that can show a URL (Hubitat, openHAB, Node-RED dashboards,
-Home Assistant's own iframe card).
-
-The page needs the hub in the URL: `/ui/remote/?hub=<hub id>`, the id
-as `GET /hubs` lists it. Without it, or with an unknown id, the page
-lists the registered hubs as links. Optional parameters: `lang=<bcp47>`
-(the card's language; the browser's by default), `device=<device id>`
-(open in device mode on that device), `zoom=<factor>` for a wall panel,
-and `theme=light|dark` to pin a theme (the system setting by default).
-The page carries the Home Assistant default palette, so it looks like
-the card on a default Home Assistant dashboard; other themes are not
-available outside Home Assistant.
-
-**Configuration.** The card's layout (which key groups show, their
-order, device mode, shortcuts, custom favourites, hold-to-repeat, key
-style) is a per-hub JSON document the server stores:
-
-```text
-GET    /hubs/{id}/ui/remote-card        the document (null until one is stored)
-PUT    /hubs/{id}/ui/remote-card        {"document": {...}} replaces it (64 KB max)
-DELETE /hubs/{id}/ui/remote-card        back to the card's defaults
-```
-
-The document holds the same keys as the Home Assistant card's YAML,
-minus `entity`, `theme` and Home Assistant actions (custom favourites
-that call a Home Assistant action are dropped; those that name a hub
-command stay). The control panel's Remote view (`/ui/`) shows the
-remote next to an editor for this document and applies a saved document
-to the remote at once; a Home Assistant user can paste the card's YAML
-converted to JSON. The page never stores anything in the browser.
-
-**Icons.** The page bundles the icons the card itself uses plus a set of
-common `mdi:` names for favourites and shortcuts; an icon outside that
-set renders as a neutral dot.
-
-**Exposure.** The server has no authentication, and this page is the
-first thing a household will want to reach from a phone. Keep it on the
-LAN, or put the server behind a reverse proxy that authenticates (see
-[Behind a reverse proxy](#behind-a-reverse-proxy-tls)); do not
-port-forward it. The page and its assets are outside the API contract
-(not in the OpenAPI document); the configuration document routes are in
-it.
-
 ## Discovery
+
+The physical hub stops advertising while the official app is connected
+directly to it. Close the app before discovery and initial registration;
+repeated scans cannot find a hub that is not advertising. A previously
+seen entry can remain in the discovery table, so `present: false` does not
+by itself mean the hub is offline. Use registered hub status for availability.
 
 The server browses for hubs for as long as it runs and keeps a table of
 what it has seen: `GET /api/v1/discovery/hubs` lists physical hubs
@@ -618,50 +672,10 @@ The message types are published as components in the OpenAPI document
 for generators.
 
 Writing a platform integration? Start with
-[docs/platform-integration.md](docs/platform-integration.md): finding
+[docs/platform-integration.md](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/sofabaton-x-server/docs/platform-integration.md): finding
 the server and the hubs, the endpoint rule, the error table, the event
-stream, a pairing flow that feels right, and the snapshot, job and
-editing flows.
-
-## Control panel
-
-The server serves a control panel at `http://<server>:8480/ui/` (`/`
-and the older `/harness` redirect there; under the root path when one
-is configured): a sidebar with the registered hubs and their state, and
-four views for the selected hub.
-
-- **Hubs**: the hub's detail (state, host, model, id, MAC, last seen,
-  cache size, running activity) with Enable / Disable / Remove (Remove
-  asks first and also forgets the cached state and remote layout; Retry
-  start re-runs a start that failed), an "add by address" form, and the
-  hubs discovered on the LAN with an Add button that registers the
-  advertised configuration (a scan asks again). This is the
-  getting-started path; `--hub` and a hand-written `POST /hubs` are the
-  alternatives.
-- **Catalog**: the hub's devices and activities with their entity ids,
-  a device's commands and an activity's buttons, macros and favourites
-  with the ids an integration sends, and Refresh for one entity or the
-  whole hub (the server's only structural hub read, run as a job and
-  followed to its end). Read-only.
-- **Remote**: the remote card for the hub, mounted in the page over the
-  server's API, next to the editor for its layout document; a saved
-  document is applied to the card at once.
-- **API**: pick an operation from the OpenAPI document or type a method
-  and path (`{hub_id}` is the selected hub), send, and read the exact
-  request and the raw response (status line, headers, body; pretty or
-  raw). A 202 can be followed until its job finishes; the last requests
-  are kept as history.
-- **Events**: the WebSocket stream, connected on load and reconnecting
-  after a server restart, with a hub filter and a text filter; press
-  messages highlighted. The stream also keeps the sidebar current.
-
-The panel follows the system's light or dark scheme (a header toggle
-pins either) on the same palette as the remote. It is built from
-`server-panel/src` on the remote card's toolchain into
-`src/sofabaton_server/ui/panel/` (see [Development](#development)), is
-not part of the API contract (absent from the OpenAPI document), and
-has the same reach as the API: anyone who can open it can change the
-hub. Design notes: `docs/internal/server-panel-plan.md`.
+stream, pairing with registered hubs, and optional snapshot, job and editing
+flows.
 
 ## Development
 
@@ -678,7 +692,7 @@ the in-tree library automatically):
 
 ```
 python -m pip install . ./sofabaton-x-server
-python -m pip install -r sofabaton-x-server/openapi-toolchain.txt pytest
+python -m pip install -r sofabaton-x-server/openapi-toolchain.txt pytest httpx
 python -m pytest sofabaton-x-server/tests -q
 ```
 
@@ -705,11 +719,12 @@ npx tsc --noEmit -p sofabaton-x-server/codegen-smoke/tsconfig.json
 ```
 
 Unit tests and schema checks do not establish live hub compatibility.
-The [live-hub testing notes](../docs/protocol/live-hub-testing.md) record
+The [live-hub testing notes](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/protocol/live-hub-testing.md) record
 hardware coverage; the document-write bench covers library operations on
 X1/X1S, with X2 and the corresponding server-route bench still pending.
 
-When ready for the first release, set `__version__` in
-`src/sofabaton_server/__init__.py` and tag `sofabaton-x-server-vX.Y.Z`.
-The release workflow publishes to PyPI; a compatible `sofabaton-x` version
-must be published first.
+To release: set `__version__` in `src/sofabaton_server/__init__.py`, put
+the notes on the GitHub release, and push the tag `sofabaton-x-server-vX.Y.Z`.
+The release workflow re-runs the tests, checks the tag against the
+version and publishes to PyPI; a compatible `sofabaton-x` version must be
+on PyPI first (see the repository's CONTRIBUTING).

@@ -1,7 +1,7 @@
 # Integrating an automation platform with sofabaton-x-server
 
-> **Unreleased development API.** The server has not had its first release;
-> its API may change before release.
+> Written for sofabaton-x-server 0.2.0 (`api 1`). Before 1.0 a minor
+> release may still change the surface; the release notes say when.
 
 For authors of a Homey app, a Hubitat driver, an openHAB binding, or any
 other client. The server fronts one or more Sofabaton X1 / X1S / X2 hubs
@@ -10,12 +10,23 @@ your client from [`../openapi.json`](../openapi.json); this page covers what
 the document cannot say.
 
 For a first implementation, begin with
-[your first command and your first remote press](getting-started.md).
-Return here for discovery, lifecycle, error handling and advanced editing.
+[your first integration](getting-started.md). Let users set up hubs in the
+server's control panel, then select those registered hubs in your platform.
+You can deliver activity switches, command actions and remote-button
+automations without implementing hub registration or a configuration editor.
+
+For that scope, read [hub selection](#2-find-hubs),
+[control and errors](#4-read-and-control), [events](#5-events),
+[pairing](#6-pair-a-hub) and [button events](#10-button-events).
+Sections 7–9 cover optional editing features. Link users to
+`<server base URL>/ui/` for management and to the
+[web remote](#11-give-users-a-remote) for a ready-made control UI.
 
 ## 1. Find the server
 
-The server advertises `_sofabaton-x._tcp.local.` over mDNS. TXT fields:
+Accepting a server base URL is enough for a first integration. For optional
+automatic discovery, the server advertises `_sofabaton-x._tcp.local.` over
+mDNS. TXT fields:
 
 | key | meaning |
 | --- | --- |
@@ -23,7 +34,7 @@ The server advertises `_sofabaton-x._tcp.local.` over mDNS. TXT fields:
 | `api` | API version (`1`); bump means generated clients must be re-checked |
 | `path` | API prefix (`/api/v1`) |
 | `hubs` | number of configured hubs |
-| `base_url` | present only when the operator runs the server behind a reverse proxy; the URL clients must use |
+| `base_url` | present when `--advertise-url` is set; the server base URL clients should use |
 
 Use `base_url` when present, otherwise `http://<SRV host>:<SRV port>`,
 as the **server base URL**. Append TXT `path` (currently `/api/v1`) for
@@ -43,15 +54,28 @@ with the server base URL instead. A WebSocket uses the API root plus
 `/events`, changing `http` to `ws` or `https` to `wss`. Always offer a
 manual server URL as well; some networks block multicast.
 
-`GET /api/v1/server` returns the same information plus `features`
-(`discovery` when the server can browse the LAN).
+`GET /api/v1/server` returns server/API versions, `instance_id`, features
+and runtime settings. Check `api_version` before using the contract.
 
 There is **no authentication** in v1. The server is a LAN service; the
 operator is told not to expose it beyond the LAN.
 
 ## 2. Find hubs
 
-Three ways, in the order users expect:
+**Use `GET /api/v1/hubs` to list registered hubs.** Offer those to the user,
+including their enabled/available state. If none are registered, link to
+the control panel's Hubs view and offer to reload the list after setup.
+Listing physical discoveries is not the same as listing registered hubs.
+
+**Before physical hub discovery or registration, tell the user to fully close
+the official Sofabaton app.** A hub connected directly to the app stops
+advertising and cannot be discovered by the server or your own mDNS stack.
+Keep the app closed until the server has connected and completed setup,
+including when entering an IP manually. If a scan finds nothing, make
+closing the app the first troubleshooting step. `present` describes an
+advertisement, not hub availability; use registered hub status for that.
+
+If your platform also offers hub setup, choose one of these intake paths:
 
 1. **Ask the server.** `GET /api/v1/discovery/hubs` is the live table of
    hubs the server has seen (`present` says whether the advertisement is
@@ -71,12 +95,13 @@ Three ways, in the order users expect:
 
 ## 3. Register and identify
 
-`POST /api/v1/hubs` returns the record. Until the server has read the
-hub's banner, `hub_id` is the host string; after the first connection it
-becomes the hub's MAC (lower-case hex, no separators) and the record is
-re-keyed once. Watch for `hub_rekeyed` on the event stream, or re-read
+Registration belongs to the server and can be done in its panel. A client
+that offers registration itself uses `POST /api/v1/hubs`, which returns
+the record. If no MAC was supplied, `hub_id` starts as the host string;
+after the first connection confirms the MAC it becomes lower-case hex
+with no separators. Watch for `hub_rekeyed` on the event stream, or re-read
 `GET /api/v1/hubs` after `status.catalog_ready` turns true. Store the
-MAC form.
+MAC form. Do not register a second hub just to select it in your platform.
 
 `enabled` is the user's switch: `POST /api/v1/hubs/{id}/disable` keeps
 the record but disconnects, so the official Sofabaton app can talk to
@@ -98,7 +123,7 @@ configuration edits use jobs (section 7).
 | --- | --- |
 | status (mode, running activity, `catalog_ready`) | `GET /hubs/{id}/status` |
 | identity (model, name, MAC, firmware) | `GET /hubs/{id}/info` |
-| activities / devices | `GET /hubs/{id}/activities`, `GET /hubs/{id}/devices` (`?refresh=true` re-reads power state) |
+| activities / devices | `GET /hubs/{id}/activities`, `GET /hubs/{id}/devices` (`?refresh=true` re-reads that list; devices include power state) |
 | a device's commands | `GET /hubs/{id}/devices/{dev}/commands` |
 | buttons bound on an entity | `GET /hubs/{id}/entities/{ent}/buttons` |
 | an activity's macros / favorites | `GET /hubs/{id}/activities/{act}/macros`, `.../favorites` |
@@ -117,8 +142,8 @@ Errors are `Problem` bodies (`type`, `title`, `status`, `detail`,
 | status | type | what to do |
 | --- | --- | --- |
 | 404 | `hub_not_found`, `device_not_found`, `activity_not_found`, `entity_not_found` | fix the id |
-| 409 | `hub_disabled` | enable the hub |
-| 409 | `hub_busy`, `send_refused` | the app holds the hub; retry later or tell the user |
+| 409 | `hub_disabled` | show unavailable; let the user enable it in the panel |
+| 409 | `hub_busy`, `send_refused` | read status and report the reason; the app may hold control or the mode may have changed |
 | 503 | `hub_not_connected` | the hub is offline or reconnecting; retry with backoff |
 | 503 | `hub_start_failed` | the hub's proxy could not start (a port in use); the record is kept, retry `/enable` after fixing the host |
 | 504 | `hub_timeout` | a read timed out; retry with backoff; for an uncertain write, inspect jobs and hub state first |
@@ -181,22 +206,31 @@ counter shared with press history; track `(instance_id, seq)` for presses.
 Job events have no library sequence number.
 
 Reconnect with backoff on close. After reconnecting, a `dropped` message
-or a hub-event sequence gap, reconcile hub records, status, snapshots and
-jobs. Hub/job events have no replay; presses have the bounded history
-described in section 10. Message schemas are OpenAPI components
+or a hub-event sequence gap, reconcile hub records, status and the catalogs
+your integration uses. Reconcile snapshots and outstanding jobs only if
+your client uses those features. Changes in the panel are external changes
+to your client: handle removal/disable as unavailability, and reload on
+enable or rekey. Do not re-register or re-enable a hub automatically.
+Hub/job events have no replay; presses have the bounded history described
+in section 10. Message schemas are OpenAPI components
 `WsHello`, `WsHubEvent`, `WsServerEvent`, `WsJobEvent`, `WsPress` and
 `WsDropped`.
 
 ## 6. Pair a hub
 
-1. Discover the server over mDNS (fall back to a typed host and port).
-2. `GET /api/v1/discovery/hubs`; offer the present ones, plus "enter an
-   IP".
-3. `POST /api/v1/hubs` with the chosen record; show the hub as
-   "connecting" until `catalog_ready`.
-4. Read the catalogs, subscribe to events, done. Offer the enable /
-   disable switch in the hub's settings so the user can hand the hub to
-   the official app when they need it.
+1. Ask for the server base URL; optionally discover it over mDNS.
+2. Check `GET /api/v1/server`, then offer registered hubs from
+   `GET /api/v1/hubs`. Link to `/ui/` for adding or managing them.
+3. Save the selected MAC hub IDs. Subscribe to `/events`, then read status
+   and the catalogs you expose. Reconcile events that arrive during those
+   reads so an older response does not overwrite newer state.
+4. Expose platform actions and automation triggers. Offer links to
+   management and `/ui/remote/?hub=<id>` for the full remote.
+
+Unpairing from your platform should remove its local selection/entities;
+leave the server registration and shared callback device in place. Other
+clients may still use them. A registration wizard, enable/disable controls
+or callback editor can be added later if your platform benefits from them.
 
 
 ## 7. Snapshots and jobs
@@ -245,7 +279,8 @@ wait or fail. In particular, other traffic can interrupt an IR capture.
 
 ## 8. Complete edit workflow
 
-Most platforms need the intents: `POST /hubs/{id}/activities/{aid}/rename`,
+If your platform offers configuration editing, use the intent routes for
+common changes: `POST /hubs/{id}/activities/{aid}/rename`,
 `PUT /hubs/{id}/activities/{aid}/buttons/VOL_UP` with `{"device_id": 7,
 "command_id": 3}` (add `"long_press": {...}` for the held press),
 `DELETE` on the same path to clear, `POST .../favorites`, `PUT
@@ -433,8 +468,17 @@ snapshot before recovery. Never automatically retry an additive restore.
 
 ## 10. Button events
 
-Deploy a callback device once per hub and the remote becomes an input
-device for your platform:
+For an integration that consumes an existing setup, read
+`GET /hubs/{id}/callback-device`, handle `press` messages and map the stable
+hub/device/command IDs to platform actions. Labels are display text. Missing
+or stale callback configuration should lead users to setup or repair, not
+trigger automatic deployment on every connection. Activity-state events
+work without a callback device.
+
+The panel's API view can run the routes below, but 0.2.0 has no dedicated
+callback or binding editor. The [starter setup command](getting-started.md#3-receive-your-first-remote-press)
+handles a first slot; deployed commands can also be assigned in the official
+app. If you choose to manage callbacks in your client:
 
 1. `POST /api/v1/hubs/{id}/callback-device` with the slot labels your
    users will see (up to ten; every slot is written, unnamed ones as
@@ -443,25 +487,31 @@ device for your platform:
 2. Let the user bind those commands with the generic edit routes, or do
    it for them: a hard button in an activity, a favorite, activity
    membership. Nothing else is needed; the hub calls the server when the
-   user presses.
+   user presses. Close the official app before server-side writes.
 3. Handle `press` messages on `/events`: `device_id` and `command_id`
    identify the slot, `label` is what you named it, `press_type` tells
    short from long. Ignore `resolution` values other than `deployed` if
    you only want presses that match what you deployed.
-4. Keep `(instance_id, seq)` of the last press you handled. On
+4. Choose whether to replay missed presses or skip them to avoid delayed
+   actions. Keep `(instance_id, seq)` of the last press you handled. On
    reconnect, or after a `dropped` message, `GET
    /api/v1/hubs/{id}/presses?after=<seq>` returns what you missed, oldest
    first; `expired: true` means the ring no longer reaches back that far.
    A different `instance_id` (in `hello` and `GET /api/v1/server`) means
    the server restarted: the sequence started over and there is no
-   history to fetch.
+   history from the previous instance. Track a cursor per hub: `seq` is
+   global, but history is per hub. When replaying, subscribe first, buffer
+   live presses while fetching history, merge by sequence and de-duplicate
+   before dispatching. An expired history means accepting a gap; it is not
+   a durable event log.
 5. Update with `PUT /hubs/{id}/callback-device` and a **complete desired
    spec**, copied from the current GET response. Omitted slots become
    defaults and omitted power/input hooks are cleared. Generic bindings
    survive because device and command IDs stay. A failed job with
    `callback_update_declined` means the device was edited outside the
-   server (or the planner refused the diff); show the detail and offer
-   remove-and-deploy. `stale: true` on the record (and the
+   server (or the planner refused the diff); show the detail and reconcile
+   the device before another write. Removing and redeploying can change IDs
+   and require rebinding. `stale: true` on the record (and the
    `callback_device_stale` server event) means the hub lost the device;
    offer `POST /hubs/{id}/callback-device/redeploy`.
 
@@ -518,8 +568,8 @@ Two things to know before you link it:
   /hubs/{id}/ui/remote-card` holds the card's configuration document
   (which key groups show, their order, device mode, shortcuts, custom
   favourites, hold-to-repeat, key style); absent means the card's
-  defaults. If your platform has a settings screen, a JSON text field
-  that reads and writes this document is all the editor a user needs.
-  The control panel's Remote view (`/ui/`) has one.
+  defaults. Link to the control panel's Remote view (`/ui/`) to edit it.
+  Implement those document routes only if you want an additional layout
+  editor inside your platform.
 
 The page is not part of the API contract; only the document routes are.

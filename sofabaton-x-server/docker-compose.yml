@@ -10,8 +10,9 @@
 #   docker compose up -d
 #   docker compose logs -f
 #
-# Set SOFABATON_HUBS to seed hubs on first start, or register them later
-# through the API (POST /api/v1/hubs) or a platform integration.
+# Fully close the official Sofabaton app first: connected hubs do not advertise.
+# Then open http://<server>:8480/ and add hubs in the control panel.
+# SOFABATON_HUBS is an optional seed for first startup only.
 services:
   sofabaton-x-server:
     build:

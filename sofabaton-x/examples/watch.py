@@ -21,7 +21,7 @@ delivered on the event loop.
 
 import asyncio
 
-from sofabaton import AsyncXProxy, async_discover_hubs
+from sofabaton import AsyncXProxy, HubConfig, async_discover_hubs
 
 
 async def main() -> None:
@@ -30,12 +30,8 @@ async def main() -> None:
         raise SystemExit("no hub found")
     hub = hubs[0]
 
-    # The hub's IP is all that's required. Events surface with or without
-    # the app. To let the official app connect *through* the proxy (so you
-    # can watch it drive the hub), add the hub's mDNS identity so the proxy
-    # advertises itself exactly like the hub:
-    #     mdns_instance=hub.name, mdns_txt=hub.txt
-    proxy = AsyncXProxy(hub_ip=hub.host)
+    # Preserve the discovered identity so the official app finds this proxy.
+    proxy = AsyncXProxy.from_config(HubConfig.from_discovered(hub))
 
     async def on_activity(new_id, old_id, name):
         print(f"activity -> {name or '?'}  (id {old_id} -> {new_id})")
@@ -46,13 +42,9 @@ async def main() -> None:
     proxy.on_ota_update(lambda *a, **k: print("hub OTA update in progress"))
 
     async with proxy:
-        # Wait until the proxy is up and the hub has connected to it — until
-        # the hub is attached there are no events to surface. (This is also
-        # when the proxy starts advertising over mDNS so the official app can
-        # find it, but that's optional. Returns False if the hub never
-        # connects.)
+        # Ensure the mDNS advertisement is ready so the app can find us.
         if not await proxy.wait_until_discoverable(timeout=30):
-            raise SystemExit("hub never connected")
+            raise SystemExit("proxy did not become discoverable; check hub connectivity and mDNS")
         # Read what's already running right now (live state, no fetch —
         # works whether or not an app is attached).
         running = await proxy.current_activity()

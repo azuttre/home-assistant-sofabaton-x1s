@@ -212,6 +212,12 @@ class DiscoveryService:
     # -- queries -------------------------------------------------------------
 
     def seen(self) -> list[SeenHub]:
+        # Registration is resolved at read time: a hub registered from this
+        # table stops advertising once the proxy fronts it, so no later
+        # advertisement would refresh a value cached at observation time,
+        # and records loaded at start predate the first advertisement.
+        for entry in self._table.values():
+            entry.registered_hub_id = self._registered_id(entry.config)
         return sorted(self._table.values(), key=lambda s: (not s.present, s.key))
 
     async def scan(self, timeout: float) -> list[SeenHub]:

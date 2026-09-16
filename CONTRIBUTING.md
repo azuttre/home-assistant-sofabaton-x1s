@@ -178,6 +178,7 @@ The integration and the library are **versioned independently**:
 | --------------------- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | HA integration        | `custom_components/sofabaton_x1s/manifest.json` (plus the badge in `README.md`) | Publishing a GitHub release. `release.yml` zips `custom_components/sofabaton_x1s/` (excluding `www/src/`) and attaches `sofabaton_x1s.zip`, which HACS installs (`hacs.json` uses `zip_release`). |
 | `sofabaton-x` library | `custom_components/sofabaton_x1s/lib/version.py`                                | Pushing a tag `sofabaton-x-vX.Y.Z`. `sofabaton-x-release.yml` verifies the tag matches `version.py`, runs the tests, builds, and publishes to PyPI via trusted publishing.                        |
+| `sofabaton-x-server`  | `sofabaton-x-server/src/sofabaton_server/__init__.py` (`API_VERSION` only when the OpenAPI document changes incompatibly) | Pushing a tag `sofabaton-x-server-vX.Y.Z`. `sofabaton-x-server-release.yml` verifies the tag, runs the server tests and the OpenAPI drift check, builds, installs the wheel with the library from PyPI, and publishes. The library version it depends on (`sofabaton-x>=0.2,<0.3` in its `pyproject.toml`) must be on PyPI first. |
 
 Library stability contract: names exported from the package root
 (`sofabaton.__all__`) follow semver; everything else is internal. Changes to
@@ -198,6 +199,21 @@ touches `lib/`, so the PyPI package never falls behind the engine):
 4. Commit, then `git tag sofabaton-x-vX.Y.Z && git push origin sofabaton-x-vX.Y.Z`.
    The release workflow refuses a tag that does not match `version.py`.
 5. Paste the release notes on the GitHub release created for the tag.
+
+Server release checklist (after the library it depends on is on PyPI):
+
+1. Set `__version__` in `sofabaton-x-server/src/sofabaton_server/__init__.py`;
+   bump the dependency range in `sofabaton-x-server/pyproject.toml` when
+   the server needs a newer library.
+2. `npm run build:frontend` and commit the bundles (the web remote and the
+   control panel ship inside the wheel; frontend CI checks for drift).
+3. `python -m sofabaton_server.openapi` after any API change; commit
+   `openapi.json`. Server README links must be absolute GitHub URLs (PyPI
+   renders it outside the repository).
+4. `pytest sofabaton-x-server/tests -q`, `npm run test:frontend`, and the
+   Playwright specs `server-panel.spec.js` and `web-remote.spec.js`.
+5. Commit, then `git tag sofabaton-x-server-vX.Y.Z && git push origin sofabaton-x-server-vX.Y.Z`,
+   and paste the release notes on the GitHub release.
 
 CI (`sofabaton-x-ci.yml`) runs on PRs and pushes to `main`/`dev` that touch
 the library, the packaging metadata, or the tests: boundary lint, lib tests

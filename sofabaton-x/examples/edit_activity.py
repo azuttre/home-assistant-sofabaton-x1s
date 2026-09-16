@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Refresh, preview and optionally rename one activity through the facade.
 
-Install the library from a checkout first (see README).
+Install sofabaton-x 0.2.x first (see README). This connects directly to the
+physical hub; stop any other proxy/server managing that hub before running.
 Preview performs hub reads; --apply also writes.
 Example: python edit_activity.py --hub 192.168.1.50 --activity 101 --name Movie
 """

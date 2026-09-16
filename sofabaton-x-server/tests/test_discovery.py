@@ -97,6 +97,35 @@ def test_browser_feeds_the_table_and_events_and_own_proxies_are_dropped(tmp_path
     assert advertiser.stopped and not browser.running
 
 
+def test_registration_is_resolved_at_read_time(tmp_path: Path) -> None:
+    """A record loaded at start, or one that stops advertising once the
+    proxy fronts it, must still read as registered: the lifespan starts
+    discovery before the manager loads hubs.json, and a fronted hub sends
+    no further advertisement that could refresh a cached value."""
+
+    import json
+
+    (tmp_path / "hubs.json").write_text(json.dumps({"schema": 1, "hubs": [{
+        "hub_id": "aabbccddeeff", "enabled": False, "added_at": "2026-09-16T00:00:00+00:00", "last_seen": None,
+        "config": {"host": "192.168.1.50", "mac": "AA:BB:CC:DD:EE:FF", "hub_version": "X1S"},
+    }]}), encoding="utf-8")
+    client, factory, discovery, advertiser = _rig(tmp_path)
+    # Seen before the records are loaded (no hub_added event will ever fire for them).
+    discovery._on_seen(_adv("192.168.1.50", mac="AA:BB:CC:DD:EE:FF"))
+    discovery._on_seen(_adv("192.168.1.60"))
+    with client:
+        seen = {s["key"]: s for s in client.get(f"{DISC}/hubs").json()}
+        assert seen["aabbccddeeff"]["registered_hub_id"] == "aabbccddeeff"
+        assert seen["192.168.1.60"]["registered_hub_id"] is None
+        # Gone (the proxy took over): still registered, by host as well as MAC.
+        client.portal.call(discovery._on_removed, _adv("192.168.1.50", mac="AA:BB:CC:DD:EE:FF"))
+        seen = {s["key"]: s for s in client.get(f"{DISC}/hubs").json()}
+        assert not seen["aabbccddeeff"]["present"] and seen["aabbccddeeff"]["registered_hub_id"] == "aabbccddeeff"
+        assert client.post(HUBS, json={"host": "192.168.1.60"}).status_code == 201
+        seen = {s["key"]: s for s in client.get(f"{DISC}/hubs").json()}
+        assert seen["192.168.1.60"]["registered_hub_id"] == "192.168.1.60"
+
+
 def test_scan_merges_into_the_table(tmp_path: Path) -> None:
     client, _, _, _ = _rig(tmp_path, scan_result=[_adv("10.0.0.7", mac="01:02:03:04:05:06"), _adv("10.0.0.8", proxy=True)])
     with client:

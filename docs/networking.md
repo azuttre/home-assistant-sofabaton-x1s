@@ -75,6 +75,12 @@ The integration discovers the physical hub and then keeps a bidirectional sessio
 
 ### Discovery
 
+- **Before initial setup, fully close the official Sofabaton app.** While
+  connected directly to the app, the physical hub stops advertising and
+  cannot be discovered. Keep the app closed until the proxy has connected;
+  if discovery is empty, close the app and scan again before investigating
+  multicast or firewall settings. Entering an IP manually does not replace
+  this setup prerequisite.
 - Uses mDNS/Bonjour for the `_x1hub._udp.local.` (X1 and X1S) or `_sofabaton_hub._udp.local.` (X2) advertisement to learn the hub IP/UDP port.
 - If hubs sit on a different VLAN, multicast must be forwarded or you need to add the hub manually in the config flow (IP + UDP port).
 

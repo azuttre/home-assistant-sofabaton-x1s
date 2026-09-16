@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Find/send commands and set up/receive remote presses through the server.
+"""Use a registered hub: send commands and watch state or remote presses.
 
-See docs/getting-started.md. Uses HTTP only; no direct connection to a hub.
+Register and manage hubs in the server's control panel first. See
+docs/getting-started.md. This client uses HTTP/WebSocket, not a hub connection.
 The listen action additionally uses websockets (included with the server's
-uvicorn[standard] dependency). Setup writes a callback device if missing and
+uvicorn[standard] dependency). Optional one-time setup writes a callback device if missing and
 replaces both bindings of the explicitly selected activity button.
 Requests are never automatically retried. Listen ends on disconnection;
 production reconnect/catch-up guidance is in docs/platform-integration.md.
@@ -133,13 +134,16 @@ def listen(client, hub_id):
                 event = json.loads(raw)
                 if event["type"] == "hello":
                     print("Connected to server instance", event["instance_id"], flush=True)
+                elif event["type"] in ("hub_event", "server_event"):
+                    # Update platform state here; activity events need no callback device.
+                    print(json.dumps(event), flush=True)
                 elif event["type"] == "press":
                     print(json.dumps(event, indent=2), flush=True)
                     if event["resolution"] == "deployed":
                         # Dispatch your application action here, using hub/device/command IDs.
                         print(f"PRESS: {event['label']} ({event['press_type']})", flush=True)
                 elif event["type"] == "dropped":
-                    print("Events were lost; use GET /hubs/{hub_id}/presses?after=<last press seq> to reconcile.", flush=True)
+                    print("Events were lost; re-read hub state. For missed presses, use your replay policy and GET /hubs/{hub_id}/presses?after=<last press seq>.", flush=True)
     except WebSocketException as err:
         raise RuntimeError(f"WebSocket disconnected: {err}. Reconcile press history before reconnecting") from err
     print("Connection closed. Reconcile press history before restarting the listener.")

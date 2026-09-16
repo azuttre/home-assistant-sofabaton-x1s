@@ -9,10 +9,16 @@ update the README notice and install instructions, and start a new Unreleased
 section. For each breaking release, link the README notice to its migration
 entry. Keep previous entries when adding a new release. -->
 
-## Unreleased — 0.2.0
+## Unreleased
 
-This release is in development and contains breaking changes from 0.1.x.
-The migration notes below use 0.1.5 as the previous API baseline.
+Nothing yet.
+
+## 0.2.0 (2026-09-16)
+
+This release contains breaking changes from 0.1.x. The migration notes
+below use 0.1.5 as the previous API baseline. Release notes with the full
+feature list are on the
+[GitHub release](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/releases/tag/sofabaton-x-v0.2.0).
 
 ### Breaking changes and migration
 

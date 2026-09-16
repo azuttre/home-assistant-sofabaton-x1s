@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Build an HTTP callback listener ON TOP of sofabaton.
+"""Advanced direct-library example: build a hub-facing HTTP callback listener.
+
+sofabaton-x-server already provides this listener and relays presses over
+WebSocket. Server integrations should use its starter example instead.
 
 Executing HTTP callbacks is deliberately out of scope for the library:
 it only carries the protocol side. This sketch shows the pattern the
