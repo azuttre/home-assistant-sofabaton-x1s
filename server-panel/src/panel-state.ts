@@ -1,0 +1,145 @@
+// Pure helpers for the control panel: what a hub record means in one
+// phrase, names, dates, the views and their hash routing, the theme
+// choice, and the little persisted preferences. No DOM, so the node
+// tests cover them directly.
+
+import type { HubView } from "./panel-api";
+
+export type Tone = "ok" | "warn" | "err" | "off";
+
+/** One phrase for a hub record plus its status snapshot. */
+export function hubState(hub: HubView): { text: string; tone: Tone } {
+  if (!hub.enabled) return { text: "disabled", tone: "off" };
+  const s = hub.status;
+  if (!s) return { text: "not running: the proxy did not start", tone: "err" };
+  if (s.mode === "disconnected" || !s.hub_connected) return { text: "waiting for the hub to connect", tone: "warn" };
+  if (s.mode === "observe") return { text: s.app_connected ? "observing: the app holds the hub" : "observing", tone: "warn" };
+  return { text: s.catalog_ready ? "connected, in control" : "connected, first sync running", tone: "ok" };
+}
+
+export function hubDisplayName(hub: Pick<HubView, "hub_id" | "config">): string {
+  return hub.config?.name || hub.hub_id;
+}
+
+/** A local date-time, or "never". */
+export function formatWhen(iso: string | null | undefined): string {
+  if (!iso) return "never";
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? String(iso) : date.toLocaleString();
+}
+
+/** What to say after a lifecycle action succeeded. */
+export function actionOutcome(action: "enable" | "disable" | "remove", record: HubView | null): string {
+  if (action === "enable") return record?.enabled ? "started" : "enabled";
+  return action === "disable" ? "disabled" : "removed";
+}
+
+export const VIEWS = ["hubs", "catalog", "remote", "api", "events"] as const;
+export type ViewName = (typeof VIEWS)[number];
+
+export function isView(value: unknown): value is ViewName {
+  return typeof value === "string" && (VIEWS as readonly string[]).includes(value);
+}
+
+/** `#remote` -> "remote"; anything else -> the fallback. */
+export function viewFromHash(hash: string, fallback: ViewName = "hubs"): ViewName {
+  const name = hash.replace(/^#/, "");
+  return isView(name) ? name : fallback;
+}
+
+export const THEMES = ["auto", "light", "dark"] as const;
+export type ThemeChoice = (typeof THEMES)[number];
+
+export function isTheme(value: unknown): value is ThemeChoice {
+  return typeof value === "string" && (THEMES as readonly string[]).includes(value);
+}
+
+export function nextTheme(current: ThemeChoice): ThemeChoice {
+  return THEMES[(THEMES.indexOf(current) + 1) % THEMES.length];
+}
+
+export interface PanelPrefs {
+  hub: string | null;
+  view: ViewName;
+  theme: ThemeChoice;
+}
+
+const PREFS_KEY = "sofabaton-panel";
+
+export function loadPrefs(storage: Pick<Storage, "getItem"> | null): PanelPrefs {
+  const prefs: PanelPrefs = { hub: null, view: "hubs", theme: "auto" };
+  if (!storage) return prefs;
+  try {
+    const raw = storage.getItem(PREFS_KEY);
+    if (!raw) return prefs;
+    const data = JSON.parse(raw) as Partial<PanelPrefs>;
+    if (typeof data.hub === "string") prefs.hub = data.hub;
+    if (isView(data.view)) prefs.view = data.view;
+    if (isTheme(data.theme)) prefs.theme = data.theme;
+  } catch {
+    // A broken or blocked storage is the same as none.
+  }
+  return prefs;
+}
+
+export function savePrefs(storage: Pick<Storage, "setItem"> | null, prefs: PanelPrefs): void {
+  if (!storage) return;
+  try {
+    storage.setItem(PREFS_KEY, JSON.stringify(prefs));
+  } catch {
+    // Private mode or a full store: the panel still works.
+  }
+}
+
+/** Requests the API view remembers (method, path, query, body, status, time). */
+export interface HistoryEntry {
+  method: string;
+  path: string;
+  query: string;
+  body: string;
+  status: number;
+  at: string;
+}
+
+const HISTORY_KEY = "sofabaton-panel-history";
+export const HISTORY_LIMIT = 30;
+
+export function loadHistory(storage: Pick<Storage, "getItem"> | null): HistoryEntry[] {
+  if (!storage) return [];
+  try {
+    const data = JSON.parse(storage.getItem(HISTORY_KEY) || "[]") as unknown;
+    return Array.isArray(data) ? (data as HistoryEntry[]).slice(0, HISTORY_LIMIT) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function saveHistory(storage: Pick<Storage, "setItem"> | null, history: HistoryEntry[]): void {
+  if (!storage) return;
+  try {
+    storage.setItem(HISTORY_KEY, JSON.stringify(history.slice(0, HISTORY_LIMIT)));
+  } catch {
+    // ignored
+  }
+}
+
+/** Pretty-print JSON text when it parses; return it untouched otherwise. */
+export function prettyJson(text: string): string {
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return text;
+  }
+}
+
+/** `Name: value` lines to a header map; lines without a colon are skipped. */
+export function parseHeaderLines(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of text.split("\n")) {
+    const i = line.indexOf(":");
+    if (i < 0) continue;
+    const name = line.slice(0, i).trim();
+    if (name) out[name] = line.slice(i + 1).trim();
+  }
+  return out;
+}

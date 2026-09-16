@@ -520,6 +520,6 @@ Two things to know before you link it:
   favourites, hold-to-repeat, key style); absent means the card's
   defaults. If your platform has a settings screen, a JSON text field
   that reads and writes this document is all the editor a user needs.
-  The `/harness` console has one.
+  The control panel's Remote view (`/ui/`) has one.
 
 The page is not part of the API contract; only the document routes are.

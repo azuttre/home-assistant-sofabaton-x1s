@@ -44,3 +44,4 @@ dist-bench/
 
 # local data directory of the dev-console launch config (.claude/launch.json)
 sofabaton-x-server/.harness-data/
+sofabaton-x-server/.harness-data-empty/

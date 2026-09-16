@@ -6,7 +6,7 @@
 import { test, expect } from "@playwright/test";
 
 const HUB = "E2:6A:44:86:1B:45";
-const PAGE = "/sofabaton-x-server/src/sofabaton_server/ui/index.html";
+const PAGE = "/sofabaton-x-server/src/sofabaton_server/ui/remote/index.html";
 const API = "/api/v1";
 
 const STATUS = {
@@ -65,7 +65,9 @@ async function mockServer(page, state) {
   await page.route(`**${API}/**`, async (route) => {
     const request = route.request();
     const url = new URL(request.url());
-    const key = `${request.method()} ${decodeURIComponent(url.pathname.slice(API.length))}`;
+    // The page derives the server base from its own URL (everything before
+    // /ui/remote/), so the API sits under the package path, not the origin.
+    const key = `${request.method()} ${decodeURIComponent(url.pathname.slice(url.pathname.indexOf(API) + API.length))}`;
     const body = request.postDataJSON ? request.postDataJSON() : null;
     calls.push({ key, body });
     const handler = routes[key];

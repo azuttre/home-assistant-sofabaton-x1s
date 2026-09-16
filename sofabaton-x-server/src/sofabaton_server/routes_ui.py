@@ -1,12 +1,16 @@
-"""The web remote (docs/internal/web-remote-plan.md, S1): the remote card
-served by this server at ``/ui/remote/`` plus its per-hub configuration
-document at ``/api/v1/hubs/{hub_id}/ui/remote-card``.
+"""The pages this server serves and the web remote's configuration document.
 
-The page and its assets ship inside the package (``sofabaton_server/ui``)
-so card and server can never drift; they are outside the API contract
-(absent from the OpenAPI document). The configuration document is in the
-contract: it is how a phone, a tablet and a wall panel show the same
-layout, and how the harness console edits it.
+* The control panel (docs/internal/server-panel-plan.md) at ``/ui/``;
+  ``/`` and the old ``/harness`` redirect there.
+* The web remote (docs/internal/web-remote-plan.md, S1) at ``/ui/remote/``.
+* The per-hub card configuration document at
+  ``/api/v1/hubs/{hub_id}/ui/remote-card``.
+
+The pages and their assets ship inside the package (``sofabaton_server/ui``,
+one directory per page) so card, panel and server can never drift; they
+are outside the API contract (absent from the OpenAPI document). The
+configuration document is in the contract: it is how a phone, a tablet
+and a wall panel show the same layout, and how the panel edits it.
 """
 
 from __future__ import annotations
@@ -27,10 +31,17 @@ from .models import Problem, now_iso
 from .problems import ApiProblem, hub_not_found
 
 UI_DIR = Path(__file__).resolve().parent / "ui"
+PANEL_DIR = UI_DIR / "panel"
+REMOTE_DIR = UI_DIR / "remote"
+PANEL_PREFIX = "/ui"
 UI_PREFIX = "/ui/remote"
 
-# Only these files are served; nothing else in the directory is reachable.
-_ASSETS: dict[str, str] = {
+# Only these files are served; nothing else in the directories is reachable.
+_PANEL_ASSETS: dict[str, str] = {
+    "index.html": "text/html; charset=utf-8",
+    "panel.js": "text/javascript; charset=utf-8",
+}
+_REMOTE_ASSETS: dict[str, str] = {
     "index.html": "text/html; charset=utf-8",
     "remote-web.js": "text/javascript; charset=utf-8",
     "manifest.webmanifest": "application/manifest+json",
@@ -136,11 +147,11 @@ def _etag(path: Path) -> str:
     return f'"{digest.hexdigest()[:24]}"'
 
 
-def _asset_response(request: Request, name: str) -> Response:
-    media_type = _ASSETS.get(name)
-    path = UI_DIR / name
+def _asset_response(request: Request, directory: Path, assets: dict[str, str], name: str) -> Response:
+    media_type = assets.get(name)
+    path = directory / name
     if media_type is None or not path.is_file():
-        raise ApiProblem(404, "ui_asset_not_found", "No such web remote asset", detail=name)
+        raise ApiProblem(404, "ui_asset_not_found", "No such page asset", detail=name)
     etag = _etag(path)
     if request.headers.get("if-none-match") == etag:
         return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers={"ETag": etag})
@@ -150,23 +161,48 @@ def _asset_response(request: Request, name: str) -> Response:
                         headers={"ETag": etag, "Cache-Control": "no-cache"})
 
 
+# Relative asset URLs in each index.html resolve against the directory, so
+# both pages live under a trailing slash and the bare paths redirect.
+
+
 @ui_pages_router.get("/")
 async def root_redirect() -> RedirectResponse:
-    return RedirectResponse(url=f"{UI_PREFIX}/", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+    return RedirectResponse(url=f"{PANEL_PREFIX}/", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
+
+@ui_pages_router.get("/harness")
+async def harness_redirect() -> RedirectResponse:
+    """The development console this panel grew out of; the old address stays valid."""
+
+    return RedirectResponse(url=f"{PANEL_PREFIX}/", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
+
+@ui_pages_router.get(PANEL_PREFIX)
+async def ui_panel_redirect() -> RedirectResponse:
+    return RedirectResponse(url=f"{PANEL_PREFIX}/", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+
+
+@ui_pages_router.get(f"{PANEL_PREFIX}/")
+async def ui_panel_index(request: Request) -> Response:
+    return _asset_response(request, PANEL_DIR, _PANEL_ASSETS, "index.html")
 
 
 @ui_pages_router.get(UI_PREFIX)
 async def ui_remote_redirect() -> RedirectResponse:
-    # Relative asset URLs in index.html resolve against the directory, so
-    # the page lives under the trailing slash.
     return RedirectResponse(url=f"{UI_PREFIX}/", status_code=status.HTTP_307_TEMPORARY_REDIRECT)
 
 
 @ui_pages_router.get(f"{UI_PREFIX}/")
 async def ui_remote_index(request: Request) -> Response:
-    return _asset_response(request, "index.html")
+    return _asset_response(request, REMOTE_DIR, _REMOTE_ASSETS, "index.html")
 
 
 @ui_pages_router.get(f"{UI_PREFIX}/{{asset}}")
 async def ui_remote_asset(request: Request, asset: str) -> Response:
-    return _asset_response(request, asset)
+    return _asset_response(request, REMOTE_DIR, _REMOTE_ASSETS, asset)
+
+
+# Declared after the remote routes: a literal ``/ui/remote`` wins over ``/ui/{asset}``.
+@ui_pages_router.get(f"{PANEL_PREFIX}/{{asset}}")
+async def ui_panel_asset(request: Request, asset: str) -> Response:
+    return _asset_response(request, PANEL_DIR, _PANEL_ASSETS, asset)

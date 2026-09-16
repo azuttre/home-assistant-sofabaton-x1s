@@ -8030,9 +8030,8 @@ function normalizeHubId(value) {
   const compact = raw.replace(/[:\-\s.]/g, "");
   return /^[0-9a-fA-F]{12}$/.test(compact) ? compact.toLowerCase() : raw;
 }
-function serverBaseFromPageUrl(href) {
+function serverBaseFromPageUrl(href, marker = "/ui/remote/") {
   const url = new URL(href);
-  const marker = "/ui/remote/";
   const at = url.pathname.indexOf(marker);
   const root = at >= 0 ? url.pathname.slice(0, at) : "";
   return `${url.origin}${root}`.replace(/\/+$/, "");
@@ -10561,7 +10560,7 @@ var SofabatonRemoteWeb = class extends HTMLElement {
       const href = `?hub=${encodeURIComponent(hub.hub_id)}`;
       const label = `${escapeHtml(hub.config?.name || hub.hub_id)} (${escapeHtml(hub.status?.hub_version || "?")}, ${hub.enabled ? escapeHtml(hub.status?.mode || "starting") : "disabled"})`;
       return `<li><a href="${href}">${label}</a> <code>${escapeHtml(hub.hub_id)}</code></li>`;
-    }).join("")}</ul>` : error ? `<p>The server did not answer <code>${SERVER_API_PREFIX}/hubs</code>: ${escapeHtml(error)}.</p>` : `<p>This server has no hubs registered yet. Add one with <code>POST ${SERVER_API_PREFIX}/hubs</code> or from the <a href="/harness">console</a>.</p>`;
+    }).join("")}</ul>` : error ? `<p>The server did not answer <code>${SERVER_API_PREFIX}/hubs</code>: ${escapeHtml(error)}.</p>` : `<p>This server has no hubs registered yet. Add one with <code>POST ${SERVER_API_PREFIX}/hubs</code> or from the <a href="../">control panel</a>.</p>`;
     const why = requested ? `<p>No hub with id <code>${escapeHtml(requested)}</code> is registered on this server.</p>` : `<p>Open this page with <code>?hub=&lt;hub id&gt;</code>. The id is the hub's MAC (any spelling), or the host it was registered by before its first sync.</p>`;
     this._shadow.innerHTML = `<style>${HOST_CSS}</style>
       <div class="notice">

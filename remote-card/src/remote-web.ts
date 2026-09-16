@@ -197,7 +197,7 @@ export class SofabatonRemoteWeb extends HTMLElement {
           .join("")}</ul>`
       : error
         ? `<p>The server did not answer <code>${SERVER_API_PREFIX}/hubs</code>: ${escapeHtml(error)}.</p>`
-        : `<p>This server has no hubs registered yet. Add one with <code>POST ${SERVER_API_PREFIX}/hubs</code> or from the <a href="/harness">console</a>.</p>`;
+        : `<p>This server has no hubs registered yet. Add one with <code>POST ${SERVER_API_PREFIX}/hubs</code> or from the <a href="../">control panel</a>.</p>`;
     const why = requested
       ? `<p>No hub with id <code>${escapeHtml(requested)}</code> is registered on this server.</p>`
       : `<p>Open this page with <code>?hub=&lt;hub id&gt;</code>. The id is the hub's MAC (any spelling), or the host it was registered by before its first sync.</p>`;

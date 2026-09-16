@@ -18,6 +18,7 @@
   "include": [
     "custom_components/sofabaton_x1s/www/src/**/*.ts",
     "remote-card/src/**/*.ts",
+    "server-panel/src/**/*.ts",
     "tests/frontend/**/*.ts",
     "scripts/**/*.mjs"
   ]

@@ -6,9 +6,10 @@ use from any language. The examples here are small Python clients of that
 server; they do not connect directly to a hub.
 
 Before writing any code, you can see the hub work from a browser: with
-the server running and a hub registered, open
+the server running, open `http://<server>:8480/` for the control panel
+(register the hub there, then its Remote view), or
 `http://<server>:8480/ui/remote/?hub=<hub id>` for the server's own
-remote page (the README's "Web remote" section). Everything the page does
+remote page (the README's "Web remote" section). Everything the pages do
 goes through the same API this guide uses.
 
 This guide gets two things working:
@@ -54,9 +55,13 @@ reading catalogs, sending commands or setting up button assignments: an
 attached app owns the hub and blocks server control.
 
 The `--hub` flag seeds registration only when `hubs.json` does not exist.
-If you already have server data, use `POST /api/v1/hubs` with
-`{"host":"192.168.1.50"}` to register another hub. You can submit this in
-the interactive API docs at `http://localhost:8480/api/v1/docs`.
+The easier way, and the one to use once you have server data, is the
+control panel at `http://localhost:8480/`: its Hubs view lists the hubs
+discovered on the LAN with an Add button, takes an address by hand, shows
+each hub's state, and enables, disables or removes it. Under the hood
+that is `POST /api/v1/hubs` with `{"host":"192.168.1.50"}`, which you can
+also submit in the interactive API docs at
+`http://localhost:8480/api/v1/docs`.
 
 For Docker, use the [Linux host-network deployment instructions](../README.md#docker).
 Keep this LAN service private; it has no built-in authentication.
@@ -263,7 +268,7 @@ inspect the job and callback record before repeating setup.
 
 | Symptom | First check |
 | --- | --- |
-| `hubs` returns an empty list | `--hub` only seeds a new data directory. Register the hub through `POST /api/v1/hubs`. |
+| `hubs` returns an empty list | `--hub` only seeds a new data directory. Register the hub from the control panel (`/`, Hubs view) or through `POST /api/v1/hubs`. |
 | `hub_not_found` | Run `hubs` again; the ID may have changed from an IP address to the MAC. |
 | Not ready, `hub_busy` or `send_refused` | Close the official app; check that no other integration owns the hub and that it can connect back to the server. |
 | Send accepted, no equipment response | Verify the selected device/command pair and check the equipment's usual IR/network reachability. |

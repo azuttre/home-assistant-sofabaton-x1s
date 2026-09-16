@@ -59,13 +59,13 @@ export function normalizeHubId(value: unknown): string {
 /**
  * The server's base URL (origin + root path, no trailing slash) derived
  * from the page's own location: the page is served at
- * `<base>/ui/remote/`, so everything before that is the base. A page
- * served from somewhere else (the Playwright fixtures server) gets the
- * origin alone.
+ * `<base>/ui/remote/` (the control panel at `<base>/ui/`, which passes
+ * its own marker), so everything before that is the base. A page served
+ * from somewhere else (the Playwright fixtures server) gets the origin
+ * alone.
  */
-export function serverBaseFromPageUrl(href: string): string {
+export function serverBaseFromPageUrl(href: string, marker = "/ui/remote/"): string {
   const url = new URL(href);
-  const marker = "/ui/remote/";
   const at = url.pathname.indexOf(marker);
   const root = at >= 0 ? url.pathname.slice(0, at) : "";
   return `${url.origin}${root}`.replace(/\/+$/, "");

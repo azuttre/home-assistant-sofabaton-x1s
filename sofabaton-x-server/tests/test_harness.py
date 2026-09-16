@@ -1,4 +1,4 @@
-"""The development console at /harness: served by the server, outside the API contract."""
+"""``/harness`` was the development console; it redirects to the control panel."""
 
 from __future__ import annotations
 
@@ -14,15 +14,12 @@ from sofabaton_server.manager import HubManager
 from fakes import Factory, no_network_discovery
 
 
-def test_harness_is_served_and_absent_from_the_openapi_document(tmp_path: Path) -> None:
+def test_harness_redirects_to_the_panel_and_stays_out_of_the_contract(tmp_path: Path) -> None:
     settings = Settings(data_dir=tmp_path)
     manager = HubManager(settings, proxy_factory=Factory())
     app = create_app(settings, manager=manager, discovery=no_network_discovery(settings, manager))
     with TestClient(app) as client:
-        r = client.get("/harness")
-        assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
-        assert "sofabaton-x-server console" in r.text
-        # Relative API base, so the page works under a root path too.
-        assert 'new URL("api/v1/", location.href)' in r.text
+        r = client.get("/harness", follow_redirects=False)
+        assert r.status_code == 307 and r.headers["location"] == "/ui/"
         spec = client.get(f"{API_PREFIX}/openapi.json").json()
         assert not any(path.endswith("/harness") for path in spec["paths"])

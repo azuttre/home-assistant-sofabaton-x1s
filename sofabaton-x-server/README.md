@@ -37,6 +37,12 @@ python -m pip install . ./sofabaton-x-server
 sofabaton-x-server --hub 192.168.1.50
 ```
 
+`--hub` is optional: start without it and open the control panel at
+`http://<server>:8480/` (it lives at `/ui/`). Its Hubs view lists the
+hubs advertised on the LAN with an Add button, takes an address by hand,
+and enables, disables and removes hubs later (see
+[Control panel](#control-panel)).
+
 The server must sit on the same network segment as the phones running
 the official app (mDNS and UDP broadcast); in Docker that means host
 networking on a Linux host. Ports on the host: TCP 8200 (hub connect-
@@ -534,10 +540,10 @@ DELETE /hubs/{id}/ui/remote-card        back to the card's defaults
 The document holds the same keys as the Home Assistant card's YAML,
 minus `entity`, `theme` and Home Assistant actions (custom favourites
 that call a Home Assistant action are dropped; those that name a hub
-command stay). The `/harness` console has a Web remote pane that loads,
-edits and saves it; a Home Assistant user can paste the card's YAML
-converted to JSON. Reload the page after saving. The page never stores
-anything in the browser.
+command stay). The control panel's Remote view (`/ui/`) shows the
+remote next to an editor for this document and applies a saved document
+to the remote at once; a Home Assistant user can paste the card's YAML
+converted to JSON. The page never stores anything in the browser.
 
 **Icons.** The page bundles the icons the card itself uses plus a set of
 common `mdi:` names for favourites and shortcuts; an icon outside that
@@ -617,24 +623,55 @@ the server and the hubs, the endpoint rule, the error table, the event
 stream, a pairing flow that feels right, and the snapshot, job and
 editing flows.
 
+## Control panel
+
+The server serves a control panel at `http://<server>:8480/ui/` (`/`
+and the older `/harness` redirect there; under the root path when one
+is configured): a sidebar with the registered hubs and their state, and
+four views for the selected hub.
+
+- **Hubs**: the hub's detail (state, host, model, id, MAC, last seen,
+  cache size, running activity) with Enable / Disable / Remove (Remove
+  asks first and also forgets the cached state and remote layout; Retry
+  start re-runs a start that failed), an "add by address" form, and the
+  hubs discovered on the LAN with an Add button that registers the
+  advertised configuration (a scan asks again). This is the
+  getting-started path; `--hub` and a hand-written `POST /hubs` are the
+  alternatives.
+- **Catalog**: the hub's devices and activities with their entity ids,
+  a device's commands and an activity's buttons, macros and favourites
+  with the ids an integration sends, and Refresh for one entity or the
+  whole hub (the server's only structural hub read, run as a job and
+  followed to its end). Read-only.
+- **Remote**: the remote card for the hub, mounted in the page over the
+  server's API, next to the editor for its layout document; a saved
+  document is applied to the card at once.
+- **API**: pick an operation from the OpenAPI document or type a method
+  and path (`{hub_id}` is the selected hub), send, and read the exact
+  request and the raw response (status line, headers, body; pretty or
+  raw). A 202 can be followed until its job finishes; the last requests
+  are kept as history.
+- **Events**: the WebSocket stream, connected on load and reconnecting
+  after a server restart, with a hub filter and a text filter; press
+  messages highlighted. The stream also keeps the sidebar current.
+
+The panel follows the system's light or dark scheme (a header toggle
+pins either) on the same palette as the remote. It is built from
+`server-panel/src` on the remote card's toolchain into
+`src/sofabaton_server/ui/panel/` (see [Development](#development)), is
+not part of the API contract (absent from the OpenAPI document), and
+has the same reach as the API: anyone who can open it can change the
+hub. Design notes: `docs/internal/server-panel-plan.md`.
+
 ## Development
 
-The server serves a development console at `http://<server>:8480/harness`
-(under the root path when one is configured): pick an operation from the
-OpenAPI document or type a method and path, fill `{hub_id}` from the hub
-chips, send, and read the exact request and the raw response (status
-line, headers, body; pretty or raw). A 202 can be followed until its job
-finishes, the last requests are kept as history, and the Events panel
-streams the WebSocket with a filter, press messages highlighted. It is
-not part of the API contract (absent from the OpenAPI document) and has
-the same reach as the API: anyone who can open the page can change the
-hub.
-
-The web remote page under `src/sofabaton_server/ui/` is built from the
-repository's remote-card sources (`npm run build:remote-web` at the
-repository root; `remote-web.js` is committed and the frontend CI checks
-it for drift), so a server change never needs a frontend toolchain, and a
-card change ships with the next server release.
+The web remote (`src/sofabaton_server/ui/remote/`) and the control
+panel (`src/sofabaton_server/ui/panel/`) are built from the repository's
+frontend sources (`npm run build:remote-web` and
+`npm run build:server-panel` at the repository root; the bundles are
+committed and the frontend CI checks them for drift), so a server change
+never needs a frontend toolchain, and a card or panel change ships with
+the next server release.
 
 From the repository root, with the library importable (the tests alias
 the in-tree library automatically):

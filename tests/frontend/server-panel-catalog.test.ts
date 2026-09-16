@@ -1,0 +1,103 @@
+// The Catalog view's pure parts (docs/internal/server-panel-plan.md, P6):
+// merging the typed rows with the snapshot's provenance, the job phrase,
+// and the API client's catalog routes plus job following over a fake fetch.
+
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { PanelApi, type JobView, type SnapshotDocument } from "../../server-panel/src/panel-api";
+import { buildCatalog, jobPhrase } from "../../server-panel/src/views/catalog-view";
+
+const DEVICES = [
+  { device_id: 1, name: "TV", brand: "Sony", device_class: "ir", device_class_code: 1, power_state: 0, idle_behavior: 2 },
+  { device_id: 7, name: "Amp", brand: null, device_class: null, device_class_code: null, power_state: null, idle_behavior: null },
+];
+const ACTIVITIES = [{ activity_id: 101, name: "Watch TV", active: true, needs_confirm: false }];
+const SNAPSHOT: SnapshotDocument = {
+  snapshot_id: "abc",
+  captured_at: "2026-09-16T10:00:00Z",
+  engine_generation: 3,
+  complete: false,
+  payload_profile: "x1s",
+  devices: [{ kind: "device", device: { device_id: 1, name: "TV" }, complete: true, editable: true, fetched_at: "2026-09-16T09:00:00Z" }],
+  activities: [{ kind: "activity", device: { device_id: 101, name: "Watch TV" }, complete: false, editable: false, fetched_at: "2026-09-16T09:30:00Z" }],
+};
+
+test("buildCatalog lists devices then activities, with the snapshot's provenance where it has any", () => {
+  const entries = buildCatalog(DEVICES, ACTIVITIES, SNAPSHOT);
+  assert.deepEqual(
+    entries.map((e) => [e.kind, e.id, e.name, e.complete, e.fetched_at]),
+    [
+      ["device", 1, "TV", true, "2026-09-16T09:00:00Z"],
+      ["device", 7, "Amp", false, null],
+      ["activity", 101, "Watch TV", false, "2026-09-16T09:30:00Z"],
+    ],
+  );
+  assert.equal(entries[0].device?.brand, "Sony");
+  assert.equal(entries[2].activity?.active, true);
+  // Without a snapshot nothing is marked fetched.
+  assert.ok(buildCatalog(DEVICES, ACTIVITIES, null).every((e) => !e.complete && e.fetched_at === null));
+});
+
+test("jobPhrase carries the status and the step count when there is one", () => {
+  const job = (status: string, progress: JobView["progress"]): JobView => ({
+    job_id: "j", hub_id: "h", kind: "refresh", status, cancellable: false, created_at: "t", started_at: null, finished_at: null, progress, result: null, error: null,
+  });
+  assert.equal(jobPhrase(job("queued", null)), "queued");
+  assert.equal(jobPhrase(job("running", { completed_steps: 2, total_steps: 5 })), "running 2/5");
+  assert.equal(jobPhrase(job("running", { total_steps: 5 })), "running 0/5");
+});
+
+test("the catalog routes and refresh scopes hit the documented paths; followJob polls to a terminal state", async () => {
+  const calls: { method: string; path: string; body: string | undefined }[] = [];
+  let polls = 0;
+  const fetchImpl = async (url: string, init?: RequestInit): Promise<Response> => {
+    const path = url.slice("http://host/api/v1".length);
+    calls.push({ method: init?.method ?? "GET", path, body: init?.body as string | undefined });
+    if (path === "/hubs/h/snapshot/refresh") {
+      return new Response(JSON.stringify({ job_id: "j1", hub_id: "h", kind: "refresh_entity", status: "queued" }), { status: 202, headers: { "content-type": "application/json" } });
+    }
+    if (path === "/hubs/h/jobs/j1") {
+      polls++;
+      const status = polls < 3 ? "running" : "done";
+      return new Response(JSON.stringify({ job_id: "j1", hub_id: "h", kind: "refresh_entity", status, progress: { completed_steps: polls, total_steps: 3 } }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return new Response("[]", { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const api = new PanelApi("http://host", fetchImpl);
+  await api.snapshot("h");
+  await api.devices("h");
+  await api.activities("h");
+  await api.deviceCommands("h", 7);
+  await api.entityButtons("h", 101);
+  await api.activityMacros("h", 101);
+  await api.activityFavorites("h", 101);
+  await api.refreshSnapshot("h", { device_id: 7 });
+  await api.refreshSnapshot("h", { activity_id: 101 });
+  await api.refreshSnapshot("h");
+  assert.deepEqual(
+    calls.map((c) => `${c.method} ${c.path}${c.body ? " " + c.body : ""}`),
+    [
+      "GET /hubs/h/snapshot",
+      "GET /hubs/h/devices",
+      "GET /hubs/h/activities",
+      "GET /hubs/h/devices/7/commands",
+      "GET /hubs/h/entities/101/buttons",
+      "GET /hubs/h/activities/101/macros",
+      "GET /hubs/h/activities/101/favorites",
+      'POST /hubs/h/snapshot/refresh {"device_id":7}',
+      'POST /hubs/h/snapshot/refresh {"activity_id":101}',
+      "POST /hubs/h/snapshot/refresh {}",
+    ],
+  );
+
+  const seen: string[] = [];
+  const job = await api.followJob("h", "j1", { intervalMs: 1, onUpdate: (j) => seen.push(jobPhrase(j)), sleep: async () => {} });
+  assert.equal(job?.status, "done");
+  assert.deepEqual(seen, ["running 1/3", "running 2/3", "done 3/3"]);
+
+  // The poll budget bounds a job that never ends.
+  polls = -1000;
+  const stuck = await api.followJob("h", "j1", { maxPolls: 2, sleep: async () => {} });
+  assert.equal(stuck?.status, "running");
+});

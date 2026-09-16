@@ -13,7 +13,7 @@ from sofabaton_server import API_PREFIX
 from sofabaton_server.app import create_app
 from sofabaton_server.config import Settings
 from sofabaton_server.manager import HubManager
-from sofabaton_server.routes_ui import MAX_DOCUMENT_BYTES, UI_DIR
+from sofabaton_server.routes_ui import MAX_DOCUMENT_BYTES, PANEL_DIR, REMOTE_DIR
 
 from fakes import Factory, no_network_discovery
 
@@ -33,17 +33,37 @@ def rig(tmp_path: Path):
 
 def test_page_assets_ship_in_the_package() -> None:
     for name in ("index.html", "remote-web.js", "manifest.webmanifest", "icon.svg"):
-        assert (UI_DIR / name).is_file(), name
-    html = (UI_DIR / "index.html").read_text(encoding="utf-8")
+        assert (REMOTE_DIR / name).is_file(), name
+    html = (REMOTE_DIR / "index.html").read_text(encoding="utf-8")
     assert "<sofabaton-remote-web>" in html and 'src="remote-web.js"' in html
-    bundle = (UI_DIR / "remote-web.js").read_text(encoding="utf-8")
+    bundle = (REMOTE_DIR / "remote-web.js").read_text(encoding="utf-8")
     assert "sofabaton-remote-web" in bundle and "/api/v1" in bundle
+    for name in ("index.html", "panel.js"):
+        assert (PANEL_DIR / name).is_file(), name
+    html = (PANEL_DIR / "index.html").read_text(encoding="utf-8")
+    assert "<sofabaton-server-panel>" in html and 'src="panel.js"' in html
+    bundle = (PANEL_DIR / "panel.js").read_text(encoding="utf-8")
+    assert "sofabaton-server-panel" in bundle and "/api/v1" in bundle
 
 
-def test_root_and_ui_remote_redirect_to_the_page(rig) -> None:
+def test_root_and_harness_redirect_to_the_panel(rig) -> None:
     client, _, _ = rig
-    r = client.get("/", follow_redirects=False)
-    assert r.status_code == 307 and r.headers["location"] == "/ui/remote/"
+    for path in ("/", "/harness", "/ui"):
+        r = client.get(path, follow_redirects=False)
+        assert r.status_code == 307 and r.headers["location"] == "/ui/", path
+    r = client.get("/ui/")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("text/html")
+    assert "<sofabaton-server-panel>" in r.text
+    assert r.headers["cache-control"] == "no-cache" and r.headers["etag"]
+    js = client.get("/ui/panel.js")
+    assert js.status_code == 200 and js.headers["content-type"].startswith("text/javascript")
+    # The panel's allow-list is its own: the remote's files are not under /ui/.
+    assert client.get("/ui/remote-web.js").status_code == 404
+    assert client.get("/ui/routes_ui.py").status_code == 404
+
+
+def test_ui_remote_redirects_to_the_page(rig) -> None:
+    client, _, _ = rig
     r = client.get("/ui/remote", follow_redirects=False)
     assert r.status_code == 307 and r.headers["location"] == "/ui/remote/"
     r = client.get("/ui/remote/")
@@ -72,7 +92,7 @@ def test_assets_are_served_with_types_and_revalidation(rig) -> None:
 def test_page_routes_are_outside_the_api_contract(rig) -> None:
     client, _, _ = rig
     spec = client.get(f"{API_PREFIX}/openapi.json").json()
-    assert not any(path.startswith("/ui") or path == "/" for path in spec["paths"])
+    assert not any(path.startswith("/ui") or path in ("/", "/harness") for path in spec["paths"])
     assert f"/api/v1/hubs/{{hub_id}}/ui/remote-card" in spec["paths"]
 
 
