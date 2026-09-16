@@ -368,6 +368,27 @@ def _decode_schema_label(label_bytes: bytes, encoding: str) -> str:
     return decoded.rstrip("\x00").strip()
 
 
+def hub_command_label(label: str, hub_version: str) -> str:
+    """Return ``label`` as the hub stores it and reads it back.
+
+    Command labels live in a fixed-width slot (30 ASCII bytes on X1, 60
+    UTF-16 bytes on X1S/X2). Anything longer is cut on write and comes
+    back cut on every later read, so a label we intend to write and a
+    label read from the hub only compare equal after both go through
+    this projection. Without it a 31-character
+    ``"<20-char name> Long Press"`` reads as foreign drift on every
+    re-sync and the replace path rejects its own replacement (X1,
+    2026-09-07 diagnostics).
+
+    Raises ``ValueError`` for an unknown ``hub_version`` (see
+    :func:`wire_schema.schema_for`).
+    """
+
+    _stride, slot_len, encoding = _stride_and_label_len(hub_version)
+    raw = str(label or "").encode(encoding, errors="ignore")[:slot_len]
+    return _decode_schema_label(raw.ljust(slot_len, bytes([0])), encoding)
+
+
 def iter_command_records_from_assembled(
     body: bytes,
     *,

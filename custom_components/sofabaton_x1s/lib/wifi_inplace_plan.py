@@ -48,7 +48,7 @@ exists (``command_rename``, ``member_replay``, ``favorite_add/delete``,
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from .activity_sync import (
     DEVICE_INPUT_REF_COMMAND,
@@ -132,6 +132,15 @@ class ManagedWifiSnapshot:
     that make the device selectable as a role-group controller (volume,
     navigation, …) in activity editors. On the desired side these are
     derived from the config (:func:`derive_device_level_bindings`).
+
+    ``target_host`` is the callback address carried by the device head
+    (the X1 Roku head stores the target IP; the X1S/X2 virtual-IP head
+    stores none, every record carries its own). The baseline adapter reads
+    it from the ``device_backup`` block; a desired snapshot that names one
+    makes the head commit write exactly that address instead of the
+    routed local IP, so a rename never moves a deployed callback target
+    (review 2026-09-11, point 1). ``None`` on the desired side keeps the
+    executor's historical behaviour (the Home Assistant path).
     """
 
     device_id: int
@@ -143,6 +152,7 @@ class ManagedWifiSnapshot:
     slots: Mapping[int, WifiCommandSlot] = field(default_factory=dict)
     activities: Mapping[int, WifiActivityRefs] = field(default_factory=dict)
     device_bindings: tuple[tuple[int, int, int | None], ...] = ()
+    target_host: str | None = None
 
 
 @dataclass(frozen=True)
@@ -174,9 +184,17 @@ def build_wifi_inplace_plan(
     desired: ManagedWifiSnapshot,
     *,
     deployed: ManagedWifiSnapshot | None = None,
+    label_key: Callable[[str], str] | None = None,
 ) -> WifiInplacePlan:
     """Diff ``baseline`` (current live device state) against ``desired``
     (target from the store config) and return the in-place write plan.
+
+    ``label_key`` projects a command label onto what the hub actually
+    stores (the fixed-width slot, see ``commands.hub_command_label``);
+    the rename diff compares projected labels so a desired name that only
+    differs from the live one past the slot boundary is not a rename.
+    Rename steps still carry the full desired name. ``None`` compares
+    labels verbatim.
 
     ``deployed`` — the expansion of the store's frozen last-deployed config —
     scopes the OWNERSHIP of per-activity references (favorites, hard-button
@@ -206,6 +224,7 @@ def build_wifi_inplace_plan(
             f"managed device id changed ({baseline.device_id} → {desired.device_id})"
         )
     dev = baseline.device_id
+    _label_key = label_key if label_key is not None else (lambda text: text)
 
     command_steps: list[SyncStep] = []
     power_steps: list[SyncStep] = []
@@ -244,7 +263,7 @@ def build_wifi_inplace_plan(
                     payload={"device_id": dev, "command_id": cid, "command_name": d_slot.label},
                 )
             )
-        elif b_slot.label != d_slot.label:
+        elif _label_key(b_slot.label) != _label_key(d_slot.label):
             command_steps.append(
                 SyncStep(
                     kind="command_rename",
@@ -418,16 +437,22 @@ def build_wifi_inplace_plan(
     # wifi_power_state from the current head, else is_power_configured flips
     # and activity delivery breaks on X1S (bench chunk 4).
     if baseline.device_name != desired.device_name or baseline.brand != desired.brand:
+        head_payload: dict[str, Any] = {
+            "device_id": dev,
+            "name": desired.device_name,
+            "brand": desired.brand,
+        }
+        # Only a desired target pins the head address; without one the
+        # executor keeps writing the routed local IP (the HA path, where
+        # the head IP was the routed IP at deploy and follows it since).
+        if desired.target_host:
+            head_payload["ip_address"] = str(desired.target_host)
         head_steps.append(
             SyncStep(
                 kind="wifi_head_commit",
                 label="Saving the device…",
                 target_device_id=dev,
-                payload={
-                    "device_id": dev,
-                    "name": desired.device_name,
-                    "brand": desired.brand,
-                },
+                payload=head_payload,
             )
         )
 
@@ -826,4 +851,5 @@ def baseline_snapshot_from_bundle(
         slots=slots,
         activities=activities,
         device_bindings=device_bindings,
+        target_host=str(dev_block.get("ip_address") or "") or None,
     )

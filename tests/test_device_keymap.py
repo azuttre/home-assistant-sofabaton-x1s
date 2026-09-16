@@ -104,6 +104,54 @@ def test_ui_device_list_names_fall_back_to_device_id() -> None:
 
 
 # ---------------------------------------------------------------------------
+# get_ui_activity_list
+# ---------------------------------------------------------------------------
+
+
+def test_ui_activity_list_orders_by_sort_byte_then_id() -> None:
+    proxy = _proxy()
+    hub = _hub(proxy)
+    hub.activities = {
+        101: {"name": "Watch TV"},
+        102: {"name": "Listen"},
+        103: {"name": "Play"},
+    }
+    # Same shared record schema as devices: display order lives in body[6].
+    # Activity 103 sorts ahead of 101; 102 has no cached record and falls
+    # back to id order after the sorted rows.
+    proxy.state.activities[101] = {"name": "Watch TV", "raw_body": bytes([0, 0, 0, 0, 0, 0, 2])}
+    proxy.state.activities[103] = {"name": "Play", "raw_body": bytes([0, 0, 0, 0, 0, 0, 1])}
+
+    rows = hub.get_ui_activity_list()
+
+    assert [row["id"] for row in rows] == [103, 101, 102]
+    assert [row["sort"] for row in rows] == [1, 2, 0]
+    assert [row["name"] for row in rows] == ["Play", "Watch TV", "Listen"]
+
+
+def test_ui_activity_list_keeps_id_order_when_never_sorted() -> None:
+    proxy = _proxy()
+    hub = _hub(proxy)
+    # Insertion order deliberately scrambled: the attribute must not depend
+    # on dict order when no record carries a sort byte.
+    hub.activities = {103: {"name": "C"}, 101: {"name": "A"}, 102: {"name": "B"}}
+
+    rows = hub.get_ui_activity_list()
+
+    assert [row["id"] for row in rows] == [101, 102, 103]
+
+
+def test_ui_activity_list_skips_non_dict_rows() -> None:
+    proxy = _proxy()
+    hub = _hub(proxy)
+    hub.activities = {101: {"name": "A"}, 102: None}
+
+    rows = hub.get_ui_activity_list()
+
+    assert rows == [{"id": 101, "name": "A", "sort": 0}]
+
+
+# ---------------------------------------------------------------------------
 # get_device_keymap
 # ---------------------------------------------------------------------------
 
@@ -396,6 +444,14 @@ class _AttrHub:
     def get_ui_device_list(self):
         return [{"id": 3, "name": "TV", "sort": 0}]
 
+    def get_ui_activity_list(self):
+        # Hub order (sort byte) already applied; deliberately not id order.
+        return [
+            {"id": 103, "name": "Play", "sort": 1},
+            {"id": 101, "name": "Watch TV", "sort": 2},
+            {"id": 102, "name": "Listen", "sort": 0},
+        ]
+
     def get_all_cached_button_details(self):
         return {}
 
@@ -406,6 +462,19 @@ def _remote_entity():
         entry_id="entry-1", data={"mac": "AABBCCDDEEFF"}, options={}
     )
     return remote_mod.SofabatonRemote(_AttrHub(), entry)
+
+
+def test_remote_attributes_publish_activities_in_hub_order():
+    entity = _remote_entity()
+    entity.hass = SimpleNamespace(data={})
+
+    attrs = entity.extra_state_attributes
+
+    # The remote card renders this list as-is, so the hub order (sort byte,
+    # then id) must already be settled here rather than dict order.
+    assert [row["id"] for row in attrs["activities"]] == [103, 101, 102]
+    assert [row["state"] for row in attrs["activities"]] == ["off", "off", "off"]
+    assert "sort" not in attrs["activities"][0]
 
 
 def test_remote_attributes_publish_devices_when_cache_enabled():

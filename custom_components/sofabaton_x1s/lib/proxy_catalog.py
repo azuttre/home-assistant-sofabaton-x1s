@@ -429,6 +429,58 @@ class CatalogMixin:
             sender=self._send_cmd_frame,
         )
 
+    def record_idle_behavior_absent(self, device_id: int) -> None:
+        """The hub holds no idle record for the device: remember that and
+        wake the waiter. ``get_idle_behavior`` then answers ``(None, True)``
+        and a structural capture counts the byte as known, not missing."""
+
+        dev_lo = int(device_id) & 0xFF
+        with self._idle_behavior_lock:
+            self._idle_behavior_values.pop(dev_lo, None)
+            self._idle_behavior_absent.add(dev_lo)
+            self._idle_behavior_pending = None
+            event = self._idle_behavior_events.get(dev_lo)
+        if event is not None:
+            event.set()
+        self._log.info("[REMOTE] idle dev=0x%02X: no idle record on the hub", dev_lo)
+
+    def _doubt_empty_catalog(self, kind: str, generation: int | None, cache_has_rows: bool) -> bool:
+        """Should a bare 0x07 to this catalog request be verified before it
+        empties the cache?
+
+        A 0x07 is the hub's "table empty" answer, but a per-entity read's
+        own 0x07 can arrive while a catalog request is in flight (a
+        millisecond race between a finishing burst and the next exchange,
+        observed live on the X1S, bench_230 2026-09-12) and would then be
+        taken for an empty catalog: rows=0 committed over a catalog that
+        held rows a moment earlier. So the first empty answer over a
+        non-empty cache is doubted: the burst ends without a commit and
+        the request goes out once more; a second empty answer (any later
+        request) is believed. An empty cache (an empty or erased hub)
+        believes the first answer, as before. A committed catalog with
+        rows clears the doubt."""
+
+        suspect = getattr(self, "_catalog_empty_suspect", None)
+        if suspect is None:
+            suspect = self._catalog_empty_suspect = {"activities": None, "devices": None}
+        if not cache_has_rows or generation is None:
+            return False
+        doubted = suspect.get(kind)
+        if doubted is not None and generation > doubted:
+            return False  # the re-request answered empty too
+        suspect[kind] = generation
+        self._log.warning(
+            "[CATALOG] STATUS_ACK 0x07 to a %s request while the cache holds rows; "
+            "not committing an empty catalog, asking once more (request=%s)",
+            kind, generation,
+        )
+        return True
+
+    def _clear_empty_catalog_doubt(self, kind: str) -> None:
+        suspect = getattr(self, "_catalog_empty_suspect", None)
+        if suspect:
+            suspect[kind] = None
+
     def note_catalog_status_ack(self, status: int) -> bool:
         """Handle hub status replies that mean an empty catalog request.
 
@@ -441,6 +493,15 @@ class CatalogMixin:
 
         ack_status = int(status) & 0xFF
         if ack_status != 0x07:
+            return False
+
+        # An idle-behaviour read answered with a bare 0x07: the device has
+        # no idle record (a freshly created one never does). Known absent,
+        # not unknown: the capture is complete without the byte and the
+        # waiter need not sit out its timeout (bench_230, 2026-09-12).
+        pending = getattr(self, "_idle_behavior_pending", None)
+        if pending is not None and not self._burst.active:
+            self.record_idle_behavior_absent(pending)
             return False
 
         active_kind = self._burst.kind if self._burst.active else None
@@ -458,6 +519,12 @@ class CatalogMixin:
         if self._activity_request_inflight is not None and not self._activity_pending_rows:
             if self._activity_pending_generation != self._activity_request_inflight:
                 self._reset_pending_activity_snapshot(self._activity_request_inflight)
+            if self._doubt_empty_catalog("activities", self._activity_request_inflight, bool(self.state.activities)):
+                # Not committed: the burst ends incomplete (discarded) and
+                # one re-request decides. See _doubt_empty_catalog.
+                finished = self._burst.finish("activities", can_issue=self.can_issue_commands, sender=self._send_cmd_frame)
+                self.request_activities()
+                return finished
             self._activity_pending_expected_rows = 0
             finished = self._burst.finish(
                 "activities",
@@ -471,6 +538,10 @@ class CatalogMixin:
         if self._device_request_inflight is not None and not self._device_pending_rows:
             if self._device_pending_generation != self._device_request_inflight:
                 self._reset_pending_device_snapshot(self._device_request_inflight)
+            if self._doubt_empty_catalog("devices", self._device_request_inflight, bool(self.state.devices)):
+                finished = self._burst.finish("devices", can_issue=self.can_issue_commands, sender=self._send_cmd_frame)
+                self.request_devices()
+                return finished
             self._device_pending_expected_rows = 0
             finished = self._burst.finish(
                 "devices",
@@ -734,6 +805,8 @@ class CatalogMixin:
         if complete:
             self._commit_pending_device_snapshot()
             self._devices_commit_serial += 1
+            if self._device_pending_rows:
+                self._clear_empty_catalog_doubt("devices")
             self._log.info(
                 "[DEV] committed complete devices snapshot rows=%d request=%s",
                 len(self._device_pending_rows),
@@ -778,6 +851,25 @@ class CatalogMixin:
         self.state.set_hint(self._activity_pending_hint)
         self._activities_catalog_ready = True
 
+    def _activities_read_queued(self) -> bool:
+        """True while a REQ_ACTIVITIES still waits behind the current burst.
+
+        Consulted by :meth:`handle_active_state` when an activities burst
+        ends. Whatever triggered that burst, the ACK_READY refresh window
+        normally closes with it, even when the read went unanswered. Not
+        when another REQ_ACTIVITIES is still queued: then the ending burst
+        is an older read and the ACK_READY refresh has not even been sent.
+        Closing the window there would let the MQTT push for that already
+        acknowledged transition arm a settling gate that no later ACK_READY
+        releases, holding commands for the full timeout (issue #282).
+        Burst-end listeners run before the scheduler pops the queue, so
+        the queued refresh is visible here. The window may outlive the
+        refresh by one read when an ordinary read queued behind it; it
+        closes when that read ends, so it can never stick.
+        """
+
+        return any(kind == "activities" for _op, _payload, _burst, kind in self._burst.queue)
+
     def _on_activities_burst_end(self, key: str) -> None:
         generation = self._activity_request_inflight
         complete = generation is not None and self._activity_pending_generation == generation and self._activity_snapshot_complete()
@@ -786,6 +878,8 @@ class CatalogMixin:
         if complete:
             self._commit_pending_activity_snapshot()
             self._activities_commit_serial += 1
+            if self._activity_pending_rows:
+                self._clear_empty_catalog_doubt("activities")
             self._log.info(
                 "[ACT] committed complete activities snapshot rows=%d request=%s",
                 len(self._activity_pending_rows),

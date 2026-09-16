@@ -351,6 +351,25 @@ class TransportBridge:
     def stop(self) -> None:
         self._stop.set()
         self._signal_wake()
+        # Let the bridge thread observe the stop flag and exit before the
+        # descriptors it registers are closed underneath it. Without this
+        # a stop landing between the loop's stop check and its selector
+        # sync registered freshly closed sockets, which counted as a
+        # selector failure and recreated the wake channel during an
+        # intentional shutdown (issue #283). Bounded so a wedged thread
+        # can only delay, never block, teardown; never join ourselves.
+        thr = self._bridge_thr
+        if (
+            thr is not None
+            and thr.is_alive()
+            and thr is not threading.current_thread()
+        ):
+            thr.join(1.0)
+            if thr.is_alive():
+                self._log.debug(
+                    "%s bridge thread still running at stop; closing anyway",
+                    LogTag.TRANSPORT,
+                )
         self._stop_notify_listener()
         if self._listener_registered:
             try:
@@ -675,6 +694,10 @@ class TransportBridge:
                 self._sync_selector(selector, desired)
                 ready = selector.select(0.5)
             except (OSError, ValueError) as exc:
+                if self._stop.is_set():
+                    # stop() owns the descriptors now; a failure here is
+                    # shutdown noise, not a bridge fault (issue #283).
+                    break
                 self._handle_select_failure(
                     exc,
                     hub,

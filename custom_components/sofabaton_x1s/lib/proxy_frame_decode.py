@@ -36,8 +36,12 @@ class FrameDecodeMixin:
         frames = self._df_h2a.feed(data, cid)
         if frames:
             self._handle_hub_frames(frames)
-            if self.diag_parse:
-                self._log_frames("H→A", frames)
+            # Always: _log_frames also dispatches the opcode handlers (the
+            # banner, acks, catalog rows ...). Gating it on diag_parse
+            # switched the protocol off for a diag_parse=False engine
+            # (latent since the first commit; found by a bench probe
+            # 2026-09-12). diag_parse now gates only the decoded summaries.
+            self._log_frames("H→A", frames)
 
     def _handle_app_frame(self, data: bytes, cid: int) -> None:
         if self.diag_dump:
@@ -45,8 +49,7 @@ class FrameDecodeMixin:
         frames = self._df_a2h.feed(data, cid)
         if frames:
             self._handle_app_frames(frames)
-            if self.diag_parse:
-                self._log_frames("A→H", frames)
+            self._log_frames("A→H", frames)  # dispatches handlers too; see above
 
     def _handle_app_frames(self, frames: List[Tuple[int, bytes, bytes, int, int]]) -> None:
         for opcode, _raw, _payload, _scid, _ecid in frames:
@@ -93,10 +96,11 @@ class FrameDecodeMixin:
         #      buttons/commands/macros into the proxy state cache;
         #   2. emit DEBUG-level decoded summaries for the tools-card logs tab
         #      and the diagnostics download.
-        # The DEBUG-only work is skipped when nothing is listening, but the
-        # handler dispatch must run regardless of log level — gating it would
-        # leave the catalog empty whenever hex logging is off.
-        debug_enabled = self._log.isEnabledFor(logging.DEBUG)
+        # The DEBUG-only work is skipped when nothing is listening or when
+        # diag_parse is off, but the handler dispatch must run regardless of
+        # either — gating it would leave the catalog empty whenever hex
+        # logging is off (and did, for diag_parse=False, until 2026-09-12).
+        debug_enabled = self.diag_parse and self._log.isEnabledFor(logging.DEBUG)
         for op, raw, payload, scid, ecid in frames:
             name: str | None = None
 

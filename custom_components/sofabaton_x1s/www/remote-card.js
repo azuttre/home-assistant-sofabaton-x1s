@@ -550,7 +550,7 @@ var o4 = s3.litElementPolyfillSupport;
 o4?.({ LitElement: i4 });
 (s3.litElementVersions ?? (s3.litElementVersions = [])).push("4.2.2");
 
-// custom_components/sofabaton_x1s/www/src/remote-card-layout.ts
+// remote-card/src/remote-card-layout.ts
 var DEFAULT_GROUP_ORDER = [
   "activity",
   "macro_favorites",
@@ -917,7 +917,7 @@ var X2_ONLY_HARD_BUTTON_IDS = /* @__PURE__ */ new Set([
   ID.GUIDE
 ]);
 
-// custom_components/sofabaton_x1s/www/src/remote-card-strings.ts
+// remote-card/src/remote-card-strings.ts
 var REMOTE_CARD_STRINGS_EN = {
   card: {
     selectEntityError: "Select a Sofabaton remote entity",
@@ -1170,7 +1170,7 @@ function isLocalizedPoweredOffLabel(label) {
   return s7 === currentStrings.card.poweredOff.toLowerCase();
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-editor-layout.ts
+// remote-card/src/remote-card-editor-layout.ts
 function deviceStoredLayerKey(selection) {
   const id = parseDeviceLayoutKey(selection);
   return id == null ? "default" : String(id);
@@ -1424,13 +1424,14 @@ function moveVisibleGroup(order, isVisible, fromVisible, toVisible) {
   return order.map((key) => isVisible(key) ? nextVisible[vi++] : key);
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-compat.ts
+// remote-card/src/remote-card-compat.ts
+function hubVersionFromState(remoteState) {
+  return String(remoteState?.attributes?.hub_version || "").toUpperCase();
+}
 function hubVersionFor(hass, entityId) {
   const resolved = String(entityId || "").trim();
   if (!resolved) return "";
-  return String(
-    hass?.states?.[resolved]?.attributes?.hub_version || ""
-  ).toUpperCase();
+  return hubVersionFromState(hass?.states?.[resolved]);
 }
 function isX2Hub(hubVersion, hubIntegration) {
   if (hubIntegration) return true;
@@ -1468,7 +1469,7 @@ async function ensureHaElements() {
   ]);
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-styles.ts
+// remote-card/src/remote-card-styles.ts
 var REMOTE_CARD_CSS = `
       :host {
         --sb-group-radius: var(--ha-card-border-radius, 18px);
@@ -2804,7 +2805,7 @@ var REMOTE_CARD_EDITOR_CSS = `
           }
         `;
 
-// custom_components/sofabaton_x1s/www/src/remote-card-shared.ts
+// remote-card/src/remote-card-shared.ts
 var CARD_NAME = "Sofabaton Virtual Remote";
 var CARD_VERSION = "0.2.3";
 var KEY_CAPTURE_HELP_URL = "https://github.com/m3tac0de/sofabaton-virtual-remote/blob/main/docs/keycapture.md";
@@ -2860,7 +2861,7 @@ function stableJsonSignature(value) {
   }
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-long-press.ts
+// remote-card/src/remote-card-long-press.ts
 var LONG_PRESS_GROUPS = ["volume", "channel", "dpad"];
 var LONG_PRESS_GROUP_FOR_KEY = {
   volup: "volume",
@@ -2935,7 +2936,7 @@ function hubLongPressBinding(attributes, scopeId, buttonId) {
   return { device_id: device, command_id: command };
 }
 
-// custom_components/sofabaton_x1s/www/src/editor-sections/expander.ts
+// remote-card/src/editor-sections/expander.ts
 function renderEditorExpander(params) {
   const toggle = (ev) => {
     ev.preventDefault();
@@ -2964,7 +2965,7 @@ function renderEditorExpander(params) {
   `;
 }
 
-// custom_components/sofabaton_x1s/www/src/editor-sections/option-row.ts
+// remote-card/src/editor-sections/option-row.ts
 function renderOptionRow(params) {
   const onSwitchChange = (ev) => {
     ev.preventDefault();
@@ -3009,7 +3010,7 @@ function renderFormRow(form, className = "") {
   return b2`<div class="sb-opt-row sb-opt-row--form ${className}">${form}</div>`;
 }
 
-// custom_components/sofabaton_x1s/www/src/editor-sections/general-options.ts
+// remote-card/src/editor-sections/general-options.ts
 var INITIAL_VIEW_FIELD = "open_device";
 var LONG_PRESS_BUTTONS_FIELD = "long_press_buttons";
 var computeSubFormLabel = (schema) => {
@@ -3122,7 +3123,7 @@ function renderGeneralOptionsSection(params) {
   });
 }
 
-// custom_components/sofabaton_x1s/www/src/editor-sections/shortcuts.ts
+// remote-card/src/editor-sections/shortcuts.ts
 var SHORTCUT_ICON_FIELD = "icon";
 var SHORTCUT_COMMAND_FIELD = "command";
 function slotLabel(slot) {
@@ -3245,7 +3246,7 @@ function renderShortcutsRowPanel(params) {
   `;
 }
 
-// custom_components/sofabaton_x1s/www/src/editor-sections/styling-options.ts
+// remote-card/src/editor-sections/styling-options.ts
 var computeEditorFieldLabel = (schema) => str().editor.fieldLabels[schema.name] || schema.name;
 var DEFAULT_BACKGROUND_OVERRIDE = [255, 255, 255];
 function renderStylingOptionsSection(params) {
@@ -3527,7 +3528,7 @@ var n6 = e4(class extends f3 {
   }
 });
 
-// custom_components/sofabaton_x1s/www/src/editor-sections/group-order.ts
+// remote-card/src/editor-sections/group-order.ts
 var stopEvent = (ev) => {
   ev.preventDefault();
   ev.stopPropagation();
@@ -3816,7 +3817,7 @@ function renderGroupOrderSection(params) {
   });
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-editor-element.ts
+// remote-card/src/remote-card-editor-element.ts
 var CARD_SETTING_DEFAULTS = {
   theme: "",
   max_width: 360,
@@ -4561,7 +4562,7 @@ var c6 = e4(class extends i6 {
   }
 });
 
-// custom_components/sofabaton_x1s/www/src/remote-card-ui-helpers.ts
+// remote-card/src/remote-card-ui-helpers.ts
 function automationAssistLabelForKey(key, label) {
   const trimmed = String(label ?? "").trim();
   if (trimmed) return trimmed;
@@ -4588,7 +4589,7 @@ function rgbToCss(rgb) {
   return "";
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-runtime-display.ts
+// remote-card/src/remote-card-runtime-display.ts
 function midModeState({
   showVolume,
   showChannel,
@@ -4667,7 +4668,7 @@ function macroFavoriteDisplayState({
   };
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-drawer-display.ts
+// remote-card/src/remote-card-drawer-display.ts
 function drawerVisibilityState({
   activeDrawer,
   showMacrosButton,
@@ -4698,7 +4699,7 @@ function drawerVisibilityState({
   };
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-gestures.ts
+// remote-card/src/remote-card-gestures.ts
 function createPrimaryActionGate() {
   return { ts: 0, pointerId: null, type: null };
 }
@@ -4920,7 +4921,7 @@ var LongPressTimer = class {
   }
 };
 
-// custom_components/sofabaton_x1s/www/src/remote-card-state.ts
+// remote-card/src/remote-card-state.ts
 function hasOwn(obj, key) {
   return obj != null && Object.prototype.hasOwnProperty.call(obj, key);
 }
@@ -5085,7 +5086,7 @@ function resolveHubActivityData({
   };
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-activity-state.ts
+// remote-card/src/remote-card-activity-state.ts
 function buildActivitySelectState({
   editMode,
   preview,
@@ -5158,7 +5159,7 @@ function noActivitiesWarning(isUnavailable, activitiesLength, loadState) {
   return "";
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-hub.ts
+// remote-card/src/remote-card-hub.ts
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -5218,7 +5219,7 @@ function stopActivityCommand(activityId) {
   return ["type:stop_activity", `activity_id:${Number(activityId)}`];
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-actions.ts
+// remote-card/src/remote-card-actions.ts
 function hubAssignedKeyCommand(activityId, commandId) {
   const activity = Number(activityId);
   const key = Number(commandId);
@@ -5260,7 +5261,7 @@ function remoteSendCommandData(entityId, commandId, deviceId) {
   };
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-editor-helpers.ts
+// remote-card/src/remote-card-editor-helpers.ts
 function normalizeCustomFavorite(item, idx = 0) {
   if (!item || typeof item !== "object") return null;
   const name = String(item.name ?? item.label ?? "").trim();
@@ -5303,7 +5304,101 @@ function customFavoritesSignature(items) {
   return `${parts.length}:${parts.join(";;")}`;
 }
 
-// custom_components/sofabaton_x1s/www/src/state/remote-card-store.ts
+// remote-card/src/backend/ha-backend.ts
+var INTEGRATION_BY_PLATFORM = {
+  sofabaton_x1s: "x1s",
+  sofabaton_hub: "hub"
+};
+var HaRemoteBackend = class {
+  constructor() {
+    this.kind = "ha";
+    this._hass = null;
+    this._entityId = "";
+  }
+  get hass() {
+    return this._hass;
+  }
+  get entityId() {
+    return this._entityId;
+  }
+  setHass(hass) {
+    this._hass = hass;
+  }
+  setTarget(target) {
+    this._entityId = String(target ?? "");
+  }
+  snapshot() {
+    if (!this._entityId) return void 0;
+    return this._hass?.states?.[this._entityId];
+  }
+  async probeIntegration() {
+    if (!this._hass?.callWS || !this._entityId) {
+      throw new Error("hass.callWS unavailable");
+    }
+    const entry = await this._hass.callWS({
+      type: "config/entity_registry/get",
+      entity_id: this._entityId
+    });
+    return INTEGRATION_BY_PLATFORM[String(entry?.platform || "")] ?? "unknown";
+  }
+  entryId() {
+    return String(this.snapshot()?.attributes?.entry_id ?? "");
+  }
+  async devicePowerState(deviceId) {
+    if (!this._hass?.callWS) return null;
+    const entryId = this.entryId();
+    if (!entryId) return null;
+    try {
+      const response = await this._hass.callWS({
+        type: "sofabaton_x1s/device/power_state",
+        entry_id: entryId,
+        device_id: deviceId
+      });
+      const raw = response?.power_state;
+      return raw === 1 ? 1 : raw === 0 ? 0 : null;
+    } catch (_err) {
+      return null;
+    }
+  }
+  async deviceKeymap(deviceId) {
+    if (!this._hass?.callWS) return null;
+    const entryId = this.entryId();
+    if (!entryId) return null;
+    return this._hass.callWS({
+      type: "sofabaton_x1s/device/keymap",
+      entry_id: entryId,
+      device_id: deviceId
+    });
+  }
+  async sendCommand(commandId, scopeId) {
+    const serviceData = remoteSendCommandData(this._entityId, commandId, scopeId);
+    if (!serviceData) return;
+    await this.callService("remote", "send_command", serviceData);
+  }
+  async sendRawCommandList(list) {
+    await this.callService("remote", "send_command", {
+      entity_id: this._entityId,
+      command: list
+    });
+  }
+  async startActivity(activity) {
+    await this.callService("remote", "turn_on", {
+      entity_id: this._entityId,
+      activity: activity.name
+    });
+  }
+  async stopActivity() {
+    await this.callService("remote", "turn_off", { entity_id: this._entityId });
+  }
+  async callService(domain, service, data = {}, target = void 0) {
+    if (!this._hass?.callService) {
+      throw new TypeError("hass.callService unavailable");
+    }
+    return this._hass.callService(domain, service, data, target);
+  }
+};
+
+// remote-card/src/state/remote-card-store.ts
 var POWER_ON_KEY_ID = 198;
 var POWER_OFF_KEY_ID = 199;
 var POWER_ASSUMPTION_TTL_MS = 15e3;
@@ -5336,12 +5431,16 @@ function normalizeRemoteCardConfig(config) {
 }
 var RemoteCardStore = class {
   constructor(onChange, host) {
-    this._hass = null;
+    // The backend port (docs/internal/web-remote-plan.md): HA's `hass` is
+    // wrapped by the HA adapter; the web remote installs a server adapter.
+    this._backend = null;
+    this._haBackend = null;
+    this._backendUnsubscribe = null;
     this._config = null;
     this._editMode = false;
     this.previewActivity = null;
     // Integration detection (x1s vs hub)
-    this.integrationDomain = null;
+    this.integration = null;
     this.integrationEntityId = null;
     this.integrationDetectingFor = null;
     // Hub request queue (prevents parallel requests)
@@ -5359,6 +5458,7 @@ var RemoteCardStore = class {
     this.enabledButtonsCache = [];
     this.enabledButtonsCacheKey = null;
     this.enabledButtonsInvalid = false;
+    this.loadPending = false;
     // Activity switching / load indicator
     this.pendingActivity = null;
     this.pendingActivityAt = null;
@@ -5374,6 +5474,7 @@ var RemoteCardStore = class {
     this._mode = "activity";
     this._deviceId = null;
     this.deviceKeymaps = {};
+    this.deviceKeymapFetching = /* @__PURE__ */ new Set();
     this.initialViewApplied = false;
     this.commandFilter = "";
     // Drawer / menu UI state (direction math stays in the element)
@@ -5389,8 +5490,17 @@ var RemoteCardStore = class {
     this.host = host;
   }
   // ---------- core wiring ----------
+  /** The active backend, or null before the card is wired to HA or a server. */
+  get backend() {
+    return this._backend;
+  }
+  /**
+   * The Lovelace `hass` object behind the HA adapter, null on any other
+   * backend. HA-only consumers (Automation Assist, ha-select, the theme
+   * engine) read it; the store itself never does.
+   */
   get hass() {
-    return this._hass;
+    return this._haBackend?.hass ?? null;
   }
   get config() {
     return this._config;
@@ -5410,16 +5520,35 @@ var RemoteCardStore = class {
       this.previewActivity = cached ?? "";
     }
     this._config = normalizeRemoteCardConfig(config);
+    this._backend?.setTarget(String(this._config.entity));
     this.activeDrawer = null;
     this.activityMenuOpen = false;
     this.initialViewApplied = false;
     this.invalidateFingerprint();
     this.onChange();
   }
+  /** HA entry point: wrap `hass` in the HA adapter and make it the backend. */
   setHass(hass) {
-    this._hass = hass;
+    if (!this._haBackend) this._haBackend = new HaRemoteBackend();
+    this._haBackend.setHass(hass);
+    this.setBackend(this._haBackend);
+  }
+  /** Generic entry point: any RemoteBackend (the web remote's server adapter). */
+  setBackend(backend) {
+    if (this._backend !== backend) {
+      this._backendUnsubscribe?.();
+      this._backendUnsubscribe = null;
+      this._backend = backend;
+      if (backend?.subscribe) {
+        this._backendUnsubscribe = backend.subscribe(() => this.onBackendChange());
+      }
+    }
+    if (backend && this._config?.entity) backend.setTarget(String(this._config.entity));
+    this.onBackendChange();
+  }
+  onBackendChange() {
     void this.ensureIntegration().then(() => {
-      if (!this.shouldNotifyForHass(hass)) return;
+      if (!this.shouldNotify()) return;
       this.onChange();
     });
   }
@@ -5433,8 +5562,13 @@ var RemoteCardStore = class {
     this.invalidateFingerprint();
   }
   connected() {
+    if (this._backend?.subscribe && !this._backendUnsubscribe) {
+      this._backendUnsubscribe = this._backend.subscribe(() => this.onBackendChange());
+    }
   }
   disconnected() {
+    this._backendUnsubscribe?.();
+    this._backendUnsubscribe = null;
     if (this.commandPulseTimeout) clearTimeout(this.commandPulseTimeout);
     if (this.activityLoadTimeout) clearTimeout(this.activityLoadTimeout);
     this.commandPulseTimeout = null;
@@ -5445,18 +5579,18 @@ var RemoteCardStore = class {
   invalidateFingerprint() {
     this.lastUpdateFingerprint = null;
   }
-  shouldNotifyForHass(hass) {
-    const nextFingerprint = this.updateFingerprint(hass);
+  shouldNotify() {
+    const nextFingerprint = this.updateFingerprint();
     if (nextFingerprint === this.lastUpdateFingerprint) return false;
     this.lastUpdateFingerprint = nextFingerprint;
     return true;
   }
-  updateFingerprint(hass = this._hass) {
+  updateFingerprint() {
     const entityId = String(this._config?.entity || "");
-    const remote = entityId ? hass?.states?.[entityId] : null;
+    const remote = entityId ? this.remoteState() : null;
     const attrs = remote?.attributes || {};
     const themeName = String(this._config?.theme || "");
-    const themes = hass?.themes;
+    const themes = this.hass?.themes;
     const themeDef = themeName ? themes?.themes?.[themeName] : null;
     const themeMode = themes?.darkMode ? "dark" : "light";
     const keymapEntry = this._deviceId != null ? this.deviceKeymaps[String(this._deviceId)] : null;
@@ -5478,15 +5612,16 @@ var RemoteCardStore = class {
       stableJsonSignature(themeDef),
       this._editMode ? "1" : "0",
       String(this.previewActivity ?? ""),
-      this.integrationDomain || "",
+      this.integration || "",
       this._mode,
       String(this._deviceId ?? ""),
-      keymapEntry ? `${keymapEntry.status}:${keymapEntry.buttons.length}:${keymapEntry.commands.length}` : ""
+      keymapEntry ? `${keymapEntry.status}:${keymapEntry.version ?? 0}:${keymapEntry.buttons.length}:${keymapEntry.commands.length}` : "",
+      stableJsonSignature(attrs?.keymap_versions)
     ].join("|");
   }
   // ---------- integration detection ----------
   async ensureIntegration() {
-    if (!this._hass?.callWS || !this._config?.entity) return;
+    if (!this._backend || !this._config?.entity) return;
     const entityId = String(this._config.entity);
     if (this.integrationEntityId && this.integrationEntityId !== entityId) {
       this.hubRequestCache = null;
@@ -5504,18 +5639,14 @@ var RemoteCardStore = class {
       this.commandFilter = "";
       this.initialViewApplied = false;
     }
-    if (this.integrationEntityId === entityId && this.integrationDomain) return;
+    if (this.integrationEntityId === entityId && this.integration) return;
     if (this.integrationDetectingFor === entityId) return;
     this.integrationDetectingFor = entityId;
     try {
-      const entry = await this._hass.callWS({
-        type: "config/entity_registry/get",
-        entity_id: entityId
-      });
-      this.integrationDomain = String(entry?.platform || "");
+      this.integration = await this._backend.probeIntegration();
       this.integrationEntityId = entityId;
     } catch (e6) {
-      this.integrationDomain = null;
+      this.integration = null;
       this.integrationEntityId = entityId;
     } finally {
       this.integrationDetectingFor = null;
@@ -5523,10 +5654,10 @@ var RemoteCardStore = class {
     }
   }
   isHubIntegration() {
-    return String(this.integrationDomain || "") === "sofabaton_hub";
+    return this.integration === "hub";
   }
   hubVersion() {
-    return hubVersionFor(this._hass, this._config?.entity);
+    return hubVersionFromState(this.remoteState());
   }
   isX2() {
     return isX2Hub(this.hubVersion(), this.isHubIntegration());
@@ -5557,7 +5688,7 @@ var RemoteCardStore = class {
    * user in one mode by design), never the mode itself.
    */
   deviceModeAvailable() {
-    if (String(this.integrationDomain || "") !== "sofabaton_x1s") return false;
+    if (this.integration !== "x1s") return false;
     if (!deviceModeEnabledInConfig(this._config)) return false;
     return this.devices().length > 0;
   }
@@ -5623,19 +5754,10 @@ var RemoteCardStore = class {
     return entry?.status === "ready" && entry.powerConfigured === true;
   }
   async fetchDevicePowerState(deviceId) {
-    if (!this._hass?.callWS) return null;
-    const entryId = String(
-      this.remoteState()?.attributes?.entry_id ?? ""
-    );
-    if (!entryId) return null;
+    const backend = this._backend;
+    if (!backend) return null;
     try {
-      const response = await this._hass.callWS({
-        type: "sofabaton_x1s/device/power_state",
-        entry_id: entryId,
-        device_id: deviceId
-      });
-      const raw = response?.power_state;
-      return raw === 1 ? 1 : raw === 0 ? 0 : null;
+      return await backend.devicePowerState(deviceId);
     } catch (_err) {
       return null;
     }
@@ -5650,7 +5772,8 @@ var RemoteCardStore = class {
    */
   async toggleDevicePower() {
     if (this._editMode || this.powerBusy) return;
-    if (!this._hass || !this._config?.entity) return;
+    const backend = this._backend;
+    if (!backend || !this._config?.entity) return;
     const deviceId = this._deviceId;
     if (deviceId == null || !this.devicePowerConfigured(deviceId)) return;
     this.powerBusy = true;
@@ -5665,10 +5788,8 @@ var RemoteCardStore = class {
       }
       if (state == null) return;
       const keyId = state === 1 ? POWER_OFF_KEY_ID : POWER_ON_KEY_ID;
-      const serviceData = remoteSendCommandData(this._config.entity, keyId, deviceId);
-      if (!serviceData) return;
       this.triggerCommandPulse();
-      await this.callService("remote", "send_command", serviceData);
+      await backend.sendCommand(keyId, deviceId);
       this._powerAssumption = {
         deviceId,
         state: state === 1 ? 0 : 1,
@@ -5690,27 +5811,47 @@ var RemoteCardStore = class {
    * fetch per device per card lifetime — the remote card never invalidates
    * cache (control panel owns cache management).
    */
+  /** The backend's version for a device's keymap (0 when it publishes none). */
+  keymapVersion(deviceId) {
+    const versions = this.remoteState()?.attributes?.keymap_versions;
+    return Number(versions?.[String(deviceId)] ?? 0) || 0;
+  }
+  /** True when a device's keymap must be (re)fetched: absent, or behind the backend's version. */
+  keymapStale(deviceId) {
+    const entry = this.deviceKeymaps[String(deviceId)];
+    if (!entry) return true;
+    if (entry.status === "loading") return false;
+    return (entry.version ?? 0) !== this.keymapVersion(deviceId);
+  }
   async ensureDeviceKeymap(deviceId) {
     const key = String(deviceId);
-    if (this.deviceKeymaps[key]) return;
-    if (!this._hass?.callWS) return;
-    const entryId = String(
-      this.remoteState()?.attributes?.entry_id ?? ""
-    );
-    if (!entryId) return;
-    this.deviceKeymaps[key] = { status: "loading", buttons: [], commands: [] };
+    if (!this.keymapStale(deviceId)) return;
+    const backend = this._backend;
+    if (!backend) return;
+    if (this.deviceKeymapFetching.has(key)) return;
+    const version = this.keymapVersion(deviceId);
+    const previous = this.deviceKeymaps[key];
+    if (!previous) {
+      this.deviceKeymaps[key] = { status: "loading", buttons: [], commands: [], version };
+    }
+    this.deviceKeymapFetching.add(key);
     try {
-      const response = await this._hass.callWS({
-        type: "sofabaton_x1s/device/keymap",
-        entry_id: entryId,
-        device_id: deviceId
-      });
+      const response = await backend.deviceKeymap(deviceId);
+      if (response === null) {
+        if (!previous) {
+          delete this.deviceKeymaps[key];
+          this.invalidateFingerprint();
+          this.onChange();
+        }
+        return;
+      }
       const keymap = response?.keymap;
       if (!keymap) {
         this.deviceKeymaps[key] = {
           status: "cache_miss",
           buttons: [],
-          commands: []
+          commands: [],
+          version
         };
       } else {
         const buttons = new Set(
@@ -5728,11 +5869,14 @@ var RemoteCardStore = class {
             command_id: Number(command?.command_id),
             name: String(command?.name ?? "")
           })).filter((command) => Number.isFinite(command.command_id) && command.name),
-          powerConfigured: keymap.power_configured === true
+          powerConfigured: keymap.power_configured === true,
+          version
         };
       }
     } catch (_err) {
-      this.deviceKeymaps[key] = { status: "error", buttons: [], commands: [] };
+      this.deviceKeymaps[key] = { status: "error", buttons: [], commands: [], version };
+    } finally {
+      this.deviceKeymapFetching.delete(key);
     }
     this.invalidateFingerprint();
     this.onChange();
@@ -5766,7 +5910,7 @@ var RemoteCardStore = class {
   }
   // ---------- basic state helpers ----------
   remoteState() {
-    return this._hass?.states?.[String(this._config?.entity ?? "")];
+    return this._backend?.snapshot();
   }
   currentActivityId() {
     return currentActivityIdFromRemote(this.remoteState());
@@ -5882,7 +6026,7 @@ var RemoteCardStore = class {
   isLoadingActive() {
     const isActivityLoading = Boolean(this.activityLoadActive);
     const isPulse = this.commandPulseUntil && Date.now() < this.commandPulseUntil;
-    return isActivityLoading || Boolean(isPulse);
+    return isActivityLoading || Boolean(isPulse) || this.loadPending;
   }
   triggerCommandPulse() {
     this.commandPulseUntil = Date.now() + 1e3;
@@ -5926,7 +6070,7 @@ var RemoteCardStore = class {
   }
   hubEnqueueCommand(list, { priority = false, gapMs = 150 } = {}) {
     if (!this.isHubIntegration()) return;
-    if (!this._hass || !this._config?.entity) return;
+    if (!this._backend || !this._config?.entity) return;
     this.hubInitState();
     this.hubQueue = enqueueHubCommand(this.hubQueue, list, { priority, gapMs });
     this.hubDrainQueue().catch(() => {
@@ -5934,7 +6078,7 @@ var RemoteCardStore = class {
   }
   hubEnqueueRequest(list, requestKey) {
     if (!this.isHubIntegration()) return;
-    if (!this._hass || !this._config?.entity) return;
+    if (!this._backend || !this._config?.entity) return;
     this.hubInitState();
     if (requestKey && wasHubRequested(this.hubRequestSeen, requestKey)) return;
     if (requestKey) {
@@ -5944,7 +6088,7 @@ var RemoteCardStore = class {
   }
   async hubDrainQueue() {
     if (!this.isHubIntegration()) return;
-    if (!this._hass || !this._config?.entity) return;
+    if (!this._backend || !this._config?.entity) return;
     this.hubInitState();
     if (this.hubQueueBusy) return;
     this.hubQueueBusy = true;
@@ -5952,10 +6096,7 @@ var RemoteCardStore = class {
       while (this.hubQueue.length) {
         const next = this.hubQueue.shift();
         if (!next?.list) continue;
-        await this.callService("remote", "send_command", {
-          entity_id: this._config.entity,
-          command: next.list
-        });
+        await this._backend?.sendRawCommandList?.(next.list);
         const gap = Number.isFinite(Number(next?.gapMs)) ? Number(next.gapMs) : 750;
         await sleep(gap);
       }
@@ -5971,7 +6112,7 @@ var RemoteCardStore = class {
   async hubSendCommandList(list, throttleKey = null, minIntervalMs = 3e3) {
     if (this._editMode) return;
     if (!this.isHubIntegration()) return;
-    if (!this._hass || !this._config?.entity) return;
+    if (!this._backend || !this._config?.entity) return;
     this.hubInitState();
     if (throttleKey) {
       if (!this.hubThrottle(throttleKey, minIntervalMs)) return;
@@ -5980,10 +6121,7 @@ var RemoteCardStore = class {
       this.hubEnqueueCommand(list, { priority: true, gapMs: 150 });
       return;
     }
-    await this.callService("remote", "send_command", {
-      entity_id: this._config.entity,
-      command: list
-    });
+    await this._backend?.sendRawCommandList?.(list);
   }
   hubRequestBasicData() {
     const entityId = String(this._config?.entity || "");
@@ -6016,7 +6154,11 @@ var RemoteCardStore = class {
   }
   // ---------- actions ----------
   async callService(domain, service, data, target = void 0) {
-    await this._hass.callService(domain, service, data, target);
+    const backend = this._backend;
+    if (!backend?.callService) {
+      throw new TypeError("service calls are unavailable on this backend");
+    }
+    await backend.callService(domain, service, data, target);
   }
   async runLovelaceAction(actionConfig, context = null) {
     if (this._editMode) return;
@@ -6069,7 +6211,7 @@ var RemoteCardStore = class {
   }
   async sendCommand(commandId, deviceId = null) {
     if (this._editMode) return;
-    if (!this._hass || !this._config?.entity) return;
+    if (!this._backend || !this._config?.entity) return;
     const resolvedDevice = this._mode === "device" ? deviceId != null && Number.isFinite(Number(deviceId)) ? Number(deviceId) : this._deviceId : this.resolveCommandDeviceId(commandId, deviceId);
     if (this._mode === "device" && resolvedDevice == null) return;
     if (this.isHubIntegration()) {
@@ -6078,9 +6220,7 @@ var RemoteCardStore = class {
       await this.hubSendCommandList(command);
       return;
     }
-    const serviceData = remoteSendCommandData(this._config.entity, commandId, resolvedDevice);
-    if (!serviceData) return;
-    await this.callService("remote", "send_command", serviceData);
+    await this._backend.sendCommand(commandId, resolvedDevice);
   }
   /**
    * A button's hub long-press binding on one entity page, or null
@@ -6092,7 +6232,7 @@ var RemoteCardStore = class {
    * (it needs the key spec, not the button id).
    */
   longPressBindingForButton(buttonId, scopeId) {
-    if (String(this.integrationDomain || "") !== "sofabaton_x1s") return null;
+    if (this.integration !== "x1s") return null;
     const attrs = this.remoteState()?.attributes;
     return hubLongPressBinding(attrs, scopeId, buttonId);
   }
@@ -6109,23 +6249,17 @@ var RemoteCardStore = class {
    */
   async sendLongPress(buttonId, scopeId) {
     if (this._editMode) return;
-    if (!this._hass || !this._config?.entity) return;
+    if (!this._backend || !this._config?.entity) return;
     const binding = this.longPressBindingForButton(buttonId, scopeId);
     if (!binding) return;
-    const serviceData = remoteSendCommandData(
-      this._config.entity,
-      binding.command_id,
-      binding.device_id
-    );
-    if (!serviceData) return;
-    await this.callService("remote", "send_command", serviceData);
+    await this._backend.sendCommand(binding.command_id, binding.device_id);
   }
   async sendDrawerItem(itemType, commandId, deviceId, rawItem) {
     if (this._editMode) return;
     if (!this.isHubIntegration()) {
       return this.sendCommand(commandId, deviceId);
     }
-    if (!this._hass || !this._config?.entity) return;
+    if (!this._backend || !this._config?.entity) return;
     const activityId = Number(deviceId ?? this.currentActivityId());
     const keyId = Number(commandId);
     if (!Number.isFinite(keyId)) return;
@@ -6146,7 +6280,7 @@ var RemoteCardStore = class {
   }
   async sendCustomFavoriteCommand(commandId, deviceId) {
     if (this._editMode) return;
-    if (!this._hass || !this._config?.entity) return;
+    if (!this._backend || !this._config?.entity) return;
     const cmd = Number(commandId);
     const dev = Number(deviceId);
     if (!Number.isFinite(cmd) || !Number.isFinite(dev)) return;
@@ -6156,9 +6290,7 @@ var RemoteCardStore = class {
       await this.hubSendCommandList(command);
       return;
     }
-    const serviceData = remoteSendCommandData(this._config.entity, cmd, dev);
-    if (!serviceData) return;
-    await this.callService("remote", "send_command", serviceData);
+    await this._backend.sendCommand(cmd, dev);
   }
   async setActivity(option) {
     if (this._editMode) return;
@@ -6183,16 +6315,14 @@ var RemoteCardStore = class {
       await this.hubStartActivity(activityId);
       return;
     }
+    const backend = this._backend;
+    if (!backend) return;
     if (isPoweredOffLabel(selected)) {
-      await this.callService("remote", "turn_off", {
-        entity_id: this._config.entity
-      });
+      await backend.stopActivity();
       return;
     }
-    await this.callService("remote", "turn_on", {
-      entity_id: this._config.entity,
-      activity: selected
-    });
+    const target = this.activities().find((activity) => activity.name === selected);
+    await backend.startActivity({ id: target?.id ?? null, name: selected });
   }
   // ---------- runtime derivation (the state half of the legacy _update) ----------
   /**
@@ -6214,7 +6344,7 @@ var RemoteCardStore = class {
     const activityId = preview ? preview.activityId : this.currentActivityId();
     const deviceId = mode === "device" ? preview ? preview.deviceId ?? null : this._deviceId : null;
     const layoutConfig = mode === "device" ? layoutConfigForDevice(this._config, deviceId) : layoutConfigForActivity(this._config, activityId);
-    if (mode === "device" && deviceId != null && !this.deviceKeymapState(deviceId)) {
+    if (mode === "device" && deviceId != null && this.keymapStale(deviceId)) {
       void this.ensureDeviceKeymap(deviceId);
     }
     const keymapEntry = mode === "device" ? this.deviceKeymapState(deviceId) : null;
@@ -6264,6 +6394,8 @@ var RemoteCardStore = class {
       this.enabledButtonsInvalid = Array.isArray(rawAssignedKeys) && parsed.length === 0;
       this.enabledButtonsCache = parsed;
     }
+    const loadPending = mode !== "device" && !isUnavailable && !preview && loadState === "loading" && (activityId == null ? activities.length === 0 : rawAssignedKeys == null);
+    this.loadPending = loadPending;
     const pendingAge = this.pendingActivityAt ? Date.now() - this.pendingActivityAt : null;
     const pendingExpired = pendingAge != null && pendingAge > 15e3;
     let selectState = null;
@@ -6323,6 +6455,7 @@ var RemoteCardStore = class {
       deviceId,
       keymapEntry,
       keymapLoading: keymapEntry?.status === "loading",
+      loadPending,
       commands,
       commandFilter: this.commandFilter,
       showCommandsButton: commandsButtonEnabled(layoutConfig),
@@ -6354,7 +6487,7 @@ var RemoteCardStore = class {
   }
 };
 
-// custom_components/sofabaton_x1s/www/src/remote-card-assist-yaml.ts
+// remote-card/src/remote-card-assist-yaml.ts
 function automationAssistRemoteYaml(capture, entityId, hubIntegration) {
   if (!capture || !entityId) return "";
   const kind = capture.kind || "button";
@@ -6471,7 +6604,7 @@ function automationAssistNotificationBody(capture, entityId, hubIntegration, fal
   ].join("\n");
 }
 
-// custom_components/sofabaton_x1s/www/src/state/automation-assist-controller.ts
+// remote-card/src/state/automation-assist-controller.ts
 function normalizeHubMac(value) {
   if (!value) return null;
   const normalized = String(value).replace(/[^a-fA-F0-9]/g, "").toUpperCase();
@@ -7178,7 +7311,7 @@ var AutomationAssistController = class {
   }
 };
 
-// custom_components/sofabaton_x1s/www/src/sections/wire.ts
+// remote-card/src/sections/wire.ts
 function primaryActionRef(handler) {
   return n6((el) => {
     if (!el) return;
@@ -7213,7 +7346,7 @@ function listenersRef(wire) {
   });
 }
 
-// custom_components/sofabaton_x1s/www/src/sections/activity-row.ts
+// remote-card/src/sections/activity-row.ts
 function renderActivityRow(params) {
   const itemTag = s4(selectItemTagName());
   const options = params.unavailable ? [] : params.options;
@@ -7279,7 +7412,7 @@ function renderActivityRow(params) {
   `;
 }
 
-// custom_components/sofabaton_x1s/www/src/components/sb-key-button.ts
+// remote-card/src/components/sb-key-button.ts
 var CONTROL_CSS = `
   :host {
     display: block;
@@ -7650,7 +7783,7 @@ if (!customElements.get("sb-key-button")) {
   customElements.define("sb-key-button", SbKeyButton);
 }
 
-// custom_components/sofabaton_x1s/www/src/sections/key-groups.ts
+// remote-card/src/sections/key-groups.ts
 var X2_ONLY_KEY_IDS = /* @__PURE__ */ new Set([
   ID.C,
   ID.B,
@@ -7812,7 +7945,7 @@ function renderAbc(params, visible) {
   `;
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-render-models.ts
+// remote-card/src/remote-card-render-models.ts
 function drawerCommandType(type) {
   if (type === "macros") return "macro";
   if (type === "favorites") return "favorite";
@@ -7840,7 +7973,7 @@ function customFavoriteButtonModel(favorite, fallbackDeviceId) {
   };
 }
 
-// custom_components/sofabaton_x1s/www/src/sections/macro-favorites.ts
+// remote-card/src/sections/macro-favorites.ts
 function renderDrawerButton(params, item, type) {
   const model = drawerButtonModel(item, type, params.currentActivityId);
   return b2`
@@ -8136,7 +8269,7 @@ function renderCommandsDrawer(params) {
   `;
 }
 
-// custom_components/sofabaton_x1s/www/src/sections/assist.ts
+// remote-card/src/sections/assist.ts
 function renderAssistRow(params) {
   return b2`
     <div
@@ -8234,7 +8367,7 @@ function renderAssistModal(params) {
   `;
 }
 
-// custom_components/sofabaton_x1s/www/src/remote-card-element.ts
+// remote-card/src/remote-card-element.ts
 function hexToRgbTriplet(value) {
   const hex = value.trim().slice(1);
   const full = hex.length === 3 ? hex.split("").map((c7) => c7 + c7).join("") : hex;
@@ -8326,11 +8459,22 @@ var SofabatonRemoteCard = class extends i4 {
   }
   set hass(hass) {
     const language = hass?.locale?.language ?? hass?.language;
+    this.setLanguage(language);
+    this._store.setHass(hass);
+  }
+  /** Switch the card's language (HA: from hass.locale; the web remote: from the page). */
+  setLanguage(language) {
     const languageChanged = setRemoteCardLanguage(language);
     this.lang = remoteCardLanguage();
     this.dir = remoteCardDirection();
-    this._store.setHass(hass);
     if (languageChanged) this.requestUpdate();
+  }
+  /**
+   * Install any RemoteBackend (docs/internal/web-remote-plan.md): the web
+   * remote's server adapter. HA dashboards never call this; they set hass.
+   */
+  setBackend(backend) {
+    this._store.setBackend(backend);
   }
   get hass() {
     return this._store.hass;
@@ -8583,10 +8727,10 @@ var SofabatonRemoteCard = class extends i4 {
   _applyLocalTheme(themeName) {
     const root = this._cardRef.value;
     const hass = this._store.hass;
-    if (!root || !hass) return false;
+    if (!root) return false;
     const bgOverrideCss = rgbToCss(this._store.config?.background_override);
-    const themeDef = themeName ? hass.themes?.themes?.[themeName] : null;
-    const themeMode = hass.themes?.darkMode ? "dark" : "light";
+    const themeDef = themeName ? hass?.themes?.themes?.[themeName] : null;
+    const themeMode = hass?.themes?.darkMode ? "dark" : "light";
     const appliedKey = `${themeName || ""}||${bgOverrideCss}||${themeMode}||${JSON.stringify(themeDef ?? null)}`;
     if (this._appliedThemeKey === appliedKey) return false;
     for (const cssVar of this._appliedThemeVars) {
@@ -8602,7 +8746,7 @@ var SofabatonRemoteCard = class extends i4 {
         vars = def;
         const defWithModes = def;
         if (defWithModes.modes && typeof defWithModes.modes === "object") {
-          const mode = hass.themes?.darkMode ? "dark" : "light";
+          const mode = hass?.themes?.darkMode ? "dark" : "light";
           vars = { ...def, ...defWithModes.modes?.[mode] || {} };
           delete vars.modes;
         }
@@ -8759,7 +8903,7 @@ var SofabatonRemoteCard = class extends i4 {
   }
   // ---------- render ----------
   render() {
-    if (!this._haElementsReady || !this._store.config || !this._store.hass) {
+    if (!this._haElementsReady || !this._store.config || !this._store.backend) {
       return A;
     }
     const store = this._store;
@@ -8787,7 +8931,7 @@ var SofabatonRemoteCard = class extends i4 {
     const commandsVisible = deviceMode && derived.showCommandsButton;
     const showCommandsDrawer = commandsVisible && !asRows;
     const commandsAsRow = commandsVisible && asRows;
-    const disableAll = deviceMode ? derived.isUnavailable || !this._editMode && derived.deviceId == null : derived.isUnavailable || store.activityLoadingActive() || !this._editMode && derived.isPoweredOff;
+    const disableAll = deviceMode ? derived.isUnavailable || !this._editMode && derived.deviceId == null : derived.isUnavailable || store.activityLoadingActive() || derived.loadPending || !this._editMode && derived.isPoweredOff;
     if (deviceMode && (store.activeDrawer === "macros" || store.activeDrawer === "favorites") || !deviceMode && store.activeDrawer === "commands") {
       this._retainClosingDrawer(store.activeDrawer);
       this._scheduleDrawerDirectionReset();
@@ -9156,7 +9300,7 @@ SofabatonRemoteCard.styles = [
     `
 ];
 
-// custom_components/sofabaton_x1s/www/src/remote-card-translations/ar.ts
+// remote-card/src/remote-card-translations/ar.ts
 var isolate = (value) => `\u2068${value}\u2069`;
 var SOFABATON = isolate("Sofabaton");
 var MQTT = isolate("MQTT");
@@ -9360,7 +9504,7 @@ var REMOTE_CARD_STRINGS_AR = {
 };
 registerRemoteCardTranslation("ar", REMOTE_CARD_STRINGS_AR);
 
-// custom_components/sofabaton_x1s/www/src/remote-card-translations/en-gb.ts
+// remote-card/src/remote-card-translations/en-gb.ts
 registerRemoteCardTranslation("en-gb", {
   card: {
     favoritesTab: "Favourites",
@@ -9382,7 +9526,7 @@ registerRemoteCardTranslation("en-gb", {
   }
 });
 
-// custom_components/sofabaton_x1s/www/src/remote-card-translations/de.ts
+// remote-card/src/remote-card-translations/de.ts
 var REMOTE_CARD_STRINGS_DE = {
   card: {
     selectEntityError: "W\xE4hle eine Sofabaton-Fernsteuerungsentit\xE4t aus",
@@ -9576,7 +9720,7 @@ var REMOTE_CARD_STRINGS_DE = {
 };
 registerRemoteCardTranslation("de", REMOTE_CARD_STRINGS_DE);
 
-// custom_components/sofabaton_x1s/www/src/remote-card-translations/es.ts
+// remote-card/src/remote-card-translations/es.ts
 var plural = (count, singular, pluralForm = `${singular}s`) => count === 1 ? singular : pluralForm;
 var REMOTE_CARD_STRINGS_ES = {
   card: {
@@ -9771,7 +9915,7 @@ var REMOTE_CARD_STRINGS_ES = {
 };
 registerRemoteCardTranslation("es", REMOTE_CARD_STRINGS_ES);
 
-// custom_components/sofabaton_x1s/www/src/remote-card-translations/fr.ts
+// remote-card/src/remote-card-translations/fr.ts
 var plural2 = (count, singular, pluralForm = `${singular}s`) => count > 1 ? pluralForm : singular;
 var REMOTE_CARD_STRINGS_FR = {
   card: {
@@ -9966,7 +10110,7 @@ var REMOTE_CARD_STRINGS_FR = {
 };
 registerRemoteCardTranslation("fr", REMOTE_CARD_STRINGS_FR);
 
-// custom_components/sofabaton_x1s/www/src/remote-card-translations/nl.ts
+// remote-card/src/remote-card-translations/nl.ts
 var REMOTE_CARD_STRINGS_NL = {
   card: {
     selectEntityError: "Selecteer een Sofabaton-entiteit voor afstandsbediening",
@@ -10160,7 +10304,7 @@ var REMOTE_CARD_STRINGS_NL = {
 };
 registerRemoteCardTranslation("nl", REMOTE_CARD_STRINGS_NL);
 
-// custom_components/sofabaton_x1s/www/src/remote-card-translations/zh-hans.ts
+// remote-card/src/remote-card-translations/zh-hans.ts
 var REMOTE_CARD_STRINGS_ZH_HANS = {
   card: {
     selectEntityError: "\u8BF7\u9009\u62E9 Sofabaton \u9065\u63A7\u5B9E\u4F53",
@@ -10354,7 +10498,7 @@ var REMOTE_CARD_STRINGS_ZH_HANS = {
 };
 registerRemoteCardTranslation("zh-hans", REMOTE_CARD_STRINGS_ZH_HANS);
 
-// custom_components/sofabaton_x1s/www/src/remote-card.ts
+// remote-card/src/remote-card.ts
 var win = window;
 logPillsOnce();
 if (!customElements.get(EDITOR))

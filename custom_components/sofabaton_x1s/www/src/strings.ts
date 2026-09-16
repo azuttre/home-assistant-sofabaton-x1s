@@ -47,6 +47,7 @@ export const TOOLS_CARD_STRINGS_EN = {
   docs: {
     wifiCommandsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/wifi_commands.md",
     backupUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/backup.md",
+    commandPayloadsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/command_payloads.md",
   },
   tabs: {
     cache: "Hub",
@@ -94,7 +95,7 @@ export const TOOLS_CARD_STRINGS_EN = {
     backupBlockedByProxy:
       "Backup cannot be used while the Sofabaton app is connected to the hub through the proxy.",
     blockedByFirmware: (installed: string | number, required: string | number) =>
-      `This hub is running firmware version ${installed}. Version ${required} is the minimum supported version for Control Panel features that change the hub configuration. Update the hub over Bluetooth using the Sofabaton app. This feature becomes available automatically after the hub reports the updated firmware version.`,
+      `This hub is running firmware version ${installed}. Version ${required} is the minimum supported version for Control Panel features that change the hub configuration. Update the hub using the Sofabaton app. This feature becomes available automatically after the hub reports the updated firmware version.`,
   },
   buttonNames: {
     0x97: "C",
@@ -369,7 +370,7 @@ export const TOOLS_CARD_STRINGS_EN = {
     appConnectedBody: "Close the Sofabaton app to edit the hub configuration.",
     firmwareUnsupportedTitle: "Hub firmware update required",
     firmwareUnsupportedBody: (installed: string | number, required: string | number) =>
-      `This hub is running firmware version ${installed}. Version ${required} or newer is required to edit the hub configuration safely. Editing is disabled to protect your configuration. Update the hub over Bluetooth using the Sofabaton app. Editing becomes available automatically after the hub reports the updated firmware version.`,
+      `This hub is running firmware version ${installed}. Version ${required} or newer is required to edit the hub configuration safely. Editing is disabled to protect your configuration. Update the hub using the Sofabaton app. Editing becomes available automatically after the hub reports the updated firmware version.`,
     operationRunningTitle: "Another operation is running",
     operationRunningBody: "Wait for the current backup, restore, or sync to finish, then try again.",
     // Capture flow (§4.2).
@@ -784,6 +785,7 @@ export const TOOLS_CARD_STRINGS_EN = {
     verifyPayloadBackup:
       "Verify a changed payload before trusting it: Test plays the bytes on the hub without saving. Save here only once the payload does what you expect.",
     test: "Test",
+    payloadDocsLink: "Payload documentation",
     sendingToHub: "Sending to the hub…",
     sentToHub: "Sent to the hub for one-shot playback.",
     testFailed: "Test failed.",
@@ -932,7 +934,7 @@ export const TOOLS_CARD_STRINGS_EN = {
       required: string | number,
       unsupported: boolean,
     ) => {
-      const update = "Update the hub over Bluetooth using the Sofabaton app.";
+      const update = "Update the hub using the Sofabaton app.";
       if (unsupported) {
         const recommendation = String(recommended) === String(required)
           ? ""

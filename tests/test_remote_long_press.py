@@ -38,6 +38,9 @@ class _AttrHub:
     def get_index_state(self):
         return "ready"
 
+    def get_ui_activity_list(self):
+        return []
+
     def get_ui_device_list(self):
         return []
 

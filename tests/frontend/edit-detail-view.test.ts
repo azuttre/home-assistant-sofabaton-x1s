@@ -255,6 +255,27 @@ test("raw payload Save blocks invalid hex and normalizes tolerant valid input", 
   assert.equal(element._payloadDialogOpen, false);
 });
 
+test("payload dialog footer links the command payload documentation beside the error note", () => {
+  const element = createEditor("X1S", "device");
+  element._payloadDialogOpen = true;
+  element._payloadDialogTarget = { deviceId: 1, commandId: 10 };
+  element._payloadDialogDecodedSnapshot = null;
+  element._payloadDialogRawSnapshot = "aa bb cc";
+  element._payloadDialogRawDraft = "abc";
+
+  let text = templateText(element._renderCommandPayloadDialog());
+  assert.ok(text.includes("payload-doc-link"));
+  assert.ok(text.includes("docs/command_payloads.md"));
+  assert.ok(text.includes("Payload documentation"));
+  assert.ok(!text.includes("payload-dialog-error"));
+
+  element._applyCommandPayloadDialog();
+  text = templateText(element._renderCommandPayloadDialog());
+  assert.ok(text.includes("payload-doc-link"));
+  assert.ok(text.includes("payload-dialog-error"));
+  assert.match(text, /even number of hex digits/i);
+});
+
 test("raw payload Save does not emit when only formatting changed", () => {
   const element = createEditor("X1S", "device");
   const changes = collectBundleChanges(element);

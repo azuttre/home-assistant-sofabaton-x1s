@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Take control of a hub: proxy it, read its catalog, switch an activity.
+"""Connect to a hub and list its catalog; optional activity control is commented out.
 
 The proxy advertises itself via mDNS exactly like the hub it fronts, so
 the official Sofabaton app keeps working — pointed at the proxy — while
@@ -18,21 +18,18 @@ loop's executor and callbacks are delivered on the loop.
 
 import asyncio
 
-from sofabaton import AsyncXProxy, async_discover_hubs
+from sofabaton import AsyncXProxy, HubConfig, async_discover_hubs
 
 
 async def main() -> None:
     hubs = await async_discover_hubs(timeout=5.0)
     if not hubs:
-        raise SystemExit("no hub found; pass the IP/TXT manually instead")
+        raise SystemExit("no hub found; edit this example to use HubConfig(host='192.168.1.50')")
     hub = hubs[0]
     print(f"proxying {hub.name} ({hub.hub_version}) at {hub.host}")
 
-    # The hub's IP is the only required argument: ports default to the
-    # right values and the hub model is confirmed from the connect banner.
-    # (To also advertise the proxy to the official app exactly like the
-    # hub, pass mdns_instance=hub.name, mdns_txt=hub.txt — see watch.py.)
-    proxy = AsyncXProxy(hub_ip=hub.host)
+    # Preserve the discovered identity so the app can find this hub's proxy.
+    proxy = AsyncXProxy.from_config(HubConfig.from_discovered(hub))
 
     proxy.on_hub_state_change(lambda up: print("hub:", "up" if up else "down"))
     proxy.on_client_state_change(lambda up: print("app:", "connected" if up else "gone"))
@@ -41,17 +38,15 @@ async def main() -> None:
         if not await proxy.wait_until_controllable(timeout=30):
             raise SystemExit("hub not controllable (not connected, or an app is attached)")
 
-        # Bring the proxy's mDNS advertisement up so the official app can
-        # keep working while pointed at it. The reads/commands below would
-        # work without this, but the proxy stays invisible to the app until
-        # it advertises.
-        await proxy.wait_until_discoverable(timeout=5)
+        # Ensure mDNS is advertised using the hub's confirmed banner identity.
+        if not await proxy.wait_until_discoverable(timeout=5):
+            print("Proxy is not yet discoverable by the official app")
 
         activities = await proxy.activities()
-        print("activities:", {aid: info.get("name") for aid, info in activities.items()})
+        print("activities:", {a.activity_id: a.name for a in activities})
 
         devices = await proxy.devices()
-        print("devices:", {did: info.get("name") for did, info in devices.items()})
+        print("devices:", {d.device_id: d.name for d in devices})
 
         # Switching an activity powers real equipment on and off, so it is
         # not run automatically. Pick an activity id from the listing

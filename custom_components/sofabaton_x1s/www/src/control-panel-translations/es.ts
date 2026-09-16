@@ -23,6 +23,7 @@ export const TOOLS_CARD_STRINGS_ES = {
   docs: {
     wifiCommandsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/wifi_commands.md",
     backupUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/backup.md",
+    commandPayloadsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/command_payloads.md",
   },
   tabs: { cache: "Hub", wifiCommands: "Automatización", backup: "Backup", settings: "Ajustes", logs: "Registros" },
   tabDocs: { wifi_commands: "Documentación de automatización", backup: "Documentación de copias de seguridad" },
@@ -44,7 +45,7 @@ export const TOOLS_CARD_STRINGS_ES = {
     automationBlockedByProxy: "La automatización no se puede usar mientras la aplicación Sofabaton está conectada al hub mediante el proxy.",
     backupBlockedByProxy: "La copia de seguridad no se puede usar mientras la aplicación Sofabaton está conectada al hub mediante el proxy.",
     blockedByFirmware: (installed: string | number, required: string | number) =>
-      `Este hub tiene instalada la versión de firmware ${installed}. La versión ${required} es la versión mínima compatible con las funciones del Panel de control que modifican la configuración del hub. Actualiza el hub por Bluetooth con la aplicación Sofabaton. Esta función volverá a estar disponible automáticamente cuando el hub comunique la versión de firmware actualizada.`,
+      `Este hub tiene instalada la versión de firmware ${installed}. La versión ${required} es la versión mínima compatible con las funciones del Panel de control que modifican la configuración del hub. Actualiza el hub con la aplicación Sofabaton. Esta función volverá a estar disponible automáticamente cuando el hub comunique la versión de firmware actualizada.`,
   },
   buttonNames: {
     0x97: "C", 0x98: "B", 0x99: "A", 0x9a: "Salir", 0x9b: "DVR", 0x9c: "Reproducir", 0x9d: "Guía",
@@ -152,7 +153,7 @@ export const TOOLS_CARD_STRINGS_ES = {
     appConnectedTitle: "La aplicación Sofabaton está conectada", appConnectedBody: "Cierra la aplicación Sofabaton para editar la configuración del hub.",
     firmwareUnsupportedTitle: "Es necesario actualizar el firmware del hub",
     firmwareUnsupportedBody: (installed: string | number, required: string | number) =>
-      `Este hub tiene instalada la versión de firmware ${installed}. Se necesita la versión ${required} o posterior para editar de forma segura la configuración del hub. La edición está desactivada para proteger tu configuración. Actualiza el hub por Bluetooth con la aplicación Sofabaton. La edición volverá a estar disponible automáticamente cuando el hub comunique la versión de firmware actualizada.`,
+      `Este hub tiene instalada la versión de firmware ${installed}. Se necesita la versión ${required} o posterior para editar de forma segura la configuración del hub. La edición está desactivada para proteger tu configuración. Actualiza el hub con la aplicación Sofabaton. La edición volverá a estar disponible automáticamente cuando el hub comunique la versión de firmware actualizada.`,
     operationRunningTitle: "Hay otra operación en curso", operationRunningBody: "Espera a que termine la copia de seguridad, restauración o sincronización actual y vuelve a intentarlo.",
     captureTitle: "Leyendo tu hub", captureMessage: "Leyendo la configuración de tu hub…", captureMessageWithStep: (current: number, total: number) => `Leyendo la configuración de tu hub… (dispositivo ${current} de ${total})`,
     captureFailedTitle: "No se pudo leer el hub", captureFailedBody: "El hub dejó de responder antes de que termináramos de leerlo.", retry: "Reintentar", back: "Atrás",
@@ -275,7 +276,7 @@ export const TOOLS_CARD_STRINGS_ES = {
     fetchEditCommandAria: "Obtener y editar la carga útil de este comando", moveUpAria: "Mover hacia arriba", moveDownAria: "Mover hacia abajo", deviceClass: "Clase de dispositivo", name: "Nombre",
     nameHelper: "Se muestra en el mando a distancia y en todos los selectores de comandos.", verifyPayloadLive: "Verifica una carga útil modificada antes de guardarla: Probar reproduce los bytes actuales en el hub sin guardarlos. Guardar incorpora la carga útil a la próxima sincronización del dispositivo.",
     verifyPayloadBackup: "Verifica una carga útil modificada antes de confiar en ella: Probar reproduce los bytes en el hub sin guardarlos. Guárdala aquí solo cuando haga lo que esperas.",
-    test: "Probar", sendingToHub: "Enviando al hub…", sentToHub: "Enviado al hub para una reproducción única.", testFailed: "Error en la prueba.", rawPayload: "Carga útil sin procesar",
+    test: "Probar", payloadDocsLink: "Documentación de cargas útiles", sendingToHub: "Enviando al hub…", sentToHub: "Enviado al hub para una reproducción única.", testFailed: "Error en la prueba.", rawPayload: "Carga útil sin procesar",
     rawPayloadDescription: "No existe un editor estructurado para esta clase de dispositivo; los bytes siguientes se reproducen sin cambios en el hub durante la restauración.", payloadHex: "Carga útil (bytes hexadecimales)",
     payloadHexHelper: "Pares de bytes como «0a 4f 22»; se permiten espacios y prefijos 0x.", rename: "Cambiar nombre", renameActivity: "Cambiar nombre de la actividad", renameDevice: "Cambiar nombre del dispositivo", renameMacro: "Cambiar nombre de la macro",
     prontoHexTab: "Pronto Hex",
@@ -357,7 +358,7 @@ export const TOOLS_CARD_STRINGS_ES = {
     firmwareUpdateRequired: "Actualización de firmware necesaria",
     firmwareUpdateRecommended: "Actualización de firmware recomendada",
     firmwareUpdateTooltip: (recommended: string | number, required: string | number, unsupported: boolean) => {
-      const update = "Actualiza el hub por Bluetooth con la aplicación Sofabaton.";
+      const update = "Actualiza el hub con la aplicación Sofabaton.";
       if (unsupported) {
         const recommendation = String(recommended) === String(required)
           ? ""

@@ -8,12 +8,12 @@ To control the hub from Home Assistant instead, see the [remote entity guide](re
 
 The integration provides four automation mechanisms. Wifi Commands and Wifi Events are peer solutions for making Home Assistant behavior available from the remote: use either one or both, depending on how you want to organize the Sofabaton configuration.
 
-| Mechanism | What it provides | Where it is configured |
-| --- | --- | --- |
-| **Wifi Commands** | Named, reusable commands grouped into managed Wifi Devices. Commands can appear as favorites or physical buttons and participate in macros, power sequences, and Activity inputs. | **Automation → Wifi Commands** |
-| **Wifi Events** | Named Home Assistant triggers placed directly into Activity shortcuts, buttons, macros, power sequences, and inputs. | **Hub → Activities** and **Automation → Events** |
-| **Hub and Activity Events** | Actions for hub power and Activity start/stop transitions, without creating a Wifi Device. | **Automation → Events** |
-| **Wifi Commands sensor** | One event stream for your own Home Assistant automations, instead of or alongside per-command Actions. | `sensor.<hub>_wifi_commands` |
+| Mechanism                   | What it provides                                                                                                                                                                  | Where it is configured                           |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------ |
+| **Wifi Commands**           | Named, reusable commands grouped into managed Wifi Devices. Commands can appear as favorites or physical buttons and participate in macros, power sequences, and Activity inputs. | **Automation → Wifi Commands**                   |
+| **Wifi Events**             | Named Home Assistant triggers placed directly into Activity shortcuts, buttons, macros, power sequences, and inputs.                                                              | **Hub → Activities** and **Automation → Events** |
+| **Hub and Activity Events** | Actions for hub power and Activity start/stop transitions, without creating a Wifi Device.                                                                                        | **Automation → Events**                          |
+| **Wifi Commands sensor**    | One event stream for your own Home Assistant automations, instead of or alongside per-command Actions.                                                                            | `sensor.<hub>_wifi_commands`                     |
 
 Configuring Actions is optional. Every received Wifi Command and Wifi Event updates `sensor.<hub>_wifi_commands`, whether or not an Action is configured. A configured Action runs in addition to the sensor update; use the sensor to handle presses in your own Home Assistant automations.
 
@@ -40,12 +40,12 @@ The first deployment can take several minutes and blocks hub interactions. The i
 
 ### Command slot options
 
-| Option | Effect |
-| --- | --- |
-| **Favorite** | Shows the command on the remote in selected Activities. |
+| Option              | Effect                                                                                                                                                                                                                |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Favorite**        | Shows the command on the remote in selected Activities.                                                                                                                                                               |
 | **Physical button** | Binds it to one button in selected Activities. Long press creates a separate record and supports a separate optional Action. Assignments may also make the device a controller for groups such as Volume or Playback. |
-| **Power on/off** | Runs one selected command when the device powers on and another when it powers off. |
-| **Activity start** | Uses one selected command as the device input during an Activity's startup sequence. |
+| **Power on/off**    | Runs one selected command when the device powers on and another when it powers off.                                                                                                                                   |
+| **Activity start**  | Uses one selected command as the device input during an Activity's startup sequence.                                                                                                                                  |
 
 A command cannot be both a power command and an Activity-start input. These two options are unavailable on X1 hubs; regular commands, favorites, physical buttons, long presses, and Actions still work.
 
@@ -97,13 +97,13 @@ If the shared device is deleted outside the integration, event names and Actions
 
 These triggers need no Wifi Device, callback listener, or hub sync. Configure them under **Automation → Events**.
 
-| Trigger | When it runs |
-| --- | --- |
-| **Hub switched off** | The current Activity stops and the hub enters the powered-off state. |
-| **Off pressed while already off** | Off is pressed while no Activity is running. |
-| **Any Activity starts** | Every Activity activation. |
-| **Any Activity stops** | Powering off or switching to another Activity. |
-| **Activity start/stop** | The selected Activity starts or stops. During a switch, the old Activity's stop Action runs before the new Activity's start Action. |
+| Trigger                           | When it runs                                                                                                                        |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| **Hub switched off**              | The current Activity stops and the hub enters the powered-off state.                                                                |
+| **Off pressed while already off** | Off is pressed while no Activity is running.                                                                                        |
+| **Any Activity starts**           | Every Activity activation.                                                                                                          |
+| **Any Activity stops**            | Powering off or switching to another Activity.                                                                                      |
+| **Activity start/stop**           | The selected Activity starts or stops. During a switch, the old Activity's stop Action runs before the new Activity's start Action. |
 
 Activity Actions are stored by numeric Activity ID and removed when an authoritative refresh shows that the Activity was deleted.
 
@@ -113,14 +113,14 @@ Every Wifi Command and Wifi Event activated from the physical remote, Sofabaton 
 
 The state is `<device>/<command>` (or `<device>/<command>/longpress`) and returns to `Waiting for button press` after about 0.3 seconds. Automations should trigger on a change away from the waiting, `unknown`, and `unavailable` states instead of one fixed command name.
 
-| Attribute | Meaning |
-| --- | --- |
-| `received_command` | Command or event name |
-| `from_device` | Wifi Device name; `Wifi Events` for an event |
-| `press_type` | `short` or `long` |
-| `timestamp` | ISO 8601 receipt time |
-| `source_ip` | Hub IP for HTTP; empty for MQTT |
-| `transport` | `http` or `mqtt` |
+| Attribute          | Meaning                                      |
+| ------------------ | -------------------------------------------- |
+| `received_command` | Command or event name                        |
+| `from_device`      | Wifi Device name; `Wifi Events` for an event |
+| `press_type`       | `short` or `long`                            |
+| `timestamp`        | ISO 8601 receipt time                        |
+| `source_ip`        | Hub IP for HTTP; empty for MQTT              |
+| `transport`        | `http` or `mqtt`                             |
 
 ### Sensor automation example
 
@@ -161,12 +161,12 @@ actions:
 
 Delivery affects how Wifi Command presses reach Home Assistant, not how their Actions are configured. Wifi Events always use HTTP.
 
-| | HTTP | MQTT |
-| --- | --- | --- |
-| **Hub support** | X1, X1S, X2 | X2 only |
-| **Requires** | An inbound listener on Home Assistant | Home Assistant's MQTT integration and a broker shared with the hub |
-| **Default port** | TCP `8060` on Home Assistant | Broker port, commonly TCP `1883` |
-| **Hold behavior** | Repeats at about 4 presses/second | Delivers once for the resolved short or long press |
+|                   | HTTP                                  | MQTT                                                               |
+| ----------------- | ------------------------------------- | ------------------------------------------------------------------ |
+| **Hub support**   | X1, X1S, X2                           | X2 only                                                            |
+| **Requires**      | An inbound listener on Home Assistant | Home Assistant's MQTT integration and a broker shared with the hub |
+| **Default port**  | TCP `8060` on Home Assistant          | Broker port, commonly TCP `1883`                                   |
+| **Hold behavior** | Repeats at about 4 presses/second     | Delivers once for the resolved short or long press                 |
 
 The choice is fixed when a Wifi Device is first deployed. To change it, delete and recreate the Wifi Device; existing HTTP devices are never migrated automatically.
 
@@ -188,13 +188,13 @@ For retry and offline behavior, message structure, measured latency, and other i
 
 ## ◇ Wifi Commands: synchronization, recovery, and limitations
 
-| Change | Result |
-| --- | --- |
-| Home Assistant Action only | Applies immediately; no sync. |
+| Change                                   | Result                                                                                  |
+| ---------------------------------------- | --------------------------------------------------------------------------------------- |
+| Home Assistant Action only               | Applies immediately; no sync.                                                           |
 | Normal command, name, or assignment edit | Updates changed records in place and preserves device identity and external references. |
-| No command slots remain | Removes the hub device but keeps the empty Home Assistant configuration for reuse. |
-| Delete in **Automation → Wifi Commands** | Removes both the hub device and saved configuration. |
-| Delete through the Sofabaton app | Keeps the saved configuration; sync it back to the hub or delete it in Wifi Commands. |
+| No command slots remain                  | Removes the hub device but keeps the empty Home Assistant configuration for reuse.      |
+| Delete in **Automation → Wifi Commands** | Removes both the hub device and saved configuration.                                    |
+| Delete through the Sofabaton app         | Keeps the saved configuration; sync it back to the hub or delete it in Wifi Commands.   |
 
 A full replacement is required for the first deployment, the first sync of a legacy deployment, a changed HTTP listener port, a managed device edited in the Sofabaton app since its last sync, or a command removed from an Activity where the managed Wifi Device was the only remaining device.
 
@@ -213,12 +213,12 @@ X1 firmware sends only one power and one Activity-start callback per Activity tr
 
 ## ◇ Related entities and guides
 
-| Entity | Purpose |
-| --- | --- |
-| `sensor.<hub>_wifi_commands` | Latest Wifi Command or Wifi Event press and its metadata |
+| Entity                              | Purpose                                                                                 |
+| ----------------------------------- | --------------------------------------------------------------------------------------- |
+| `sensor.<hub>_wifi_commands`        | Latest Wifi Command or Wifi Event press and its metadata                                |
 | `binary_sensor.<hub>_hub_connected` | Physical hub connection state; use it to gate automations that send commands to the hub |
-| `binary_sensor.<hub>_app_connected` | Official app proxy connection state; detects when the app owns the hub connection |
-| `switch.<hub>_wifi_device` | Shared HTTP callback listener; MQTT devices do not need it |
-| `button.<hub>_resync_remote` | Manually resynchronizes the physical remote; deployments also call it automatically |
+| `binary_sensor.<hub>_app_connected` | Official app proxy connection state; detects when the app owns the hub connection       |
+| `switch.<hub>_wifi_device`          | Shared HTTP callback listener; MQTT devices do not need it                              |
+| `button.<hub>_resync_remote`        | Manually resynchronizes the physical remote; deployments also call it automatically     |
 
 See the complete [entity reference](entities.md), [networking guide](networking.md), and [Wifi Commands protocol notes](protocol/wifi-commands.md). If a problem persists, [open an issue](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/issues) and include [detailed logs](logging.md).

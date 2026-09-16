@@ -42,6 +42,7 @@ from .device_create import (
     synthesize_command_code,
 )
 from .backup_export import PAYLOAD_PROFILE_FULL
+from .hub_sync import iter_entity_references
 from .blob_decoders import encode_decoded_blob, try_decode_blob
 from .devices import device_config_from_backup
 from .inputs import ControlKeyBlock, FavoriteSlot, InputEntry, build_inputs_write
@@ -1567,49 +1568,13 @@ class RestoreMixin:
             if not self.can_issue_commands():
                 self._log.info("[RESTORE] restore_activity ignored: proxy client is connected")
                 return None
-            if not isinstance(payload, dict):
-                raise ValueError("restore payload must be a dictionary")
-            if payload.get("kind") != "activity_backup":
-                raise ValueError("restore_activity expects kind == 'activity_backup'")
-            if int(payload.get("schema_version", 0)) != ACTIVITY_BACKUP_SCHEMA_VERSION:
-                raise ValueError(
-                    "restore_activity payload schema_version must be "
-                    f"{ACTIVITY_BACKUP_SCHEMA_VERSION} (got "
-                    f"{payload.get('schema_version')!r}); re-export the activity "
-                    "with the current backup format"
-                )
-            activity_block = payload.get("device")
-            if not isinstance(activity_block, dict):
-                raise ValueError("restore payload must include a 'device' block")
-            if activity_block.get("entity_type") != "activity":
-                raise ValueError(
-                    "restore_activity payload's 'device' block must mark entity_type='activity'"
-                )
-
-            referenced = self._collect_referenced_source_device_ids(payload)
-            missing = referenced - {int(k) & 0xFF for k in device_id_map.keys()}
-            if missing:
-                missing_list = ", ".join(f"0x{m:02X}" for m in sorted(missing))
-                raise ValueError(
-                    "device_id_map is missing the following source device ids "
-                    f"referenced by this activity backup: {missing_list}"
-                )
-
-            referenced_activities = self._collect_referenced_activity_ids(payload)
-            known_activities = {
-                int(k) & 0xFF for k in (activity_id_map or {}).keys()
-            }
-            missing_activities = referenced_activities - known_activities
-            if missing_activities:
-                missing_list = ", ".join(
-                    f"0x{m:02X}" for m in sorted(missing_activities)
-                )
-                raise ValueError(
-                    "this activity references other activities "
-                    f"({missing_list}) that are not part of this restore or "
-                    "have not been restored yet; include them in the restore "
-                    "selection"
-                )
+            activity_block = self._validate_activity_restore_payload(
+                payload,
+                known_device_ids={int(k) & 0xFF for k in device_id_map.keys()},
+                known_activity_ids={
+                    int(k) & 0xFF for k in (activity_id_map or {}).keys()
+                },
+            )
 
             remap_lookup = {
                 int(k) & 0xFF: int(v) & 0xFF for k, v in device_id_map.items()
@@ -1663,6 +1628,111 @@ class RestoreMixin:
             self._log.exception("[RESTORE] restore_activity failed")
             raise
 
+    def _restore_bundle_preflight(
+        self, payload: Any
+    ) -> tuple[list[Any], list[Any]]:
+        """Every check ``restore_hub_bundle`` makes before its first write.
+
+        Shape, schema version and payload profile of the bundle, the
+        per-device schema, class and writer capabilities that
+        ``restore_device`` would refuse, the activity dependency order (a
+        reference cycle cannot be restored), and every per-activity check
+        ``restore_activity`` makes, with references resolved against the
+        bundle's own device and activity ids. Raises ``ValueError`` with
+        the reason; touches nothing. Returns the device payloads and the
+        activities in restore order.
+        """
+
+        if not isinstance(payload, dict):
+            raise ValueError("restore_hub_bundle payload must be a dict")
+        if payload.get("kind") != "hub_bundle":
+            raise ValueError(
+                "restore_hub_bundle expects kind == 'hub_bundle'"
+            )
+        if int(payload.get("schema_version", 0)) != HUB_BUNDLE_SCHEMA_VERSION:
+            raise ValueError(
+                "restore_hub_bundle payload schema_version must be "
+                f"{HUB_BUNDLE_SCHEMA_VERSION} "
+                f"(got {payload.get('schema_version')!r})"
+            )
+        # Bundles without a payload_profile predate the marker and are full
+        # backups by definition; an explicitly structural bundle carries no
+        # command payloads and must never be replayed onto a hub.
+        profile = str(payload.get("payload_profile") or PAYLOAD_PROFILE_FULL)
+        if profile != PAYLOAD_PROFILE_FULL:
+            raise ValueError(
+                f"restore_hub_bundle payload_profile is {profile!r}: "
+                "structural cache bundles carry no command payloads and "
+                "cannot be restored -- export a full backup instead"
+            )
+        devices = list(payload.get("devices") or [])
+        for device_payload in devices:
+            if not isinstance(device_payload, dict):
+                continue
+            if device_payload.get("kind") != "device_backup":
+                raise ValueError("restore payload kind must be 'device_backup'")
+            if int(device_payload.get("schema_version", 0)) != DEVICE_BACKUP_SCHEMA_VERSION:
+                raise ValueError(
+                    "restore_device payload schema_version must be "
+                    f"{DEVICE_BACKUP_SCHEMA_VERSION} (got "
+                    f"{device_payload.get('schema_version')!r})"
+                )
+            device_block = device_payload.get("device")
+            if not isinstance(device_block, dict):
+                raise ValueError("restore payload must include a 'device' block")
+            self._validate_restore_capabilities(
+                hub_version=self.hub_version,
+                device_class=self._restore_device_class(device_block),
+                payload=device_payload,
+            )
+        # Cross-activity references (chain steps) need the target's
+        # hub-assigned id before the referencing activity is written, so
+        # restore in dependency order. Cycles cannot be ordered: fail the
+        # whole bundle up front with the offending ids.
+        raw_activities = list(payload.get("activities") or [])
+        # Every activity check restore_activity would fail on, against the
+        # bundle's own ids: the id maps at write time are built from the
+        # bundle's devices (source id 0 is skipped) and from the activities
+        # restored before it, so a reference outside the bundle can never
+        # resolve. Runs before the sort so a malformed entry fails with the
+        # restore's own ValueError. Found by review of 635ecfe: a bad
+        # activity used to pass preflight and fail only after a replacing
+        # restore had erased the hub.
+        bundle_device_ids = {
+            int(((d.get("device") or {}).get("device_id", 0))) & 0xFF
+            for d in devices
+            if isinstance(d, dict) and isinstance(d.get("device"), dict)
+        } - {0}
+        bundle_activity_ids = {
+            int(((a.get("device") or {}).get("device_id", 0))) & 0xFF
+            for a in raw_activities
+            if isinstance(a, dict) and isinstance(a.get("device"), dict)
+        } - {0}
+        for activity_payload in raw_activities:
+            if not isinstance(activity_payload, dict):
+                continue
+            self._validate_activity_restore_payload(
+                activity_payload,
+                known_device_ids=bundle_device_ids,
+                known_activity_ids=bundle_activity_ids,
+            )
+        activities = self._sort_bundle_activities_for_restore(raw_activities)
+        return devices, activities
+
+    def preflight_restore_bundle(self, payload: Any) -> dict[str, int]:
+        """Check a ``hub_bundle`` the way a restore would, without writing.
+
+        The facade runs this before ``erase()`` on a replace restore, so a
+        bundle the restore would refuse can never cost the hub its
+        configuration. Raises ``ValueError``; returns the entity counts.
+        """
+
+        devices, activities = self._restore_bundle_preflight(payload)
+        return {
+            "devices": sum(1 for d in devices if isinstance(d, dict)),
+            "activities": sum(1 for a in activities if isinstance(a, dict)),
+        }
+
     def restore_hub_bundle(
         self,
         payload: dict[str, Any],
@@ -1699,42 +1769,12 @@ class RestoreMixin:
             if callable(progress_callback):
                 progress_callback(**progress_payload)
 
-        if not isinstance(payload, dict):
-            raise ValueError("restore_hub_bundle payload must be a dict")
-        if payload.get("kind") != "hub_bundle":
-            raise ValueError(
-                "restore_hub_bundle expects kind == 'hub_bundle'"
-            )
-        if int(payload.get("schema_version", 0)) != HUB_BUNDLE_SCHEMA_VERSION:
-            raise ValueError(
-                "restore_hub_bundle payload schema_version must be "
-                f"{HUB_BUNDLE_SCHEMA_VERSION} "
-                f"(got {payload.get('schema_version')!r})"
-            )
-        # Bundles without a payload_profile predate the marker and are full
-        # backups by definition; an explicitly structural bundle carries no
-        # command payloads and must never be replayed onto a hub.
-        profile = str(payload.get("payload_profile") or PAYLOAD_PROFILE_FULL)
-        if profile != PAYLOAD_PROFILE_FULL:
-            raise ValueError(
-                f"restore_hub_bundle payload_profile is {profile!r}: "
-                "structural cache bundles carry no command payloads and "
-                "cannot be restored -- export a full backup instead"
-            )
+        devices, activities = self._restore_bundle_preflight(payload)
         if not self.can_issue_commands():
             self._log.info(
                 "[RESTORE] restore_hub_bundle ignored: proxy client is connected"
             )
             return {"status": "failed", "failed_at": ["proxy", None]}
-
-        devices = list(payload.get("devices") or [])
-        # Cross-activity references (chain steps) need the target's
-        # hub-assigned id before the referencing activity is written, so
-        # restore in dependency order. Cycles cannot be ordered — fail
-        # the whole bundle up front with the offending ids.
-        activities = self._sort_bundle_activities_for_restore(
-            list(payload.get("activities") or [])
-        )
         total_steps = int(progress_total_steps or (progress_offset + len(devices) + len(activities)))
         completed_steps = int(progress_offset)
 
@@ -2243,37 +2283,86 @@ class RestoreMixin:
         activities — excluding sentinels and the activity's own id.
         """
 
-        referenced: set[int] = set()
         # The activity's own id is a MACRO-binding target (device_id == the
         # activity, command_id == the macro's button_id), not a source device,
         # so it must not be required in the device_id_map.
         own_id = int((payload.get("device") or {}).get("device_id", 0)) & 0xFF
-
-        def _add(raw: Any) -> None:
-            try:
-                value = int(raw) & 0xFF
-            except (TypeError, ValueError):
-                return
-            # 0x00 = unset; 0xFF = delay/wait sentinel (no real device);
-            # own_id = a macro-binding self-reference.
+        # One reference walker for restore and the document planner (phase
+        # 4, H1): the site list cannot drift between the two. Restore's
+        # exclusions stay: 0x00 = unset, 0xFF = delay/wait sentinel (no real
+        # device), own_id = a macro-binding self-reference; ids are masked
+        # to the wire byte as before. The derived
+        # ``referenced_source_device_ids`` list is not a wire site.
+        row = {**payload, "device": {**(payload.get("device") or {}), "device_id": own_id}}
+        referenced: set[int] = set()
+        for _referrer, site, target in iter_entity_references({"activities": [row]}):
+            if site == "referenced_source":
+                continue
+            value = int(target) & 0xFF
             if value not in (0, 0xFF, own_id):
                 referenced.add(value)
-
-        for row in payload.get("button_bindings") or []:
-            if not isinstance(row, dict):
-                continue
-            _add(row.get("device_id"))
-            _add(row.get("long_press_device_id"))
-        for row in payload.get("macros") or []:
-            if not isinstance(row, dict):
-                continue
-            for entry in row.get("steps") or []:
-                if isinstance(entry, dict):
-                    _add(entry.get("device_id"))
-        for row in payload.get("favorite_slots") or []:
-            if isinstance(row, dict):
-                _add(row.get("device_id"))
         return referenced
+
+    @staticmethod
+    def _validate_activity_restore_payload(
+        payload: Any,
+        *,
+        known_device_ids: set[int],
+        known_activity_ids: set[int],
+    ) -> dict[str, Any]:
+        """Every check ``restore_activity`` makes before its first write.
+
+        Shape, kind, schema version, the ``entity_type='activity'``
+        marker, and reference coverage: every source device id the
+        payload's bindings, macro steps and favourites reference must be
+        in ``known_device_ids`` and every foreign activity id in
+        ``known_activity_ids``. Pure and in-memory; the bundle preflight
+        runs it against the bundle's own ids before a replacing restore
+        erases the hub, ``restore_activity`` against the id maps it was
+        handed. Raises ``ValueError``; returns the activity block.
+        """
+
+        if not isinstance(payload, dict):
+            raise ValueError("restore payload must be a dictionary")
+        if payload.get("kind") != "activity_backup":
+            raise ValueError("restore_activity expects kind == 'activity_backup'")
+        if int(payload.get("schema_version", 0)) != ACTIVITY_BACKUP_SCHEMA_VERSION:
+            raise ValueError(
+                "restore_activity payload schema_version must be "
+                f"{ACTIVITY_BACKUP_SCHEMA_VERSION} (got "
+                f"{payload.get('schema_version')!r}); re-export the activity "
+                "with the current backup format"
+            )
+        activity_block = payload.get("device")
+        if not isinstance(activity_block, dict):
+            raise ValueError("restore payload must include a 'device' block")
+        if activity_block.get("entity_type") != "activity":
+            raise ValueError(
+                "restore_activity payload's 'device' block must mark entity_type='activity'"
+            )
+
+        referenced = RestoreMixin._collect_referenced_source_device_ids(payload)
+        missing = referenced - known_device_ids
+        if missing:
+            missing_list = ", ".join(f"0x{m:02X}" for m in sorted(missing))
+            raise ValueError(
+                "device_id_map is missing the following source device ids "
+                f"referenced by this activity backup: {missing_list}"
+            )
+
+        referenced_activities = RestoreMixin._collect_referenced_activity_ids(payload)
+        missing_activities = referenced_activities - known_activity_ids
+        if missing_activities:
+            missing_list = ", ".join(
+                f"0x{m:02X}" for m in sorted(missing_activities)
+            )
+            raise ValueError(
+                "this activity references other activities "
+                f"({missing_list}) that are not part of this restore or "
+                "have not been restored yet; include them in the restore "
+                "selection"
+            )
+        return activity_block
 
     @staticmethod
     def _collect_referenced_source_device_ids(payload: dict[str, Any]) -> set[int]:

@@ -2,7 +2,7 @@
 #
 # The library's source of truth is custom_components/sofabaton_x1s/lib;
 # at build time hatchling remaps that directory into the wheel as the
-# top-level package "sofabaton" (see docs/sofabaton-x_library_plan.md).
+# top-level package "sofabaton" (see docs/internal/sofabaton-x_library_plan.md).
 # The Home Assistant integration itself is NOT part of this distribution.
 
 [build-system]
@@ -37,6 +37,7 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/tree/main/sofabaton-x"
 Issues = "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/issues"
+Changelog = "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/sofabaton-x/CHANGELOG.md"
 # The published package is built from the in-tree library directory
 # (remapped to top-level "sofabaton" at build time), which isn't obvious
 # from the repo layout — link it directly.
@@ -57,7 +58,7 @@ path = "custom_components/sofabaton_x1s/lib/version.py"
 include = [
     "custom_components/sofabaton_x1s/lib/**",
     "sofabaton-x/README.md",
+    "sofabaton-x/CHANGELOG.md",
     "sofabaton-x/examples/**",
     "LICENSE",
-    "docs/sofabaton-x_library_plan.md",
 ]

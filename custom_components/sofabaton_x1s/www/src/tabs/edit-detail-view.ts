@@ -420,6 +420,18 @@ export class SofabatonEditDetailView extends LitElement {
       background: color-mix(in srgb, #2e7d32 6%, var(--ha-card-background, var(--card-background-color)));
     }
     .payload-test-btn { display: inline-flex; align-items: center; gap: 6px; margin-right: auto; }
+    /* Payload dialog footer: docs link bottom-left on the Cancel/Save row,
+       styled like the control panel's bottom-dock documentation links. */
+    .payload-doc-link {
+      color: var(--sb-accent-text, var(--primary-color));
+      text-decoration: underline;
+      text-decoration-color: var(--primary-color);
+      font-weight: 400;
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    .payload-doc-link:hover { color: var(--primary-text-color); text-decoration: underline; }
+    .payload-dialog-note { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; }
     .payload-test-btn ha-icon { --mdc-icon-size: 16px; }
     /* Device-class indicator in the payload dialog header. */
     .dialog-title-group { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
@@ -1728,7 +1740,17 @@ export class SofabatonEditDetailView extends LitElement {
               : nothing}
           </div>
           <div class="dialog-footer">
-            <div class="dialog-footer-note">${this._payloadLearnView === "off" ? this._payloadDialogError : ""}</div>
+            <div class="dialog-footer-note payload-dialog-note">
+              <a
+                class="payload-doc-link"
+                href=${TOOLS_CARD_STRINGS.docs.commandPayloadsUrl}
+                target="_blank"
+                rel="noreferrer noopener"
+              >${TOOLS_CARD_STRINGS.backup.payloadDocsLink}</a>
+              ${this._payloadLearnView === "off" && this._payloadDialogError
+                ? html`<span class="payload-dialog-error">${this._payloadDialogError}</span>`
+                : nothing}
+            </div>
             <div class="dialog-footer-actions">
               ${this._payloadLearnView !== "off"
                 ? this._renderLearnFooterActions()

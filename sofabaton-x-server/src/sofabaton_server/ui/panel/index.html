@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#009ac7">
+  <title>Sofabaton X control panel</title>
+  <link rel="icon" href="remote/icon.svg" type="image/svg+xml">
+  <style>
+    html, body { margin: 0; height: 100%; }
+    body { background: var(--primary-background-color, #fafafa); color: var(--primary-text-color, #141414); }
+    sofabaton-server-panel { display: block; height: 100%; }
+    noscript { display: block; padding: 24px; font-family: system-ui, sans-serif; }
+  </style>
+  <script type="module" src="panel.js"></script>
+</head>
+<body>
+  <sofabaton-server-panel></sofabaton-server-panel>
+  <noscript>The Sofabaton X control panel needs JavaScript.</noscript>
+</body>
+</html>

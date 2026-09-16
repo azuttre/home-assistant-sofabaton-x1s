@@ -1,0 +1,33 @@
+# sofabaton-x-server with Docker Compose.
+#
+# This deployment uses Linux host networking: the app finds the proxy over mDNS
+# and (iOS) UDP broadcast, and the hub dials back to TCP 8200 on this host.
+# A bridge network needs additional routing/discovery configuration.
+# Docker Desktop has opt-in host networking in recent versions, but this
+# project's multicast and hub dial-back compatibility there is unverified.
+# https://docs.docker.com/engine/network/drivers/host/
+#
+#   docker compose up -d
+#   docker compose logs -f
+#
+# Fully close the official Sofabaton app first: connected hubs do not advertise.
+# Then open http://<server>:8480/ and add hubs in the control panel.
+# SOFABATON_HUBS is an optional seed for first startup only.
+services:
+  sofabaton-x-server:
+    build:
+      context: ..
+      dockerfile: sofabaton-x-server/Dockerfile
+    image: sofabaton-x-server:local
+    container_name: sofabaton-x-server
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - ./data:/data
+    environment:
+      SOFABATON_PORT: "8480"
+      # SOFABATON_HUBS: "192.168.1.50,192.168.1.51"
+      # SOFABATON_ADVERTISE_URL: "https://sofabaton.home.example"
+      # SOFABATON_TRUSTED_PROXIES: "127.0.0.1"
+      # SOFABATON_BIND: "127.0.0.1"      # when a reverse proxy on this host fronts it
+      SOFABATON_LOG_LEVEL: "info"

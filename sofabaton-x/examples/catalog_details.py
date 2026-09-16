@@ -39,26 +39,26 @@ async def main() -> None:
 
         # --- commands on each device -------------------------------------
         print("== DEVICES ==")
-        for dev_id, dev in sorted((await proxy.devices()).items()):
-            commands = await proxy.commands(dev_id)   # [{command_id, label}]
-            print(f"[{dev_id}] {dev.get('name', '?')}: {len(commands)} commands")
+        for dev in await proxy.devices():             # list[Device], sorted by id
+            commands = await proxy.commands(dev.device_id)   # list[Command]
+            print(f"[{dev.device_id}] {dev.name or '?'}: {len(commands)} commands")
             for cmd in commands:
-                print(f"    send({dev_id}, {cmd['command_id']})  {cmd['label']}")
+                print(f"    send({dev.device_id}, {cmd.command_id})  {cmd.label}")
 
         # --- macros and favorites on each activity -----------------------
         print("\n== ACTIVITIES ==")
-        for act_id, act in sorted((await proxy.activities()).items()):
-            print(f"[{act_id}] {act.get('name', '?')}")
+        for act in await proxy.activities():          # list[Activity], sorted by id
+            print(f"[{act.activity_id}] {act.name or '?'}")
 
-            for macro in await proxy.macros(act_id):   # [{command_id, label}]
-                print(f"    macro: send({act_id}, {macro['command_id']})  {macro.get('label')}")
+            for macro in await proxy.macros(act.activity_id):   # list[Macro]
+                print(f"    macro: send({act.activity_id}, {macro.command_id})  {macro.label}")
 
-            # favorites -> [{device_id, command_id, label}]; each is a
-            # device command you fire with send(device_id, command_id).
-            for fav in await proxy.favorites(act_id):
+            # favorites -> list[Favorite]; each is a device command you
+            # fire with send(device_id, command_id).
+            for fav in await proxy.favorites(act.activity_id):
                 print(
-                    f"    favorite: send({fav['device_id']}, {fav['command_id']})"
-                    f"  {fav.get('label')}"
+                    f"    favorite: send({fav.device_id}, {fav.command_id})"
+                    f"  {fav.label}"
                 )
 
 

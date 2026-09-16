@@ -45,6 +45,7 @@ import {
 import { RemoteCardStore } from "./state/remote-card-store";
 import { AutomationAssistController } from "./state/automation-assist-controller";
 import { EDITOR } from "./remote-card-shared";
+import type { RemoteBackend } from "./backend/remote-backend";
 import type { HassLike, RemoteCardConfig } from "./remote-card-types";
 import { renderActivityRow } from "./sections/activity-row";
 import {
@@ -195,11 +196,24 @@ export class SofabatonRemoteCard extends LitElement {
     const language =
       (hass as { locale?: { language?: string }; language?: string })?.locale
         ?.language ?? (hass as { language?: string })?.language;
+    this.setLanguage(language);
+    this._store.setHass(hass);
+  }
+
+  /** Switch the card's language (HA: from hass.locale; the web remote: from the page). */
+  setLanguage(language: string | undefined): void {
     const languageChanged = setRemoteCardLanguage(language);
     this.lang = remoteCardLanguage();
     this.dir = remoteCardDirection();
-    this._store.setHass(hass);
     if (languageChanged) this.requestUpdate();
+  }
+
+  /**
+   * Install any RemoteBackend (docs/internal/web-remote-plan.md): the web
+   * remote's server adapter. HA dashboards never call this; they set hass.
+   */
+  setBackend(backend: RemoteBackend | null): void {
+    this._store.setBackend(backend);
   }
 
   get hass(): HassLike | null {
@@ -541,14 +555,16 @@ export class SofabatonRemoteCard extends LitElement {
 
   private _applyLocalTheme(themeName: string | undefined): boolean {
     const root = this._cardRef.value;
+    // hass is null on the web remote: no theme registry there, but the
+    // background override below is plain config and must still apply.
     const hass = this._store.hass as
       | (HassLike & { themes?: { themes?: Record<string, Record<string, unknown>>; darkMode?: boolean } })
       | null;
-    if (!root || !hass) return false;
+    if (!root) return false;
 
     const bgOverrideCss = rgbToCss(this._store.config?.background_override);
-    const themeDef = themeName ? hass.themes?.themes?.[themeName] : null;
-    const themeMode = hass.themes?.darkMode ? "dark" : "light";
+    const themeDef = themeName ? hass?.themes?.themes?.[themeName] : null;
+    const themeMode = hass?.themes?.darkMode ? "dark" : "light";
     const appliedKey = `${themeName || ""}||${bgOverrideCss}||${themeMode}||${JSON.stringify(themeDef ?? null)}`;
     if (this._appliedThemeKey === appliedKey) return false;
 
@@ -569,7 +585,7 @@ export class SofabatonRemoteCard extends LitElement {
         // Support themes with modes (light/dark)
         const defWithModes = def as { modes?: Record<string, Record<string, unknown>> };
         if (defWithModes.modes && typeof defWithModes.modes === "object") {
-          const mode = hass.themes?.darkMode ? "dark" : "light";
+          const mode = hass?.themes?.darkMode ? "dark" : "light";
           vars = { ...def, ...(defWithModes.modes?.[mode] || {}) };
           delete (vars as { modes?: unknown }).modes;
         }
@@ -768,7 +784,7 @@ export class SofabatonRemoteCard extends LitElement {
   // ---------- render ----------
 
   render() {
-    if (!this._haElementsReady || !this._store.config || !this._store.hass) {
+    if (!this._haElementsReady || !this._store.config || !this._store.backend) {
       return nothing;
     }
 
@@ -816,6 +832,7 @@ export class SofabatonRemoteCard extends LitElement {
       ? derived.isUnavailable || (!this._editMode && derived.deviceId == null)
       : derived.isUnavailable ||
         store.activityLoadingActive() ||
+        derived.loadPending ||
         (!this._editMode && derived.isPoweredOff);
 
     // Mode switches close any drawer belonging to the other mode.

@@ -9,7 +9,7 @@ import {
   holdRepeatIndexOf,
   layeringZIndexes,
   primaryActionGateAllows,
-} from "../../custom_components/sofabaton_x1s/www/src/remote-card-gestures";
+} from "../../remote-card/src/remote-card-gestures";
 
 test("holdRepeatIndexOf reads the repeat index only from hold-repeat events", () => {
   // Node has no CustomEvent constructor with detail in every version; the

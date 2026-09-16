@@ -36,11 +36,13 @@ bytes.
 Choose **Add command** in the Device editor, then enter a name and payload.
 The form depends on the Device class:
 
-- **IR** — enter a descriptive payload beginning with `P:`, such as
-  `P:Sony12 R:40000 D:1 F:18 MUL:2`, paste Pronto Hex or Sofabaton Hex, or use
-  **Learn** to capture the code (see below). You can Test it before saving.
+- **IR** — paste Pronto Hex or Sofabaton Hex, or use **Learn** to capture the
+  code (see below). On **X2 hubs only**, you can also enter a descriptive
+  payload beginning with `P:`, such as `P:Sony12 R:40000 D:1 F:18 MUL:2`.
+  You can Test it before saving.
 - **Supported Wifi classes** — edit the structured fields. The editor uses an
   existing command from that Device as a template for the hub-specific record.
+  For MQTT, changing the payload's IDs does not change the IDs the hub publishes.
 - **Other classes** — enter raw hex. A non-IR Device needs at least one existing
   command so the integration can reuse its command metadata.
 
@@ -84,23 +86,32 @@ learned signal or an IR database. Raw IR works across X1, X1S, and X2 hubs.
 
 ### Structured payloads
 
-When the integration recognizes a payload, the editor exposes its useful fields
-instead of making you edit the encoded bytes directly:
+When the integration recognizes a payload, the editor shows its fields in a
+structured form:
 
-| Class | Editable fields |
+| Class | Structured fields |
 | --- | --- |
-| `ir` | Descriptive IR string beginning with `P:` |
+| `ir` | Descriptive IR string beginning with `P:` (X2 hubs only) |
 | `wifi_ip` | Host, port, method, path, headers, content type, and body |
 | `wifi_roku` | Command path |
 | `wifi_hue` | Path and request body |
 | `wifi_sonos` | Path and request body |
+| `wifi_mqtt` | Device ID and command ID (ignored by the hub; X2 hubs only) |
+
+The two IDs stored in an MQTT command payload can be written, but the hub
+ignores their values. When the command runs, it publishes the actual device
+and command IDs to the broker (as `device_id` and `key_id`). Changing the
+payload's IDs does not change that message. There are no topic, broker, QoS,
+or retain settings in the command payload.
 
 Payloads without a supported decoder remain available as raw hex. A readable
 form is a convenience, not a requirement for a valid command.
 
-The Control Panel can synthesize, Test, and save descriptive IR commands on X1,
-X1S, and X2 hubs. The raw IrScrutinizer exporter remains the most portable
-choice when you want timing-style payloads.
+Descriptive IR commands are supported on **X2 hubs only**. The Control Panel
+rejects descriptive payloads beginning with `P:` on X1 and X1S hubs. For those
+hubs, use raw timing payloads, entered as Pronto Hex or Sofabaton Hex, or
+captured with **Learn**. The raw IrScrutinizer exporter produces timing-style
+payloads for X1, X1S, and X2 hubs.
 
 ## ◇ Obtain and share IR payloads
 
@@ -181,5 +192,11 @@ fields, response data, and examples.
   editor is not proof of IR output.
 - Editing and syncing are unavailable while the Sofabaton app or another hub
   operation holds the connection.
-- If the editor asks for a cache refresh, refresh that Device and reopen it.
+- If the editor asks for a cache refresh, use **Refresh all** in the prompt
+  or on the **Hub** tab, and wait for it to finish. The prompt reloads the
+  editor automatically; if you refreshed from the Hub tab, reopen the Device
+  editor. This refreshes Device settings and Activity references together.
+  A single-Device refresh loads that Device's full structural details, but
+  does not refresh Activities that reference it, so it may not resolve every
+  cache-related editing or Sync block.
 - Not every payload has a readable structured form; raw-only is normal.

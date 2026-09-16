@@ -27,6 +27,11 @@ In practice:
 
 ### 1.1 Hub mDNS advertisement
 
+The physical hub stops advertising while the official app is connected
+directly to it. Disconnect the app before initial discovery; an absent
+advertisement does not prove the hub is offline. Once a proxy owns the hub
+connection, the app discovers the proxy's advertisement instead.
+
 The hub advertises via **mDNS** (Multicast DNS, RFC 6762):
 
 | Model | mDNS service type              |

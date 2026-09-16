@@ -6,9 +6,10 @@ Submodule internals (``opcode_handlers``, frame parsing, wire schemas,
 the ``proxy_*`` mixins, ...) remain importable but are NOT a stable
 surface and may change between minor releases.
 
-The library raises stdlib exceptions (``ValueError`` for unclassifiable
-or malformed input, ``RuntimeError``/``TimeoutError`` for transport and
-ack failures) rather than custom exception types.
+The facade exports typed exceptions derived from ``ValueError``,
+``RuntimeError`` and ``TimeoutError`` for input, state and transport
+failures. Sync and restore also report unsuccessful outcomes in their
+result objects; callers should inspect ``result.ok``.
 
 In-tree, this package doubles as ``custom_components.sofabaton_x1s.lib``
 for the Home Assistant integration; the wheel build remaps it to the
@@ -84,6 +85,24 @@ from .activity_sync import (  # noqa: F401
     build_activity_sync_plan,
     build_device_sync_plan,
 )
+# Whole-document runner state and result (phase 4, H3).
+from .hub_apply import ApplyItem, ApplyState, HubSyncResult  # noqa: F401
+# Whole-document planner (phase 4, H0): stage A validation and the
+# ordered item list for a snapshot edited as one document.
+from .hub_sync import (  # noqa: F401
+    DanglingReferenceError,
+    DocumentError,
+    DocumentIncompleteError,
+    EntityNotEditableError,
+    EntityRef,
+    HubSyncItem,
+    HubSyncPlan,
+    InvalidDocumentError,
+    OutOfScopeError,
+    PlaceholderMap,
+    UnresolvedPlaceholderError,
+    build_hub_sync_plan,
+)
 from .wifi_inplace_plan import (  # noqa: F401
     ManagedWifiSnapshot,
     WifiActivityRefs,
@@ -93,6 +112,62 @@ from .wifi_inplace_plan import (  # noqa: F401
     build_wifi_inplace_plan,
     derive_device_level_bindings,
     desired_snapshot_from_config,
+)
+
+# Hub configuration record (discovery / manual / REST intake).
+from .config import ConfigSource, HubConfig  # noqa: F401
+
+# Typed results and failures of the asyncio facade.
+from .models import (  # noqa: F401
+    Activity,
+    BatchOutcome,
+    WriteBatch,
+    ActivityChanged,
+    CatalogReady,
+    ConnectionState,
+    EventKind,
+    HubEvent,
+    HubSnapshot,
+    RestoreResult,
+    SnapshotChanged,
+    SnapshotEntity,
+    StatusChanged,
+    SyncResult,
+    DeviceRemoved,
+    WriteProgress,
+    Button,
+    Command,
+    Device,
+    Favorite,
+    HubInfo,
+    HubMode,
+    HubStatus,
+    Macro,
+    RunningActivity,
+)
+from .errors import (  # noqa: F401
+    FetchTimeoutError,
+    HubBusyError,
+    HubNotConnectedError,
+    SnapshotIncompleteError,
+    SnapshotOutdatedError,
+    StateDocumentError,
+    HubRejectedError,
+    WifiUpdateDeclined,
+    WifiUpdateFailed,
+    IrLearnError,
+)
+from .payloads import IrPayload, NetworkCommand  # noqa: F401
+from . import edits  # noqa: F401
+
+# Managed wifi device value types (deploy / update through the facade).
+from .wifi_device import (  # noqa: F401
+    WIFI_SLOT_COUNT,
+    WifiDeployment,
+    WifiDeviceSpec,
+    WifiSlotSpec,
+    WifiTarget,
+    snapshot_from_spec,
 )
 
 # Asyncio facade over the threaded core.
@@ -151,6 +226,26 @@ _CURATED = [
     "SyncStep",
     "build_activity_sync_plan",
     "build_device_sync_plan",
+    # whole-document planner (phase 4)
+    "DocumentError",
+    "InvalidDocumentError",
+    "DanglingReferenceError",
+    "EntityNotEditableError",
+    "DocumentIncompleteError",
+    "OutOfScopeError",
+    "EntityRef",
+    "HubSyncItem",
+    "HubSyncPlan",
+    "PlaceholderMap",
+    "UnresolvedPlaceholderError",
+    "build_hub_sync_plan",
+    # write batch (phase 4)
+    "BatchOutcome",
+    "WriteBatch",
+    # whole-document runner (phase 4)
+    "ApplyItem",
+    "ApplyState",
+    "HubSyncResult",
     # in-place wifi command re-sync planner
     "ManagedWifiSnapshot",
     "WifiActivityRefs",
@@ -160,6 +255,55 @@ _CURATED = [
     "build_wifi_inplace_plan",
     "derive_device_level_bindings",
     "desired_snapshot_from_config",
+    # facade result types and failures
+    "Activity",
+    "Button",
+    "Command",
+    "Device",
+    "Favorite",
+    "Macro",
+    "HubInfo",
+    "HubMode",
+    "HubStatus",
+    "RunningActivity",
+    "FetchTimeoutError",
+    "HubBusyError",
+    "HubNotConnectedError",
+    "SnapshotIncompleteError",
+    "SnapshotOutdatedError",
+    "StateDocumentError",
+    "HubRejectedError",
+    "IrLearnError",
+    "WifiUpdateDeclined",
+    "WifiUpdateFailed",
+    # snapshot and writes (phase 3)
+    "HubSnapshot",
+    "SnapshotEntity",
+    "WriteProgress",
+    "SyncResult",
+    "DeviceRemoved",
+    "RestoreResult",
+    "IrPayload",
+    "NetworkCommand",
+    "edits",
+    # managed wifi device value types
+    "WIFI_SLOT_COUNT",
+    "WifiDeployment",
+    "WifiDeviceSpec",
+    "WifiSlotSpec",
+    "WifiTarget",
+    "snapshot_from_spec",
+    # hub configuration record
+    "ConfigSource",
+    "HubConfig",
+    # facade event stream
+    "EventKind",
+    "ActivityChanged",
+    "ConnectionState",
+    "StatusChanged",
+    "CatalogReady",
+    "SnapshotChanged",
+    "HubEvent",
     # asyncio facade
     "AsyncHubBrowser",
     "AsyncXProxy",

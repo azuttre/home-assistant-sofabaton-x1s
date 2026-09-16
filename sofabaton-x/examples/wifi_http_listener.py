@@ -1,23 +1,33 @@
 #!/usr/bin/env python3
-"""Build a WiFi-command HTTP listener ON TOP of sofabaton.
+"""Advanced direct-library example: build a hub-facing HTTP callback listener.
 
-Executing HTTP callbacks is deliberately out of scope for the library —
-it only carries the protocol side. This sketch shows the full pattern
-the Home Assistant integration implements with its Roku-style listener:
+sofabaton-x-server already provides this listener and relays presses over
+WebSocket. Server integrations should use its starter example instead.
 
-1. ``create_wifi_device`` provisions a virtual "network callback" device
-   on the hub. Each command slot is bound to an HTTP request the hub
-   will fire at ``<this machine>:<request_port>`` when the user presses
-   the button on the remote.
-2. The requests look like Roku ECP launches::
+Executing HTTP callbacks is deliberately out of scope for the library:
+it only carries the protocol side. This sketch shows the pattern the
+Home Assistant integration implements with its Roku-style listener.
 
-       POST /launch/<action_id>/<device_id>/<command_index>/<press_type>
+1. Use ``proxy.deploy_wifi_device`` with a ``WifiDeviceSpec`` containing
+   the labels in COMMANDS below, host set to this machine's LAN address,
+   and port set to LISTEN_PORT (see the README's managed wifi example).
+   Bind the returned device's commands to the remote. Deployment writes
+   paths of this form; this listener itself does not provision anything::
 
-   so a tiny HTTP server + path parser is all an application needs to
-   turn remote presses into arbitrary actions.
+       POST /launch/<hub action id>/<device id>/<zero-based slot>/<short|long>
+       POST /launch/e26a44861b45/12/0/short
 
-The proxy is driven through the asyncio facade; the stdlib HTTP server
-is blocking, so it runs in the loop's executor.
+2. Run a tiny HTTP server that parses that path: when the user presses
+   the button on the remote, the hub fires the request and your handler
+   turns it into an action.
+
+The proxy is only needed here to observe the hub (mode, activity
+changes); the callbacks travel hub -> this server directly. The stdlib
+HTTP server is blocking, so it runs in the loop's executor.
+The action id is normally the hub's MAC, not a decimal number. Hook slots
+in WifiDeviceSpec are 1..10; callback path indexes are 0..9. This sketch
+prints requests; a real action handler should match the source hub and
+the saved deployment before dispatching actions.
 """
 
 import asyncio
@@ -28,24 +38,24 @@ from sofabaton import AsyncXProxy, async_discover_hubs
 
 LISTEN_PORT = 8060
 
-COMMANDS = [
-    {"display_name": "Lights On", "trigger_name": "Lights On", "press_type": "short", "command_index": 0},
-    {"display_name": "Lights Off", "trigger_name": "Lights Off", "press_type": "short", "command_index": 1},
-]
+# What each command index means on the device provisioned in step 1.
+COMMANDS = ["Lights On", "Lights Off"]
 
-_LAUNCH_RE = re.compile(r"^/launch/(\d+)/(\d+)/(\d+)/(short|long)$")
+_LAUNCH_RE = re.compile(r"^/launch/([^/]+)/(\d+)/([0-9])/(short|long)$")
 
 
 class HubCallbackHandler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802 - stdlib API
-        match = _LAUNCH_RE.match(self.path)
+        match = _LAUNCH_RE.fullmatch(self.path.split("?", 1)[0])
         if match:
             action_id, device_id, command_index, press_type = match.groups()
             slot = int(command_index)
-            name = COMMANDS[slot]["trigger_name"] if slot < len(COMMANDS) else f"slot {slot}"
-            print(f"remote pressed: {name} ({press_type}) [device {device_id}]")
+            name = COMMANDS[slot] if slot < len(COMMANDS) else f"slot {slot}"
+            print(f"remote pressed: {name} ({press_type}) [hub {action_id}, device {device_id}]")
             # ... do something real here: toggle lights, call an API, ...
-        self.send_response(200)
+        else:
+            print(f"unrecognized callback path: {self.path}")
+        self.send_response(200 if match else 404)
         self.end_headers()
 
     def log_message(self, *args):  # quiet the default request logging
@@ -59,32 +69,20 @@ async def main() -> None:
         raise SystemExit("no hub found")
     hub = hubs[0]
 
-    # The hub's IP is all that's required. To let the official app connect
-    # *through* the proxy, add the hub's mDNS identity so the proxy
-    # advertises itself exactly like the hub:
-    #     mdns_instance=hub.name, mdns_txt=hub.txt
     proxy = AsyncXProxy(hub_ip=hub.host)
     server = ThreadingHTTPServer(("0.0.0.0", LISTEN_PORT), HubCallbackHandler)
     async with proxy:
-        # Provisioning writes to the hub, so own it first (no app attached).
-        if not await proxy.wait_until_controllable(timeout=30):
-            raise SystemExit("hub not controllable (not connected, or an app is attached)")
-
-        # One-time provisioning (idempotent re-runs update the device).
-        created = await proxy.create_wifi_device(
-            device_name="My Bridge",
-            commands=COMMANDS,
-            request_port=LISTEN_PORT,
-        )
-        print("wifi device:", created)
-
-        print(f"listening for hub callbacks on :{LISTEN_PORT} — Ctrl+C to stop")
+        if await proxy.wait_connected(timeout=30):
+            st = await proxy.status()
+            print(f"hub connected ({st.mode} mode)")
+        print(f"listening for hub callbacks on :{LISTEN_PORT}; Ctrl+C to stop")
         try:
             # serve_forever() blocks, so run it in the executor; shut it
             # down (from this thread) on cancellation / Ctrl+C.
             await loop.run_in_executor(None, server.serve_forever)
         finally:
             server.shutdown()
+            server.server_close()
 
 
 if __name__ == "__main__":

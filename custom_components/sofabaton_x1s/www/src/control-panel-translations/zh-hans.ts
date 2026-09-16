@@ -42,6 +42,7 @@ export const TOOLS_CARD_STRINGS_ZH_HANS = {
   docs: {
     wifiCommandsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/wifi_commands.md",
     backupUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/backup.md",
+    commandPayloadsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/command_payloads.md",
   },
   tabs: { cache: "Hub", wifiCommands: "自动化", backup: "备份", settings: "设置", logs: "日志" },
   tabDocs: { wifi_commands: "自动化文档", backup: "备份文档" },
@@ -335,7 +336,7 @@ export const TOOLS_CARD_STRINGS_ZH_HANS = {
     moveUpAria: "上移", moveDownAria: "下移", deviceClass: "设备类别", name: "名称", nameHelper: "显示在遥控器及所有命令选择器中。",
     verifyPayloadLive: "保存前请验证修改后的有效载荷：“测试”会在 Hub 上执行当前字节，但不会保存；“保存”会在下次同步设备时写入有效载荷。",
     verifyPayloadBackup: "使用修改后的有效载荷前请先验证：“测试”会在 Hub 上执行这些字节，但不会保存。确认结果符合预期后再保存。",
-    test: "测试", sendingToHub: "正在发送到 Hub…", sentToHub: "已发送到 Hub 并执行一次。", testFailed: "测试失败。", rawPayload: "原始有效载荷",
+    test: "测试", payloadDocsLink: "有效载荷文档", sendingToHub: "正在发送到 Hub…", sentToHub: "已发送到 Hub 并执行一次。", testFailed: "测试失败。", rawPayload: "原始有效载荷",
     rawPayloadDescription: "此设备类别没有结构化编辑器；恢复时会将下方字节原样写入 Hub。",
     payloadHex: "有效载荷（十六进制字节）", payloadHexHelper: "字节对示例：“0a 4f 22”；允许空格和 0x 前缀。", rename: "重命名",
     prontoHexTab: "Pronto Hex",

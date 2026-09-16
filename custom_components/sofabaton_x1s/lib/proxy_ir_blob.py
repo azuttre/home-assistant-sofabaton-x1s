@@ -412,6 +412,22 @@ class IrBlobMixin:
             ack_timeout=ack_timeout,
         )
 
+    def _ensure_device_commands_cached(self, dev_lo: int, *, timeout: float = 10.0) -> bool:
+        """W2 precondition for the persist writes: the device's command
+        table must be complete before a slot id is allocated against it,
+        or a new command could land on an occupied slot. Reads it when the
+        device was never fetched in this session; False when the read did
+        not land (the caller refuses rather than guesses)."""
+
+        if dev_lo in self._commands_complete:
+            return True
+        return self._fetch_and_wait(
+            f"commands:{dev_lo}",
+            lambda: self.get_commands_for_entity(dev_lo, fetch_if_missing=True),
+            lambda: dev_lo in self._commands_complete,
+            timeout=timeout,
+        )
+
     def _allocate_command_id(
         self,
         device_commands: dict[int, str] | None,
@@ -532,6 +548,9 @@ class IrBlobMixin:
             return None
 
         dev_lo = device_id & 0xFF
+        if not self._ensure_device_commands_cached(dev_lo):
+            self._log.warning("[PERSIST_IR_BLOB] command table for dev=0x%02X unavailable; not writing", dev_lo)
+            return None
         device_commands = self.state.commands.get(dev_lo, {})
         new_command_id = self._allocate_command_id(device_commands, command_id)
 
@@ -691,6 +710,9 @@ class IrBlobMixin:
             raise ValueError(f"command_code {command_code} out of 48-bit range")
 
         dev_lo = device_id & 0xFF
+        if not self._ensure_device_commands_cached(dev_lo):
+            self._log.warning("[PERSIST_CMD] command table for dev=0x%02X unavailable; not writing", dev_lo)
+            return None
         device_commands = self.state.commands.get(dev_lo, {})
         new_command_id = self._allocate_command_id(device_commands, command_id)
 

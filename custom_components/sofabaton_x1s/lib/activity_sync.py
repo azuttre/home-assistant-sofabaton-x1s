@@ -103,6 +103,18 @@ def _rows_by_button(rows: Any) -> dict[int, dict[str, Any]]:
     return result
 
 
+# Labels the hub's row carries that are derived from the ids (the button
+# code's name, the target command's name). A client that builds a
+# binding row from ids alone omits them; that is not a change.
+_BINDING_LABEL_KEYS = frozenset({"button_name", "command_name", "long_press_command_name"})
+
+
+def _binding_identity(row: Mapping[str, Any] | None) -> str:
+    if row is None:
+        return ""
+    return _canonical({k: v for k, v in row.items() if k not in _BINDING_LABEL_KEYS})
+
+
 def _canonical(value: Any) -> str:
     return json.dumps(value, sort_keys=True, default=str)
 
@@ -518,7 +530,9 @@ def _assert_in_scope(baseline: Mapping[str, Any], edited: Mapping[str, Any], act
 # byte inside the "device" block, popped below). Capture metadata is not
 # config — two captures of the same hub state must produce equal signatures.
 _DEVICE_SYNC_MUTABLE_KEYS = frozenset({"macros", "button_bindings", "input_record"})
-_DEVICE_SYNC_VOLATILE_KEYS = frozenset({"captured_at", "fetched_at", "complete", "payload_profile", "key_sort"})
+_DEVICE_SYNC_VOLATILE_KEYS = frozenset(
+    {"captured_at", "fetched_at", "complete", "payload_profile", "key_sort", "editable"}
+)
 
 
 def _device_immutable_signature(
@@ -1006,7 +1020,7 @@ def _plan_bindings(
     for button_id in sorted(edit_bindings):
         binding = edit_bindings[button_id]
         base_binding = base_bindings.get(button_id)
-        if base_binding is not None and _canonical(base_binding) == _canonical(binding):
+        if base_binding is not None and _binding_identity(base_binding) == _binding_identity(binding):
             continue
         device_id = _int(binding.get("device_id")) or _int(default_device_id or 0)
         long_press_command_id = _int(binding.get("long_press_command_id"))

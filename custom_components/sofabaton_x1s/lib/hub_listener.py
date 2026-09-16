@@ -44,8 +44,28 @@ DEFAULT_HUB_LISTEN_PORT = 8200
 # hub self-heals via its own CALL_ME loop afterwards.
 DEFAULT_BOUNCE_DOWNTIME_S = 2.5
 
+# Release feedback (see HubListener.release_hub): a hub that reconnects
+# after being released is refused again, up to this many extra bounces,
+# for this long after the release.
+DEFAULT_RELEASE_GRACE_S = 60.0
+DEFAULT_RELEASE_MAX_BOUNCES = 8
+# A released hub dials back on a fixed timer: live on 2026-09-09 an X1
+# and an X1S both retried every 3.0 s (first attempt ~2.7 s after the
+# drop), so a 2.5 s window closed and reopened between two attempts every
+# time. The release window must outlast one full retry period.
+DEFAULT_RELEASE_DOWNTIME_S = 4.0
+
 
 OnSocketCallback = Callable[[socket.socket, Tuple[str, int]], None]
+
+
+@dataclass
+class _Release:
+    """A hub we let go of and must keep refusing until it gives up."""
+
+    deadline: float
+    bounces_left: int
+    downtime: float
 
 
 @dataclass(frozen=True)
@@ -73,6 +93,9 @@ class HubListener:
         self._bouncing = False
         self._bounce_cancel: Optional[threading.Event] = None
         self._bounce_thr: Optional[threading.Thread] = None
+        # Hubs released via release_hub(), keyed by real IP.
+        self._released: Dict[str, _Release] = {}
+        self._unrecognised_logged: Dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -105,6 +128,8 @@ class HubListener:
                 self._by_proxy.pop(existing.proxy_id, None)
             self._by_ip[real_hub_ip] = reg
             self._by_proxy[proxy_id] = reg
+            # Registering a hub again ends its release.
+            self._released.pop(real_hub_ip, None)
             self._ensure_running_locked()
             get_hub_logger(log, proxy_id).info(
                 "[LISTEN] registered hub %s on shared port %d",
@@ -132,6 +157,54 @@ class HubListener:
             self._by_ip.clear()
             self._by_proxy.clear()
             self._stop_thread_locked()
+
+    def release_hub(
+        self,
+        real_hub_ip: str,
+        *,
+        downtime: float = DEFAULT_RELEASE_DOWNTIME_S,
+        grace: float = DEFAULT_RELEASE_GRACE_S,
+        max_bounces: int = DEFAULT_RELEASE_MAX_BOUNCES,
+    ) -> None:
+        """Let a (just unregistered) hub go so the official app can have it.
+
+        A timed bounce alone is a bet on the hub's retry cadence: live on
+        2026-09-09 both an X1 and an X1S dialled back on a fixed 3.0 s
+        timer (first attempt ~2.7 s after the drop), so a 2.5 s window
+        closed and reopened between two attempts every time, the hub got
+        accepted-and-dropped as unrecognised, and it never met a closed
+        port. Two things fix that: the release window outlasts one retry
+        period (``downtime``, 4 s by default), and the release is a
+        feedback loop: the hub is remembered for ``grace`` seconds and
+        every time it still shows up unrecognised the listener bounces
+        again (at most ``max_bounces`` times). A closed port is the only
+        signal the hub gives up on. Established sessions of other hubs are
+        never touched.
+        """
+
+        with self._lock:
+            self._released[real_hub_ip] = _Release(
+                deadline=time.monotonic() + grace,
+                bounces_left=max(0, int(max_bounces)),
+                downtime=downtime,
+            )
+        self.bounce(downtime)
+
+    def _note_unrecognised_locked(self, peer_ip: str) -> Optional[float]:
+        """If ``peer_ip`` was released and may bounce again, consume a bounce."""
+
+        rel = self._released.get(peer_ip)
+        if rel is None:
+            return None
+        if time.monotonic() > rel.deadline or rel.bounces_left <= 0:
+            self._released.pop(peer_ip, None)
+            return None
+        if self._bouncing:
+            # A bounce is already in progress; this connection is a
+            # backlog leftover, not evidence that the hub survived it.
+            return None
+        rel.bounces_left -= 1
+        return rel.downtime
 
     def bounce(self, downtime: float = DEFAULT_BOUNCE_DOWNTIME_S) -> None:
         """Close the listening socket for ``downtime`` seconds, then reopen.
@@ -213,6 +286,14 @@ class HubListener:
     def _stop_thread_locked(self) -> None:
         self._stop_event.set()
         if self._sock is not None:
+            # A listening socket closed while another thread sits in
+            # accept() stays open at the kernel level until that call
+            # returns (up to its 1 s timeout), and keeps completing
+            # handshakes into its backlog meanwhile: the port looks open to
+            # a dialling hub although nobody will serve it. Wake the accept
+            # call right now with a loopback connection so the close takes
+            # effect immediately; the loop discards that connection.
+            self._wake_accept()
             try:
                 self._sock.close()
             except Exception:
@@ -221,6 +302,13 @@ class HubListener:
         if self._thr is not None:
             self._thr.join(timeout=1.0)
             self._thr = None
+
+    def _wake_accept(self) -> None:
+        try:
+            with socket.create_connection(("127.0.0.1", self.listen_port), timeout=0.2):
+                pass
+        except OSError:
+            pass
 
     def _open_socket(self) -> socket.socket:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -243,16 +331,39 @@ class HubListener:
             except OSError:
                 break
             peer_ip, peer_port = addr[0], addr[1]
+            if self._stop_event.is_set():
+                # The stop's own wake-up connection, or a handshake the
+                # backlog completed after the close: nobody is served.
+                try:
+                    client.close()
+                except Exception:
+                    pass
+                break
 
             with self._lock:
                 reg = self._by_ip.get(peer_ip)
 
             if reg is None:
-                log.warning(
-                    "[LISTEN] dropping unrecognised hub connection from %s:%d",
-                    peer_ip,
-                    peer_port,
-                )
+                with self._lock:
+                    again = self._note_unrecognised_locked(peer_ip)
+                if again is None:
+                    # A hub that never gives up dials back every ~12 ms;
+                    # one line per source every few seconds is plenty.
+                    now = time.monotonic()
+                    last = self._unrecognised_logged.get(peer_ip, 0.0)
+                    if now - last >= 5.0:
+                        self._unrecognised_logged[peer_ip] = now
+                        log.warning(
+                            "[LISTEN] dropping unrecognised hub connection from %s:%d",
+                            peer_ip,
+                            peer_port,
+                        )
+                else:
+                    log.info(
+                        "[LISTEN] released hub %s dialled back; refusing it again for %.1fs",
+                        peer_ip,
+                        again,
+                    )
                 try:
                     client.shutdown(socket.SHUT_RDWR)
                 except Exception:
@@ -261,6 +372,13 @@ class HubListener:
                     client.close()
                 except Exception:
                     pass
+                if again is not None:
+                    # Not from this thread: bounce() joins the accept loop.
+                    threading.Thread(
+                        target=self.bounce, args=(again,),
+                        name="x1proxy-hub-listen-release", daemon=True,
+                    ).start()
+                    break
                 continue
 
             get_hub_logger(log, reg.proxy_id).info(
@@ -320,6 +438,22 @@ def bounce_hub_listener(downtime: float = DEFAULT_BOUNCE_DOWNTIME_S) -> None:
         listener = _GLOBAL_LISTENER
     if listener is not None:
         listener.bounce(downtime)
+
+
+def release_hub_from_listener(
+    real_hub_ip: str, downtime: float = DEFAULT_RELEASE_DOWNTIME_S
+) -> None:
+    """Release ``real_hub_ip`` from the process-wide listener (no-op without one).
+
+    Bounces once now and again whenever the hub dials back within the
+    grace period (see :meth:`HubListener.release_hub`). Blocks briefly;
+    run it off the event loop.
+    """
+
+    with _GLOBAL_LOCK:
+        listener = _GLOBAL_LISTENER
+    if listener is not None:
+        listener.release_hub(real_hub_ip, downtime=downtime)
 
 
 def reset_hub_listener_for_tests() -> None:

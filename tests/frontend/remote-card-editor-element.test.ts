@@ -1,13 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { nothing } from "lit";
-import { SofabatonRemoteCardEditor } from "../../custom_components/sofabaton_x1s/www/src/remote-card-editor-element";
-import { renderGeneralOptionsSection } from "../../custom_components/sofabaton_x1s/www/src/editor-sections/general-options";
-import { renderStylingOptionsSection } from "../../custom_components/sofabaton_x1s/www/src/editor-sections/styling-options";
-import { renderGroupOrderSection } from "../../custom_components/sofabaton_x1s/www/src/editor-sections/group-order";
-import { REMOTE_CARD_CSS } from "../../custom_components/sofabaton_x1s/www/src/remote-card-styles";
-import type { HassLike } from "../../custom_components/sofabaton_x1s/www/src/remote-card-types";
-import type { RemoteCardConfig } from "../../custom_components/sofabaton_x1s/www/src/remote-card-types";
+import { SofabatonRemoteCardEditor } from "../../remote-card/src/remote-card-editor-element";
+import { renderGeneralOptionsSection } from "../../remote-card/src/editor-sections/general-options";
+import { renderStylingOptionsSection } from "../../remote-card/src/editor-sections/styling-options";
+import { renderGroupOrderSection } from "../../remote-card/src/editor-sections/group-order";
+import { REMOTE_CARD_CSS } from "../../remote-card/src/remote-card-styles";
+import type { HassLike } from "../../remote-card/src/remote-card-types";
+import type { RemoteCardConfig } from "../../remote-card/src/remote-card-types";
 
 // The editor dispatches window events for the preview-activity handshake;
 // give Node a minimal window so setConfig/selection changes can run.

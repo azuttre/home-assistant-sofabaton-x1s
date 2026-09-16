@@ -88,15 +88,16 @@ class SofabatonRemote(RemoteEntity):
             )
 
         activity_id = self._hub.current_activity
-        activities: list[dict[str, Any]] = []
-        for act_id, activity in self._hub.activities.items():
-            activities.append(
-                {
-                    "id": act_id,
-                    "name": activity.get("name"),
-                    "state": "on" if activity_id == act_id else "off",
-                }
-            )
+        # Hub-ordered (record sort byte, then id) so the remote card can
+        # render the list as-is; see SofabatonHub.get_ui_activity_list.
+        activities: list[dict[str, Any]] = [
+            {
+                "id": row["id"],
+                "name": row["name"],
+                "state": "on" if activity_id == row["id"] else "off",
+            }
+            for row in self._hub.get_ui_activity_list()
+        ]
 
         assigned_keys: dict[str, list[int]] = {}
         for ent_id, buttons in self._hub.get_all_cached_buttons().items():

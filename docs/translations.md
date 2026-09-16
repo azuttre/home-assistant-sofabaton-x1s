@@ -133,7 +133,7 @@ incomplete translation is safe to ship and improves incrementally.
 
 ## ◇ How it works
 
-- [`remote-card-strings.ts`](../custom_components/sofabaton_x1s/www/src/remote-card-strings.ts)
+- [`remote-card-strings.ts`](../remote-card/src/remote-card-strings.ts)
   holds the English reference table (`REMOTE_CARD_STRINGS_EN`) and the language
   registry.
 - The card calls `setRemoteCardLanguage(hass.locale.language)` whenever Home
@@ -144,9 +144,9 @@ incomplete translation is safe to ship and improves incrementally.
 
 ## ◇ Contributing a language
 
-1. Create `custom_components/sofabaton_x1s/www/src/remote-card-translations/<lang>.ts`
+1. Create `remote-card/src/remote-card-translations/<lang>.ts`
    that registers a table mirroring the shape of `REMOTE_CARD_STRINGS_EN`.
-   [`nl.ts`](../custom_components/sofabaton_x1s/www/src/remote-card-translations/nl.ts)
+   [`nl.ts`](../remote-card/src/remote-card-translations/nl.ts)
    is a complete example. Complete catalogues must use
    `satisfies RemoteCardStrings`; a deliberately partial table may omit it and
    rely on English fallback:

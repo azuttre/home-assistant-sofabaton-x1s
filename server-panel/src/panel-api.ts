@@ -1,0 +1,408 @@
+// The control panel's API client (docs/internal/server-panel-plan.md,
+// section 4): one place that knows the server's base URL, builds
+// requests, and reads the Problem body every failure carries. Everything
+// is injectable (fetch) so the node tests run it without a browser.
+
+import { SERVER_API_PREFIX } from "../../remote-card/src/backend/server-backend";
+import { serverBaseFromPageUrl } from "../../remote-card/src/remote-web-config";
+
+export interface RunningActivity {
+  activity_id: number;
+  name?: string | null;
+}
+
+export interface HubStatus {
+  hub_connected: boolean;
+  app_connected: boolean;
+  controllable: boolean;
+  mode: "disconnected" | "observe" | "control" | string;
+  hub_version: string | null;
+  proxy_enabled: boolean;
+  running_activity: RunningActivity | null;
+  activities_cached: number;
+  devices_cached: number;
+  catalog_ready: boolean;
+}
+
+export interface HubConfig {
+  host: string;
+  name?: string | null;
+  hub_version?: string | null;
+  mac?: string | null;
+  [key: string]: unknown;
+}
+
+/** One row of `GET /hubs` (openapi `HubView`). */
+export interface HubView {
+  hub_id: string;
+  enabled: boolean;
+  config: HubConfig;
+  added_at: string;
+  last_seen: string | null;
+  status: HubStatus | null;
+}
+
+/** One row of `GET /discovery/hubs` (openapi `SeenHub`). */
+export interface SeenHub {
+  key: string;
+  config: HubConfig;
+  first_seen: string;
+  last_seen: string;
+  present: boolean;
+  registered_hub_id: string | null;
+}
+
+/** The error body every route answers with (RFC 9457 shape). */
+export interface Problem {
+  type: string;
+  title: string;
+  status: number;
+  detail?: string | null;
+  hub_id?: string | null;
+  mode?: string | null;
+}
+
+export interface ServerInfo {
+  version: string;
+  library_version: string;
+  api_version: string;
+  instance_id?: string;
+  callback_listener?: { wanted?: boolean; bound?: boolean; bound_port?: number | null };
+}
+
+export interface RemoteCardDocument {
+  hub_id: string;
+  document: Record<string, unknown> | null;
+  updated_at: string | null;
+}
+
+/** One operation from the OpenAPI document, as the API view lists them. */
+export interface Operation {
+  id: string;
+  method: string;
+  path: string;
+  summary: string;
+  hasBody: boolean;
+}
+
+export interface ApiResponse<T = unknown> {
+  ok: boolean;
+  status: number;
+  statusText: string;
+  headers: [string, string][];
+  text: string;
+  /** The parsed JSON body, or null when the body is empty or not JSON. */
+  body: T | null;
+}
+
+export interface RequestOptions {
+  /** Query string, with or without the leading `?`. */
+  query?: string;
+  headers?: Record<string, string>;
+  /** A JSON body; serialised and sent with `application/json`. */
+  body?: unknown;
+  /** A body typed by hand (the API view); sent as-is. */
+  rawBody?: string;
+}
+
+export interface HubCreate {
+  host: string;
+  name?: string | null;
+  enabled?: boolean;
+  [key: string]: unknown;
+}
+
+// -- the catalog (openapi Device, Command, Activity, Button, Macro, Favorite) --
+
+export interface Device {
+  device_id: number;
+  name: string;
+  brand: string | null;
+  device_class: string | null;
+  device_class_code: number | null;
+  power_state: number | null;
+  idle_behavior: number | null;
+}
+
+export interface Command {
+  command_id: number;
+  label: string;
+}
+
+export interface Activity {
+  activity_id: number;
+  name: string;
+  active: boolean;
+  needs_confirm: boolean;
+}
+
+export interface Button {
+  button_code: number;
+  name: string | null;
+  device_id: number | null;
+  command_id: number | null;
+  long_press_device_id?: number | null;
+  long_press_command_id?: number | null;
+}
+
+export interface Macro {
+  command_id: number;
+  label: string | null;
+}
+
+export interface Favorite {
+  device_id: number;
+  command_id: number;
+  label: string | null;
+}
+
+/** One entity's provenance in `GET /hubs/{id}/snapshot` (the tables ride along untyped). */
+export interface SnapshotEntity {
+  kind: string;
+  device: { device_id: number; name?: string | null; [key: string]: unknown };
+  complete: boolean;
+  editable: boolean;
+  fetched_at: string | null;
+  [key: string]: unknown;
+}
+
+export interface SnapshotDocument {
+  snapshot_id: string;
+  captured_at: string;
+  engine_generation: number;
+  complete: boolean;
+  payload_profile: string;
+  devices: SnapshotEntity[];
+  activities: SnapshotEntity[];
+  [key: string]: unknown;
+}
+
+export interface JobProgress {
+  completed_steps?: number | null;
+  total_steps?: number | null;
+  [key: string]: unknown;
+}
+
+/** `JobView`: what a 202 returns and what `GET /jobs/{id}` reports. */
+export interface JobView {
+  job_id: string;
+  hub_id: string;
+  kind: string;
+  status: "queued" | "running" | "done" | "failed" | "cancelled" | string;
+  cancellable: boolean;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  progress: JobProgress | null;
+  result: Record<string, unknown> | null;
+  error: Problem | null;
+}
+
+export const TERMINAL_JOB_STATES: ReadonlySet<string> = new Set(["done", "failed", "cancelled"]);
+
+/** `POST /snapshot/refresh` body: one entity, or neither for the whole hub. */
+export type RefreshScope = { device_id: number } | { activity_id: number } | Record<string, never>;
+
+/** The base the panel derives from its own URL: the page lives at `<base>/ui/`. */
+export function serverBaseFromPanelUrl(href: string): string {
+  return serverBaseFromPageUrl(href, "/ui/");
+}
+
+/** A Problem body as one line (`type: detail`); anything else by status. */
+export function problemText(response: ApiResponse): string {
+  const body = response.body as Partial<Problem> | null;
+  if (!body || typeof body !== "object") return `HTTP ${response.status}`;
+  const head = body.type || body.title;
+  const parts = [head, body.detail].filter((part): part is string => Boolean(part));
+  return parts.join(": ") || `HTTP ${response.status}`;
+}
+
+type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
+
+export class PanelApi {
+  readonly baseUrl: string;
+  readonly apiRoot: string;
+  private readonly _fetch: FetchLike;
+
+  constructor(baseUrl: string, fetchImpl?: FetchLike) {
+    this.baseUrl = baseUrl.replace(/\/+$/, "");
+    this.apiRoot = `${this.baseUrl}${SERVER_API_PREFIX}`;
+    this._fetch = fetchImpl ?? ((input, init) => fetch(input, init));
+  }
+
+  /** `path` is relative to the API root, with or without a leading slash. */
+  url(path: string, query?: string): string {
+    const rel = path.replace(/^\/+/, "");
+    let out = `${this.apiRoot}/${rel}`;
+    const q = (query ?? "").trim();
+    if (q) out += q.startsWith("?") ? q : `?${q}`;
+    return out;
+  }
+
+  /** The `/ui/remote/` page for a hub, next to the API root. */
+  remoteUrl(hubId: string | null): string {
+    return `${this.baseUrl}/ui/remote/${hubId ? `?hub=${encodeURIComponent(hubId)}` : ""}`;
+  }
+
+  async request<T = unknown>(method: string, path: string, options: RequestOptions = {}): Promise<ApiResponse<T>> {
+    const headers: Record<string, string> = { ...(options.headers ?? {}) };
+    const init: RequestInit = { method, headers };
+    if (options.rawBody !== undefined) {
+      if (options.rawBody !== "") {
+        if (!Object.keys(headers).some((k) => k.toLowerCase() === "content-type")) headers["Content-Type"] = "application/json";
+        init.body = options.rawBody;
+      }
+    } else if (options.body !== undefined) {
+      headers["Content-Type"] = "application/json";
+      init.body = JSON.stringify(options.body);
+    }
+    const response = await this._fetch(this.url(path, options.query), init);
+    const text = await response.text();
+    let body: T | null = null;
+    if (text) {
+      try {
+        body = JSON.parse(text) as T;
+      } catch {
+        body = null;
+      }
+    }
+    const responseHeaders: [string, string][] = [];
+    response.headers.forEach((value, key) => responseHeaders.push([key, value]));
+    return { ok: response.ok, status: response.status, statusText: response.statusText, headers: responseHeaders, text, body };
+  }
+
+  // -- server ----------------------------------------------------------------
+
+  serverInfo(): Promise<ApiResponse<ServerInfo>> {
+    return this.request<ServerInfo>("GET", "server");
+  }
+
+  /** The operations from `openapi.json`, sorted by path then method. */
+  async operations(): Promise<Operation[]> {
+    const response = await this.request<{ paths?: Record<string, Record<string, { operationId?: string; summary?: string; requestBody?: unknown }>> }>(
+      "GET",
+      "openapi.json",
+    );
+    const paths = response.body?.paths ?? {};
+    // The document's paths carry the API prefix but never a root path
+    // (that lives in its `servers` entry), so strip the prefix alone.
+    const out: Operation[] = [];
+    for (const [path, methods] of Object.entries(paths)) {
+      for (const [method, op] of Object.entries(methods)) {
+        const rel = path.startsWith(SERVER_API_PREFIX) ? path.slice(SERVER_API_PREFIX.length) : path;
+        out.push({ id: op.operationId ?? "", method: method.toUpperCase(), path: rel, summary: op.summary ?? "", hasBody: Boolean(op.requestBody) });
+      }
+    }
+    out.sort((a, b) => a.path.localeCompare(b.path) || a.method.localeCompare(b.method));
+    return out;
+  }
+
+  // -- hubs ------------------------------------------------------------------
+
+  listHubs(): Promise<ApiResponse<HubView[]>> {
+    return this.request<HubView[]>("GET", "hubs");
+  }
+
+  addHub(body: HubCreate): Promise<ApiResponse<HubView>> {
+    return this.request<HubView>("POST", "hubs", { body });
+  }
+
+  enableHub(hubId: string): Promise<ApiResponse<HubView>> {
+    return this.request<HubView>("POST", `hubs/${encodeURIComponent(hubId)}/enable`);
+  }
+
+  disableHub(hubId: string): Promise<ApiResponse<HubView>> {
+    return this.request<HubView>("POST", `hubs/${encodeURIComponent(hubId)}/disable`);
+  }
+
+  removeHub(hubId: string): Promise<ApiResponse<never>> {
+    return this.request<never>("DELETE", `hubs/${encodeURIComponent(hubId)}`);
+  }
+
+  // -- discovery ---------------------------------------------------------------
+
+  discoveredHubs(): Promise<ApiResponse<SeenHub[]>> {
+    return this.request<SeenHub[]>("GET", "discovery/hubs");
+  }
+
+  scan(timeoutSeconds = 5): Promise<ApiResponse<SeenHub[]>> {
+    return this.request<SeenHub[]>("POST", "discovery/scan", { body: { timeout: timeoutSeconds } });
+  }
+
+  // -- the web remote's document ---------------------------------------------------
+
+  remoteCardDocument(hubId: string): Promise<ApiResponse<RemoteCardDocument>> {
+    return this.request<RemoteCardDocument>("GET", `hubs/${encodeURIComponent(hubId)}/ui/remote-card`);
+  }
+
+  putRemoteCardDocument(hubId: string, document: Record<string, unknown>): Promise<ApiResponse<RemoteCardDocument>> {
+    return this.request<RemoteCardDocument>("PUT", `hubs/${encodeURIComponent(hubId)}/ui/remote-card`, { body: { document } });
+  }
+
+  deleteRemoteCardDocument(hubId: string): Promise<ApiResponse<never>> {
+    return this.request<never>("DELETE", `hubs/${encodeURIComponent(hubId)}/ui/remote-card`);
+  }
+
+  // -- the catalog -----------------------------------------------------------------
+
+  private _hub(hubId: string): string {
+    return `hubs/${encodeURIComponent(hubId)}`;
+  }
+
+  snapshot(hubId: string): Promise<ApiResponse<SnapshotDocument>> {
+    return this.request<SnapshotDocument>("GET", `${this._hub(hubId)}/snapshot`);
+  }
+
+  devices(hubId: string): Promise<ApiResponse<Device[]>> {
+    return this.request<Device[]>("GET", `${this._hub(hubId)}/devices`);
+  }
+
+  activities(hubId: string): Promise<ApiResponse<Activity[]>> {
+    return this.request<Activity[]>("GET", `${this._hub(hubId)}/activities`);
+  }
+
+  deviceCommands(hubId: string, deviceId: number): Promise<ApiResponse<Command[]>> {
+    return this.request<Command[]>("GET", `${this._hub(hubId)}/devices/${deviceId}/commands`);
+  }
+
+  entityButtons(hubId: string, entityId: number): Promise<ApiResponse<Button[]>> {
+    return this.request<Button[]>("GET", `${this._hub(hubId)}/entities/${entityId}/buttons`);
+  }
+
+  activityMacros(hubId: string, activityId: number): Promise<ApiResponse<Macro[]>> {
+    return this.request<Macro[]>("GET", `${this._hub(hubId)}/activities/${activityId}/macros`);
+  }
+
+  activityFavorites(hubId: string, activityId: number): Promise<ApiResponse<Favorite[]>> {
+    return this.request<Favorite[]>("GET", `${this._hub(hubId)}/activities/${activityId}/favorites`);
+  }
+
+  /** Start a refresh job; the 202 body is the job to follow. */
+  refreshSnapshot(hubId: string, scope: RefreshScope = {}): Promise<ApiResponse<JobView>> {
+    return this.request<JobView>("POST", `${this._hub(hubId)}/snapshot/refresh`, { body: scope });
+  }
+
+  job(hubId: string, jobId: string): Promise<ApiResponse<JobView>> {
+    return this.request<JobView>("GET", `${this._hub(hubId)}/jobs/${encodeURIComponent(jobId)}`);
+  }
+
+  /**
+   * Poll a job until it reaches a terminal state (or the poll count runs
+   * out); `onUpdate` sees every answer. Resolves with the last view.
+   */
+  async followJob(hubId: string, jobId: string, options: { intervalMs?: number; maxPolls?: number; onUpdate?: (job: JobView) => void; sleep?: (ms: number) => Promise<void> } = {}): Promise<JobView | null> {
+    const interval = options.intervalMs ?? 500;
+    const maxPolls = options.maxPolls ?? 600;
+    const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+    let last: JobView | null = null;
+    for (let i = 0; i < maxPolls; i++) {
+      const response = await this.job(hubId, jobId);
+      if (!response.ok || !response.body) return last;
+      last = response.body;
+      options.onUpdate?.(last);
+      if (TERMINAL_JOB_STATES.has(last.status)) return last;
+      await sleep(interval);
+    }
+    return last;
+  }
+}

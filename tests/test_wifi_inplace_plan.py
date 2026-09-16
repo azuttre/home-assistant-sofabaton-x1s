@@ -80,6 +80,25 @@ def test_command_rename_label_only():
     assert plan.steps[0].payload == {"device_id": DEV, "command_id": 1, "name": "Renamed"}
 
 
+def test_command_rename_skipped_when_labels_match_through_label_key():
+    """A desired label that only differs from the live one past the hub's
+    slot boundary is the row we already wrote, not a rename."""
+    baseline = snapshot(slots={1: slot(1, "PC Show Audio Device Long Pres"), 2: slot(2, "Cmd 2"), 3: slot(3, "Cmd 3")})
+    desired = snapshot(slots={1: slot(1, "PC Show Audio Device Long Press"), 2: slot(2, "Cmd 2"), 3: slot(3, "Cmd 3")})
+    # verbatim comparison still sees a rename (standalone library default)
+    assert kinds(build_wifi_inplace_plan(baseline, desired)) == ["command_rename"]
+    plan = build_wifi_inplace_plan(baseline, desired, label_key=lambda text: text[:30])
+    assert plan.steps == ()
+
+
+def test_command_rename_through_label_key_keeps_full_desired_name():
+    baseline = snapshot(slots={1: slot(1, "Old"), 2: slot(2, "Cmd 2"), 3: slot(3, "Cmd 3")})
+    desired = snapshot(slots={1: slot(1, "A very long replacement label that exceeds thirty"), 2: slot(2, "Cmd 2"), 3: slot(3, "Cmd 3")})
+    plan = build_wifi_inplace_plan(baseline, desired, label_key=lambda text: text[:30])
+    assert kinds(plan) == ["command_rename"]
+    assert plan.steps[0].payload["name"] == "A very long replacement label that exceeds thirty"
+
+
 def test_payload_key_change_emits_command_payload():
     desired = snapshot(slots={1: slot(1, "Cmd 1", "other"), 2: slot(2, "Cmd 2"), 3: slot(3, "Cmd 3")})
     plan = build_wifi_inplace_plan(snapshot(), desired)

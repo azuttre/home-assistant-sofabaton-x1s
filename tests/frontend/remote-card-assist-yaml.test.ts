@@ -4,7 +4,7 @@ import {
   automationAssistButtonYaml,
   automationAssistNotificationBody,
   automationAssistRemoteYaml,
-} from "../../custom_components/sofabaton_x1s/www/src/remote-card-assist-yaml";
+} from "../../remote-card/src/remote-card-assist-yaml";
 
 const ENTITY = "remote.living_room";
 

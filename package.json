@@ -5,7 +5,10 @@
   "scripts": {
     "build:tools-card": "node ./scripts/build-tools-card.mjs",
     "build:remote-card": "node ./scripts/build-remote-card.mjs",
-    "build:frontend": "npm run build:tools-card && npm run build:remote-card",
+    "build:remote-web": "node ./scripts/build-remote-web.mjs",
+    "build:remote-web-assets": "node ./scripts/build-remote-web-assets.mjs",
+    "build:server-panel": "node ./scripts/build-server-panel.mjs",
+    "build:frontend": "npm run build:tools-card && npm run build:remote-card && npm run build:remote-web && npm run build:server-panel",
     "build:tools-card-harness-site": "node ./scripts/build-tools-card-harness-site.mjs",
     "build:readme-remote-shot": "node ./scripts/build-readme-remote-shot.mjs",
     "build:readme-banner": "npm run build:readme-remote-shot && node ./scripts/build-readme-banner.mjs",
@@ -16,10 +19,13 @@
     "test:playwright:tools": "npm run build:tools-card && playwright test tests/playwright/tools-card-editor.spec.js",
     "test:playwright:update": "playwright test --update-snapshots",
     "test:playwright:remote": "playwright test tests/playwright/remote-card.spec.js tests/playwright/remote-card-editor.spec.js",
+    "test:playwright:web-remote": "npm run build:remote-web && playwright test tests/playwright/web-remote.spec.js",
+    "test:playwright:server-panel": "npm run build:server-panel && playwright test tests/playwright/server-panel.spec.js",
     "fetch:ha-themes": "node ./scripts/fetch-ha-themes.mjs",
     "audit:contrast": "node ./scripts/audit-contrast.mjs"
   },
   "devDependencies": {
+    "@mdi/js": "^7.4.47",
     "@playwright/test": "^1.59.1",
     "@types/node": "^20.19.43",
     "esbuild": "^0.27.0",

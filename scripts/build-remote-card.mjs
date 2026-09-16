@@ -1,7 +1,7 @@
 import { build } from "esbuild";
 
 await build({
-  entryPoints: ["custom_components/sofabaton_x1s/www/src/remote-card.ts"],
+  entryPoints: ["remote-card/src/remote-card.ts"],
   bundle: true,
   format: "esm",
   platform: "browser",

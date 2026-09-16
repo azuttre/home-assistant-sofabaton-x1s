@@ -2,26 +2,26 @@ from pathlib import Path
 
 
 def _remote_card_ts() -> str:
-    return Path("custom_components/sofabaton_x1s/www/src/remote-card.ts").read_text(
+    return Path("remote-card/src/remote-card.ts").read_text(
         encoding="utf-8",
     )
 
 
 def _remote_card_hub_ts() -> str:
-    return Path("custom_components/sofabaton_x1s/www/src/remote-card-hub.ts").read_text(
+    return Path("remote-card/src/remote-card-hub.ts").read_text(
         encoding="utf-8",
     )
 
 
 def _remote_card_state_ts() -> str:
-    return Path("custom_components/sofabaton_x1s/www/src/remote-card-state.ts").read_text(
+    return Path("remote-card/src/remote-card-state.ts").read_text(
         encoding="utf-8",
     )
 
 
 def _remote_card_store_ts() -> str:
     return Path(
-        "custom_components/sofabaton_x1s/www/src/state/remote-card-store.ts"
+        "remote-card/src/state/remote-card-store.ts"
     ).read_text(encoding="utf-8")
 
 

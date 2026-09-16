@@ -37,7 +37,8 @@ var TOOLS_CARD_STRINGS_FR = {
   },
   docs: {
     wifiCommandsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/wifi_commands.md",
-    backupUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/backup.md"
+    backupUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/backup.md",
+    commandPayloadsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/command_payloads.md"
   },
   tabs: { cache: "Hub", wifiCommands: "Automatisation", backup: "Sauvegarde", settings: "Param\xE8tres", logs: "Journaux" },
   tabDocs: { wifi_commands: "Documentation de l\u2019automatisation", backup: "Documentation des sauvegardes" },
@@ -69,7 +70,7 @@ var TOOLS_CARD_STRINGS_FR = {
     backupUnavailable: "Sauvegarde indisponible",
     automationBlockedByProxy: "L\u2019automatisation ne peut pas \xEAtre utilis\xE9e lorsque l\u2019application Sofabaton est connect\xE9e au hub par le proxy.",
     backupBlockedByProxy: "La sauvegarde ne peut pas \xEAtre utilis\xE9e lorsque l\u2019application Sofabaton est connect\xE9e au hub par le proxy.",
-    blockedByFirmware: (installed, required) => `Ce hub utilise la version ${installed} du firmware. La version ${required} ou ult\xE9rieure est requise pour les fonctions du panneau de contr\xF4le qui modifient la configuration du hub. Mettez \xE0 jour le hub via Bluetooth \xE0 l\u2019aide de l\u2019application Sofabaton. Cette fonction sera de nouveau disponible automatiquement lorsque le hub aura signal\xE9 la version mise \xE0 jour du firmware.`
+    blockedByFirmware: (installed, required) => `Ce hub utilise la version ${installed} du firmware. La version ${required} ou ult\xE9rieure est requise pour les fonctions du panneau de contr\xF4le qui modifient la configuration du hub. Mettez \xE0 jour le hub \xE0 l\u2019aide de l\u2019application Sofabaton. Cette fonction sera de nouveau disponible automatiquement lorsque le hub aura signal\xE9 la version mise \xE0 jour du firmware.`
   },
   buttonNames: {
     151: "C",
@@ -300,7 +301,7 @@ var TOOLS_CARD_STRINGS_FR = {
     appConnectedTitle: "L\u2019application Sofabaton est connect\xE9e",
     appConnectedBody: "Fermez l\u2019application Sofabaton pour modifier la configuration du hub.",
     firmwareUnsupportedTitle: "Mise \xE0 jour du firmware du hub requise",
-    firmwareUnsupportedBody: (installed, required) => `Ce hub utilise la version ${installed} du firmware. La version ${required} ou ult\xE9rieure est n\xE9cessaire pour modifier la configuration du hub en toute s\xE9curit\xE9. La modification est d\xE9sactiv\xE9e afin de prot\xE9ger votre configuration. Mettez \xE0 jour le hub via Bluetooth \xE0 l\u2019aide de l\u2019application Sofabaton. La modification de la configuration sera automatiquement r\xE9activ\xE9e lorsque le hub aura signal\xE9 la version mise \xE0 jour du firmware.`,
+    firmwareUnsupportedBody: (installed, required) => `Ce hub utilise la version ${installed} du firmware. La version ${required} ou ult\xE9rieure est n\xE9cessaire pour modifier la configuration du hub en toute s\xE9curit\xE9. La modification est d\xE9sactiv\xE9e afin de prot\xE9ger votre configuration. Mettez \xE0 jour le hub \xE0 l\u2019aide de l\u2019application Sofabaton. La modification de la configuration sera automatiquement r\xE9activ\xE9e lorsque le hub aura signal\xE9 la version mise \xE0 jour du firmware.`,
     operationRunningTitle: "Une autre op\xE9ration est en cours",
     operationRunningBody: "Attendez la fin de la sauvegarde, de la restauration ou de la synchronisation en cours, puis r\xE9essayez.",
     captureTitle: "Lecture de votre hub",
@@ -646,6 +647,7 @@ var TOOLS_CARD_STRINGS_FR = {
     verifyPayloadLive: "V\xE9rifiez les donn\xE9es utiles modifi\xE9es avant de les enregistrer\xA0: Tester lit les octets actuels sur le hub sans les enregistrer. Enregistrer les inclut dans la prochaine synchronisation de l\u2019appareil.",
     verifyPayloadBackup: "V\xE9rifiez les donn\xE9es utiles modifi\xE9es avant de leur faire confiance\xA0: Tester lit les octets sur le hub sans les enregistrer. Ne les enregistrez ici qu\u2019une fois leur comportement confirm\xE9.",
     test: "Tester",
+    payloadDocsLink: "Documentation des donn\xE9es utiles",
     sendingToHub: "Envoi au hub\u2026",
     sentToHub: "Envoy\xE9 au hub pour une lecture unique.",
     testFailed: "\xC9chec du test.",
@@ -774,7 +776,7 @@ var TOOLS_CARD_STRINGS_FR = {
     firmwareUpdateRequired: "Mise \xE0 jour du firmware requise",
     firmwareUpdateRecommended: "Mise \xE0 jour du firmware recommand\xE9e",
     firmwareUpdateTooltip: (recommended, required, unsupported) => {
-      const update = "Mettez \xE0 jour le hub via Bluetooth \xE0 l\u2019aide de l\u2019application Sofabaton.";
+      const update = "Mettez \xE0 jour le hub \xE0 l\u2019aide de l\u2019application Sofabaton.";
       if (unsupported) {
         const recommendation = String(recommended) === String(required) ? "" : ` La version ${recommended} ou ult\xE9rieure du firmware est recommand\xE9e, car elle contient des correctifs pour des probl\xE8mes connus.`;
         return `La version ${required} ou ult\xE9rieure du firmware est n\xE9cessaire pour modifier la configuration depuis le panneau de contr\xF4le.${recommendation} ${update}`;

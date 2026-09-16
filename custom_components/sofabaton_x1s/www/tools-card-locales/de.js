@@ -37,7 +37,8 @@ var TOOLS_CARD_STRINGS_DE = {
   },
   docs: {
     wifiCommandsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/wifi_commands.md",
-    backupUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/backup.md"
+    backupUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/backup.md",
+    commandPayloadsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/command_payloads.md"
   },
   tabs: { cache: "Hub", wifiCommands: "Automatisierung", backup: "Backup", settings: "Einstellungen", logs: "Protokolle" },
   tabDocs: { wifi_commands: "Dokumentation zur Automatisierung", backup: "Backup-Dokumentation" },
@@ -69,7 +70,7 @@ var TOOLS_CARD_STRINGS_DE = {
     backupUnavailable: "Backup nicht verf\xFCgbar",
     automationBlockedByProxy: "Die Automatisierung kann nicht verwendet werden, w\xE4hrend die Sofabaton-App \xFCber den Proxy mit dem Hub verbunden ist.",
     backupBlockedByProxy: "Die Backup-Funktion kann nicht verwendet werden, w\xE4hrend die Sofabaton-App \xFCber den Proxy mit dem Hub verbunden ist.",
-    blockedByFirmware: (installed, required) => `Auf diesem Hub ist Firmware-Version ${installed} installiert. Version ${required} oder neuer ist f\xFCr Funktionen der Sofabaton-Steuerzentrale erforderlich, die die Hub-Konfiguration \xE4ndern. Aktualisiere den Hub \xFCber Bluetooth mit der Sofabaton-App. Diese Funktion wird automatisch wieder verf\xFCgbar, sobald der Hub die aktualisierte Firmware-Version meldet.`
+    blockedByFirmware: (installed, required) => `Auf diesem Hub ist Firmware-Version ${installed} installiert. Version ${required} oder neuer ist f\xFCr Funktionen der Sofabaton-Steuerzentrale erforderlich, die die Hub-Konfiguration \xE4ndern. Aktualisiere den Hub mit der Sofabaton-App. Diese Funktion wird automatisch wieder verf\xFCgbar, sobald der Hub die aktualisierte Firmware-Version meldet.`
   },
   buttonNames: {
     151: "C",
@@ -300,7 +301,7 @@ var TOOLS_CARD_STRINGS_DE = {
     appConnectedTitle: "Die Sofabaton-App ist verbunden",
     appConnectedBody: "Schlie\xDFe die Sofabaton-App, um die Hub-Konfiguration zu bearbeiten.",
     firmwareUnsupportedTitle: "Update der Hub-Firmware erforderlich",
-    firmwareUnsupportedBody: (installed, required) => `Auf diesem Hub ist Firmware-Version ${installed} installiert. Version ${required} oder neuer ist erforderlich, um die Hub-Konfiguration sicher zu bearbeiten. Die Bearbeitung ist zum Schutz deiner Konfiguration deaktiviert. Aktualisiere den Hub \xFCber Bluetooth mit der Sofabaton-App. Die Bearbeitung ist automatisch wieder m\xF6glich, sobald der Hub die aktualisierte Firmware-Version meldet.`,
+    firmwareUnsupportedBody: (installed, required) => `Auf diesem Hub ist Firmware-Version ${installed} installiert. Version ${required} oder neuer ist erforderlich, um die Hub-Konfiguration sicher zu bearbeiten. Die Bearbeitung ist zum Schutz deiner Konfiguration deaktiviert. Aktualisiere den Hub mit der Sofabaton-App. Die Bearbeitung ist automatisch wieder m\xF6glich, sobald der Hub die aktualisierte Firmware-Version meldet.`,
     operationRunningTitle: "Ein anderer Vorgang wird ausgef\xFChrt",
     operationRunningBody: "Warte, bis das aktuelle Backup, die Wiederherstellung oder die Synchronisierung abgeschlossen ist, und versuche es dann erneut.",
     captureTitle: "Hub wird ausgelesen",
@@ -646,6 +647,7 @@ var TOOLS_CARD_STRINGS_DE = {
     verifyPayloadLive: "Pr\xFCfe ge\xE4nderte Nutzdaten vor dem Speichern: Test spielt die aktuellen Bytes auf dem Hub ab, ohne zu speichern. Speichern \xFCbernimmt die Nutzdaten in die n\xE4chste Synchronisierung des Ger\xE4ts.",
     verifyPayloadBackup: "Pr\xFCfe ge\xE4nderte Nutzdaten, bevor du ihnen vertraust: Test spielt die Bytes auf dem Hub ab, ohne zu speichern. Speichere hier erst, wenn die Nutzdaten wie erwartet funktionieren.",
     test: "Testen",
+    payloadDocsLink: "Dokumentation zu Nutzdaten",
     sendingToHub: "Wird an den Hub gesendet\u2026",
     sentToHub: "Zur einmaligen Wiedergabe an den Hub gesendet.",
     testFailed: "Test fehlgeschlagen.",
@@ -774,7 +776,7 @@ var TOOLS_CARD_STRINGS_DE = {
     firmwareUpdateRequired: "Firmware-Update erforderlich",
     firmwareUpdateRecommended: "Firmware-Update empfohlen",
     firmwareUpdateTooltip: (recommended, required, unsupported) => {
-      const update = "Aktualisiere den Hub \xFCber Bluetooth mit der Sofabaton-App.";
+      const update = "Aktualisiere den Hub mit der Sofabaton-App.";
       if (unsupported) {
         const recommendation = String(recommended) === String(required) ? "" : ` Firmware-Version ${recommended} oder neuer wird empfohlen, da sie Korrekturen f\xFCr bekannte Probleme enth\xE4lt.`;
         return `Firmware-Version ${required} oder neuer ist f\xFCr Konfigurations\xE4nderungen \xFCber die Sofabaton-Steuerzentrale erforderlich.${recommendation} ${update}`;

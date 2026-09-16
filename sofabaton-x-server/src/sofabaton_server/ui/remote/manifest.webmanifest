@@ -1,0 +1,14 @@
+{
+  "name": "Sofabaton web remote",
+  "short_name": "Sofabaton",
+  "description": "The Sofabaton remote card served by sofabaton-x-server.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#fafafa",
+  "theme_color": "#009ac7",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

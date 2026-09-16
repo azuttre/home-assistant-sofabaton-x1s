@@ -247,7 +247,7 @@ class ActivityOpsMixin:
         self.state.ip_devices.pop(dev_lo, None)
         self.state.ip_buttons.pop(dev_lo, None)
         self.state.device_input_records.pop(dev_lo, None)
-        self.state.detail_fetched_at["device"].pop(dev_lo, None)
+        self._forget_detail("device", dev_lo)
         # Full clear: the bare form leaves the device's macro records,
         # button details, and command metadata orphaned under a dead id —
         # nothing ever overwrites entries keyed by an id that no longer
@@ -329,6 +329,12 @@ class ActivityOpsMixin:
             self._log.info("[ACT_REORDER] ignored: proxy client is connected")
             return None
 
+        # W2 precondition: the order must be exhaustive over the hub's
+        # activities, which only a committed catalog read proves.
+        if not self._activities_catalog_ready and not self._request_activities_and_wait():
+            self._log.warning("[ACT_REORDER] activity catalog unavailable; not writing")
+            return None
+
         known = {
             act_id & 0xFF
             for act_id, details in self.state.entities("activity").items()
@@ -383,6 +389,22 @@ class ActivityOpsMixin:
 
         return {"status": "success", "ordered_ids": list(ordered)}
 
+    def _device_sort_markers(self) -> dict[int, int] | None:
+        """``{device_id: record kind byte}`` for the sort write, or None when
+        the catalog was never read or any device lacks its raw record."""
+
+        if not self._devices_catalog_ready:
+            return None
+        known: dict[int, int] = {}
+        for dev_id, details in self.state.entities("device").items():
+            if not isinstance(details, dict):
+                continue
+            raw_body = details.get("raw_body")
+            if not isinstance(raw_body, (bytes, bytearray)) or len(raw_body) <= 3:
+                return None
+            known[int(dev_id) & 0xFF] = int(raw_body[3])
+        return known
+
     def _request_devices_and_wait(self, *, timeout: float = 15.0) -> bool:
         """Kick a catalog refresh and block until the devices burst lands."""
 
@@ -416,16 +438,20 @@ class ActivityOpsMixin:
             self._log.info("[DEV_REORDER] ignored: proxy client is connected")
             return None
 
-        known: dict[int, int] = {}
-        for dev_id, details in self.state.entities("device").items():
-            if not isinstance(details, dict):
-                continue
-            dev_lo = int(dev_id) & 0xFF
-            marker = 0x00
-            raw_body = details.get("raw_body")
-            if isinstance(raw_body, (bytes, bytearray)) and len(raw_body) > 3:
-                marker = int(raw_body[3])
-            known[dev_lo] = marker
+        # W2 precondition: every row carries the device record's kind byte
+        # (record body[3]). A device known only from an in-place patch (a
+        # fresh create) has no record yet, and a catalog never read has no
+        # devices at all; either way read the catalog before writing,
+        # and never write a guessed marker.
+        known = self._device_sort_markers()
+        if known is None:
+            if not self._request_devices_and_wait():
+                self._log.warning("[DEV_REORDER] device catalog unavailable; not writing")
+                return None
+            known = self._device_sort_markers()
+            if known is None:
+                self._log.warning("[DEV_REORDER] a device has no cached record; not writing")
+                return None
         ordered: list[int] = []
         for raw_id in ordered_ids:
             dev_lo = int(raw_id) & 0xFF

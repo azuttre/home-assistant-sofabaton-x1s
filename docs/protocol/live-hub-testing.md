@@ -1890,3 +1890,396 @@ Findings:
   live HA (covered by the Playwright harness test instead), and X2
   (MQTT class) — the X2 was not part of this program.
 
+
+## ◇ Validated: sofabaton-x facade, phase 1 acceptance (X1 + X1S, 2026-09-09)
+
+Bench-validated the library facade built under
+docs/internal/sofabaton-x-phase1-facade-plan.md on both hub lines with
+`scripts/hub-bench/bench_190_facade.py` (HA entries disabled per run,
+re-enabled after). The bench is the plan's "server sketch": it uses
+root exports only, never `.sync`, and walks config record → proxy →
+connect-time initial sync → `status()` / `hub_info()` → the six typed
+reads → the event stream while the first activity is started and
+stopped → device power state through a forced catalog refresh → a
+read of a non-existent device for the typed error shape. Both runs
+ended with `problems: none`; reports in `scripts/hub-bench/out/
+bench_190_x1s.json` and `bench_190_x1.json`, logs under
+`out/logs/bench_190_*`.
+
+| measure | X1S | X1 |
+| --- | --- | --- |
+| hub connected after start | 0.07 s | 0.18 s |
+| initial sync (banner + devices + activities) ready | 1.64 s | 1.75 s |
+| catalog | 6 activities, 11 devices | 4 activities, 12 devices |
+| first device detail (commands + buttons) | 0.29 s | 0.65 s |
+| first activity detail (macros + favorites + buttons) | 0.47 s | 1.30 s |
+| forced devices refresh through `clear_devices_catalog` + `devices()` | 0.89 s | 1.02 s |
+| events over the run, dropped | 7, 0 | 8, 0 |
+
+Findings:
+
+- **The review findings of 2026-09-09 were real and are fixed.** All
+  five reproduced against the real engine in unit tests before the
+  bench ran (`tests/lib/test_aio_real_engine.py`): a burst ending on
+  the engine's idle timeout no longer counts as a reply (the getter's
+  ready flag and the catalog commit flag are re-checked, with a short
+  grace window because an empty-keymap ACK finishes the burst a few
+  instructions before it marks the entity); a cancelled fetch releases
+  its in-flight key; `power_state` is projected from the engine's
+  unstripped state rows instead of the export view; a drop-and-
+  reconnect that lands before the loop runs bumps a session
+  generation and resyncs; `status()` reads counts from state and sends
+  nothing.
+- **The bench found a sixth, a shutdown deadlock.** The first X1S run
+  hung on exit: `TransportBridge.stop()` notifies hub state while
+  holding its socket lock, and the facade's event listener read
+  `can_issue_commands()` on that engine thread, which takes the same
+  lock. Rule now enforced in the facade: engine-thread callbacks never
+  touch the transport; the mode is derived on the loop after the
+  callback returns (regression test on the real engine). Every consumer
+  of `events()` would have hung the same way on `stop()`.
+- **Initial sync behaves as designed on both lines.** Banner, devices
+  and activities land in under two seconds from connect, the catalog is
+  served from cache afterwards (catalog read 1 ms), and `status()`
+  reported the X1's already-running activity (103, "play xbox", left
+  on by the HA session) before any read.
+- **Power state is live and per device.** After starting the X1S
+  "Xbox" activity the Xbox Series X read 1, after stopping it 0, with
+  every other device unchanged; on the X1 the bytes did not change
+  across the "Watch Apple TV" start/stop, which is the hub's own
+  bookkeeping (its power-off macro left the devices' bytes at 1), not
+  a projection error. The bench reads it through the public
+  `clear_devices_catalog` delegate plus `devices()`; a facade-level
+  refresh read is a phase 3 candidate.
+- **Typed errors on the wire.** A commands read for device 0xEE ends
+  with the hub never answering; the facade raises `FetchTimeoutError`
+  ("ended without a complete reply") after the burst's idle end rather
+  than returning an empty list.
+- **Events.** Exactly one `activity_changed` per start and per stop on
+  both lines, plus `hub_state`, `status_changed` and `catalog_ready`
+  at connect; nothing dropped.
+
+## ◇ Validated: sofabaton-x-server live program, S6 (X1 + X1S, 2026-09-09)
+
+`scripts/hub-bench/bench_200_server.py` drives a real server process
+(docs/internal/sofabaton-x-server-plan.md) over HTTP and WebSocket with
+both hubs in one instance, HA entries disabled for the run and
+re-enabled after. Four runs (`out/bench_200_run1..4.json`, server logs
+under `out/logs/bench_200_run*-server.log`); run 4 is the reference.
+Everything passed except the one check that a Windows host cannot make
+(below).
+
+| step | X1S (`e26a44861b45`) | X1 (`cb383539684b`) |
+| --- | --- | --- |
+| seen by the server's discovery after release from HA | 3.4 s after start | 3.4 s |
+| registered | from the discovery table's `config` | by host only, re-keyed to MAC |
+| initial sync (`catalog_ready`) | 6.4 s after start, both | |
+| catalog | 6 activities, 11 devices | 4 activities, 12 devices |
+| detail reads (commands, buttons, macros, favorites) + a 404 for device 238 | 0.66 s | 1.76 s |
+| start / stop the first activity | accepted, `activity_changed` x2, running tracked, power refreshed | same |
+| disable X1S while X1 stays | X1: mode control, no link event on its stream | |
+| read on a disabled hub | 409 `hub_disabled` | |
+| enable X1S | ready again | |
+| remove X1 | 204 | |
+| WebSocket | 21 messages, 0 dropped | |
+
+Findings:
+
+- **The release did not make the hub give up, and the reason is the
+  host, not the library.** After `stop(release_hub=True)` the shared
+  listener closed its port for the window and reopened, and each time
+  the released hub dialled back within half a second of the reopen,
+  got accepted-and-dropped as unrecognised, and carried on. Three
+  library fixes came out of chasing it before the real cause showed:
+  (1) a listening socket closed while another thread sits in `accept()`
+  stays open at the kernel level until that call returns and keeps
+  completing handshakes into its backlog, so the stop now wakes the
+  accept thread with a loopback connection and the loop discards
+  connections after the stop flag; (2) the release is a feedback loop
+  (`HubListener.release_hub`): a released hub that dials back triggers
+  another bounce, bounded and time-limited, and a backlog leftover
+  arriving during a bounce does not spend one; (3) the release window
+  is 4 s (`DEFAULT_RELEASE_DOWNTIME_S`) because both hubs dial back on
+  a fixed 3.0 s timer (first attempt ~2.7 s after the drop) and a 2.5 s
+  window closed and reopened between two attempts every time. The
+  integration's plain `bounce_hub_listener` keeps 2.5 s. With all three
+  in place the log shows eight clean bounce cycles and the hub still
+  returning 0.5 s after every reopen: it never received a refusal.
+  **This Windows host answers no SYN to a closed port** (firewall
+  stealth mode, all profiles; verified with a loopback probe: every
+  closed port times out instead of refusing), and a refused connection
+  is the only signal the hub gives up on. The check is therefore
+  unverifiable here; `bench_200` records it as a caveat on `win32`. It
+  must be run on a Linux host (the server's target; Home Assistant OS
+  is where the integration's bounce has always been used) before the
+  server's release semantics count as validated.
+- **Stale wheel.** Runs 1 and 2 exercised the library wheel installed
+  in the dev venv during S0, not the working tree: the server process
+  imports `sofabaton` from site-packages. Rebuild and reinstall the
+  wheel after every library change before a server live run (recorded
+  in memory).
+- **Everything else on the server side held on both hubs**: discovery
+  keyed by MAC, registration from the table and by host, re-keying
+  with `hub_rekeyed` on the stream, all reads with real data, typed
+  404s, control with events, the sibling hub untouched by a release
+  (mode control, no link events), disabled reads refused as 409,
+  enable restoring readiness, removal, and a clean WebSocket with
+  nothing dropped.
+- **`hub_lost` at connect time** is expected: a hub stops advertising
+  itself the moment it is in session, so the table marks it absent
+  right after registration.
+
+### Linux run: the release check passes (DiskStation, 2026-09-09)
+
+Same program on Marcel's Synology DiskStation (Linux 4.4 x86_64,
+python3.13; Home Assistant runs there in a host-mode container, so the
+bench hubs were registered on TCP 8201 / UDP 8103 while the enabled X2
+entry held 8200 / 8102). `scripts/hub-bench/run_bench_200_linux.sh`
+built both wheels on the host; its closed-port probe answered "refused"
+in under a millisecond. Result: **problems: none**, every step green,
+29 WebSocket messages, 0 dropped.
+
+| release step | what the log shows |
+| --- | --- |
+| X1S disabled while the X1 stays | unregistered 14:55:33.634, one 4.0 s bounce, hub advertising itself again at :34.802 (1.2 s later), zero unrecognised dial-backs; X1 in control mode with no link event |
+| X1 removed while the X1S stays | unregistered :41.728, one 4.0 s bounce, advertising again at :43.025 (1.3 s) |
+
+So on a host where a closed port refuses, the hub gives up on its very
+first refused retry and the feedback loop never has to fire; the 4 s
+window alone covers the 3.0 s dial-back timer. The Windows result was
+the host, not the library. The server's release semantics count as
+validated.
+
+## ◇ Validated: sofabaton-x-server writes, phase 3 (X1 + X1S, 2026-09-10)
+
+`scripts/hub-bench/bench_210_server_writes.py` drives a real server
+process (docs/internal/sofabaton-x-phase3-writes-plan.md, S12) over
+HTTP and WebSocket against one hub per run, HA entries disabled for the
+runs and re-enabled after (the X2 was not in the program). Reference
+runs: `out/bench_210_x1s.json` (X1S, one run after three bench-side
+fixes) and `out/bench_210_x1c.json` (X1, third run). Both finished with
+`problems: none`. Neither the `--app-session` leg (needs the vendor app
+in hand) nor the `--destructive` leg (backup, erase, restore) was run.
+
+| step | X1S (`e26a44861b45`, 11 devices, 6 activities) | X1 (`cb383539684b`, 12 devices, 4 activities) |
+| --- | --- | --- |
+| cold snapshot after register + initial sync | complete false, 0 editable | same |
+| whole-hub refresh job (structural) | 24.6 s, 20 progress events, 1 `snapshot_changed`, complete true | 36.6 s, 19 progress events, complete true (after the key-sort fix below) |
+| `If-None-Match` with the current ETag | 304 | 304 |
+| server restart with the state file | complete true, same ETag, before and after the initial sync | same (after the favorites-order fix below) |
+| rename activity (intent) then `PUT` it back | 428 without `If-Match`, 412 with the old ETag, plan = rename + remote sync, then done | same |
+| bind button C with a long press, re-read from the hub, clear | binding present on the hub; cleared | same |
+| add favorite, remove it | back to the starting set | skipped: the command was already a favorite |
+| rename device and back, rename command and back | done (about 14 s each, remote sync included) | done |
+| read payload, play, overwrite with itself, add as a new command | raw, 38 368 Hz; played; byte-identical after the overwrite; added as id 5 and read back identical | raw, 38 179 Hz; same, added as id 21 |
+| add device (class `ir`), reorder devices and activities, rename hub and back, remove the device | ids 12 / 107; all done; removed | ids 13 / 105; all done; removed |
+| delete the added activity through the API | not exercised (the run predates the endpoint; the hub had swept it) | done, gone from the snapshot |
+
+**Two library bugs found and fixed.** The state document did not carry
+the activities' quick-access display order (`activity_favorites_order`),
+so after a restart the projected bundle lacked `favorites_order` and
+the snapshot id moved (only visible on the X1, whose first activity has
+favorites); export and import now carry it, with a round-trip test. And
+the X1 never answers a family-0x62 key-sort request for a `wifi_sonos`
+device (three consecutive 5 s timeouts, not even the STATUS_ACK it
+sends for "no key sort"; an IR device on the same hub answers in under
+three seconds), which left that device incomplete on every read and
+therefore never editable; a timed-out key-sort read on a network device
+class is now recorded as the empty row the STATUS_ACK path produces.
+
+**Hub facts.** The hub sweeps an activity with no members on its next
+delete cascade: the activity created by the API was gone by the time
+the device removal had finished, so the activity delete must come
+first (as the bench now does) or it reports 404. A command added
+through the API has no REST delete (the live editor removes commands
+only on the events device); the bench undoes it with the engine's
+bench-validated delete step on a separate session after the server
+released the hub. Every write lands within a few seconds; the device
+and command renames take about 14 s because each carries a remote
+sync. Whole-hub refresh times above are with the per-entity catalog
+read skipped (one catalog read per hub).
+
+
+
+## ◇ Validated: sofabaton-x-server callback device (X1 + X1S, 2026-09-11)
+
+`scripts/hub-bench/bench_220_callbacks.py` drives a real server process
+(docs/internal/sofabaton-x-server-callbacks-plan.md, C6) over HTTP and
+WebSocket with both hubs in one instance, HA entries disabled for the run
+and re-enabled after. Three runs (`out/bench_220_c6a..c6c.json`, server
+logs under `out/logs/bench_220_c6*-server.log`); run c6c is the reference
+with **problems: none**. Presses were produced with `POST /send` on the
+callback commands (`REQ_ACTIVATE`, which the hub answers with exactly
+one HTTP callback each) rather than the physical remote.
+
+| step | X1S (`e26a44861b45`, device 12) | X1 (`cb383539684b`, device 13) |
+| --- | --- | --- |
+| deploy with port 8060 held by another socket | 202, job done in 14 s; record `deployed`, listener `bound: false` with the bind error and `callback_listener_failed` on the stream | deploy in 13 s |
+| `POST /server/callback-listener/retry` after freeing the port | bound on 8060, `callback_listener_started` | |
+| record vs hub | 20 records, labels `Play` / `Play Long` / `Hold pause`, brand `m3tac0de`, target = effective destination `192.168.2.197:8060`, action id = the hub MAC | same; the Roku head carries `ip_address 192.168.2.197` after a catalog refresh |
+| hooks | `power_on_slot 1`, `input_slots [2]` written | ignored with the logged reason |
+| presses for commands 1, 11, 12 | each within 1 s of the send, right slot / label / press type, `resolution deployed`, `source` = the hub, exactly one per activation | same |
+| `GET /presses?after=` | the one newer press, `expired false` | same |
+| bind VOL_UP (with long press) and a favorite through the generic routes, then rename slot 1 in place | both kept; hub labels `Start` / `Start Long`; the next press carries `Start` | same, with the device renamed to `Bench renamed` in the same update |
+| X1 head address after the device rename | | `192.168.2.197` (the pinned target, not the routed IP) |
+| a label edited outside the record (rename command 3, then update) | job failed, 409 `callback_update_declined`, `drift: command ids [3]`, nothing written | same |
+| activity 101 start / stop (the device is a member through the binding) | one press: slot 1 short `Start` from the power-on hook | n/a |
+| `DELETE /callback-device` while referenced | | 409 `callback_device_referenced`: activity 101 (member, favorite, binding, macro) |
+| `DELETE ?force=true` | | job done, device gone from the snapshot, record 404 |
+| purge from outside the server (`DELETE /devices/12`) | `stale: true` within a few seconds, `callback_device_stale` on the stream, listener still bound; `PUT` refused 409 `callback_device_stale` | |
+| `POST /callback-device/redeploy` | new device 12 with the renamed labels, `stale false` | |
+| server restart with `callback_device` wiped from `hubs.json`, then `POST /callback-device` | `adopted: true`, device 12 re-used, device count unchanged (12), the next press `deployed` with label `Start` | |
+| cleanup | forced delete, listener `wanted false`, no device left | |
+| WebSocket | 184 messages, 10 presses, 0 dropped | |
+
+Findings:
+
+- **Library defect, fixed in the run.** The callback path's action id
+  came from `_stable_hub_action_id()`, which read the MAC from the mDNS
+  TXT record and fell back to the proxy id. A hub registered by host has
+  no TXT record, so both hubs got `X1-HUB-PROXY` and the listener could
+  not tell them apart (run c6a). It now prefers the banner MAC the hub
+  sends on connect, then the TXT record, then the proxy id
+  (`tests/lib/test_aio_real_engine.py::test_action_id_prefers_the_banner_mac_over_the_proxy_id`).
+  The Home Assistant path is unchanged (its TXT record carries the same
+  MAC).
+- **Projection, not the hub.** Right after a deploy the snapshot's device
+  block has no `ip_address` on the X1: the create seeds the cache without
+  the raw record. `GET /devices?refresh=true` reads the catalog and the
+  head address appears. The driver refreshes before reading the block.
+- **Driver artifacts** (runs c6a and c6b): the WebSocket collector only
+  receives while the asyncio loop is spun; a plain `time.sleep` during
+  job waits starved it and the first press after a long job was lost to a
+  reconnect. Every such press was in the server log within 1 s of the
+  send. Both waits now spin the loop.
+- Not covered here: the X2, and the container runs on the DiskStation
+  (host networking with defaults, bridge networking with
+  `--callback-host` set), plan C6 steps 9 and 10.
+- Observed during the session, unrelated to the server: disabling the X1S
+  and X1 entries through `ha_entry.py` left the X2 entry `disabled_by:
+  user` as well (re-enabled at once, loaded again). Worth a look at the
+  integration's disable path.
+
+## ◇ Validated: whole-document writes, phase 4 (X1 + X1S, 2026-09-12)
+
+`scripts/hub-bench/bench_230_document_writes.py <ip> <X1|X1S> <tag>`,
+through root exports only (`AsyncXProxy.sync_hub`, `build_hub_sync_plan`,
+`ApplyState`, `PlaceholderMap`, `edits`). One run per hub, the HA entry
+disabled for it and re-enabled afterwards (all three entries verified
+`disabled_by: null` at close-out). The engine's `enqueue_cmd` is wrapped
+to count physical remote-sync triggers (`0x0064` / `0x0364`) on the wire.
+
+The program, per hub: a whole-hub refresh; a preparatory apply (a bench
+IR device with two commands whose payloads are copied from a real
+device with `read_payload`, a bench activity bound to it and to an
+existing device); the plan's main document (hub rename, two device
+renames, a second new device with payloads, a second new activity using
+it and an existing device, the first activity's `VOL_UP` moved off the
+first bench device, that device deleted, both tables reversed); the
+unchanged document; a stage B refusal after an outside binding change
+written through `sync_activity`; an `uncertain` item forced by raising
+after the engine's real write and its resume from the serialised
+`ApplyState`; a cancel between items (the task cancelled from
+`on_state` after the first item) and its resume; the original document
+applied back; and finally the display order put back to ascending ids.
+Leftovers of an interrupted run (entities named `bench230 …`) are deleted
+at the start.
+
+| | X1S (192.168.2.151), run 9 | X1 (192.168.2.108), run 1 |
+| --- | --- | --- |
+| whole-hub refresh | 25 s, 12 devices / 7 activities, complete | 36 s, 12 devices / 4 activities, complete |
+| prep apply | 6 items, 10 writes, 1 trigger, 22 s, nothing left to do | 6 items, 9 writes, 1 trigger, 20 s, nothing left |
+| main document | 11 items, 20 writes, **exactly 1 trigger**, 80 s, nothing left | 11 items, 20 writes, **exactly 1 trigger**, 73 s, nothing left |
+| unchanged document | 0 items, 0 writes, 0 triggers | same |
+| stage B after an outside binding change | stopped at `live_check`, 0 writes, hub name untouched | same |
+| uncertain item -> resume | `[uncertain]`, `needs_refresh` = the activity, resumable; resume: desired state already held, 0 steps | same |
+| cancel between items -> resume | `[done, not_attempted]`; resume finished both (4 writes) | same |
+| restore of the original document | 8 items, 8 writes, 1 trigger, nothing left | 8 items, 8 writes, 1 trigger, nothing left; final `snapshot_id` == baseline id |
+| problems | none | none |
+
+Nine runs were needed on the X1S; the first eight found and fixed six
+defects (three in the engine, older than phase 4; three in the phase 4
+code), recorded in the plan's section 15
+([sofabaton-x-phase4-document-writes-plan.md](../internal/sofabaton-x-phase4-document-writes-plan.md)):
+an idle read answered "no record" left a fresh device incomplete; a
+burst-terminating `STATUS_ACK 0x07` stayed consumable and the next
+exchange stole it (root cause of a wrongly emptied activity catalog, an
+unanswered idle read and a refused delete); an empty-catalog answer is
+now verified once over a non-empty cache; the reference rewriter added
+`device_id: None` to rows that carry no such key; derived binding labels
+counted as a change; and the projection listed entities by id, not by
+the hub's display order. Observed hub behaviour: a created
+device takes sort position 0 (first) and a created activity the last
+position; `sort` is renumbered on every create and delete; a rename made
+outside the library is invisible to the stage B check (the preflight
+signature covers bindings, macros and favorites, by design).
+
+Reads during a remote sync are fine (probe 2026-09-12, X1S: after a
+`0x64` trigger, the device and activity catalogs and a full activity
+re-read answered within ~2.5 s every 8 s for a minute; only the read
+issued in the same instant as the trigger got no reply, the usual
+"request arriving mid-burst is dropped" behaviour). Marcel's word that
+the hub never blocks reads while a remote syncs holds. The two probes
+that saw no catalog rows for minutes were explained the same evening and
+the hub was never involved: they constructed the engine with
+`diag_parse=False`, and handler dispatch (the banner, acks, catalog rows)
+lived under that flag inside `_log_frames` since the first commit, so
+such an engine never processed an inbound frame. Nobody real runs that
+way (the integration passes `diag_parse=True`, the server and the benches
+default to it), which is why no bench ever saw it. Fixed the same day:
+dispatch always runs, `diag_parse` gates only the decoded summaries;
+a real-engine test feeds a captured banner frame under all four flag
+combinations, and the four combinations were re-probed on the X1S
+(devices in 0.8 s each). Reconnecting immediately after a session ends
+was also probed (seven back-to-back sessions, all ready within 2 s): no
+lingering-session effect.
+
+The X1 ran the final bench unchanged on its first attempt. Not run: the
+X2 (not offered for this program), the server routes against a live hub
+(the library runner underneath is what they call; the server suite
+drives them through a fake that runs the real planner).
+
+## ◇ Validated: web remote, R7 (X1S, 2026-09-15)
+
+The remote card served by sofabaton-x-server (docs/internal/web-remote-plan.md),
+driven in a real browser against the X1S through a real server process
+on the dev box (launch config `sofabaton-x-server`, port 8482; the X1 and
+X2 records in the harness data dir were disabled for the run so only the
+X1S proxy started; the HA X1S entry disabled for the run and re-enabled
+after, `disabled_by` null verified). No bench script: the page was
+exercised by hand in the Browser pane, the server log is the witness.
+
+| step | what happened |
+| --- | --- |
+| open `/ui/remote/` without `hub=` | instruction page listing the registered hub with a link |
+| open `/ui/remote/?hub=e26a44861b45` | card renders "Powered Off", every key dimmed, device-mode toggle shown; no console errors beyond the version banner |
+| pick "Watch TV" | `POST /activities/102/start` accepted, hub reports `Watch TV` ACTIVE on the next activities burst, the page's select follows from the stream; only VOL_UP / MUTE / VOL_DOWN light up, exactly the hub's 3-row keymap for that activity |
+| tap VOL_UP; tap the disabled OK | `send 102/182` accepted; nothing sent for OK |
+| write a long-press pair onto VOL_UP through the server (`PUT .../buttons/182` with `long_press` 10/2) | job `done` in 3 s; the page picked the pair up from `snapshot_changed` without a reload |
+| hold VOL_UP 900 ms; then tap it | exactly one `send 10/2` (the pair, device scope); then exactly one `send 102/182` |
+| add favourite "Input" (10/1) through the server | job `done`; the Favourites drawer showed "Input"; tapping it sent `10/1` |
+| device mode, pick Soundbar | keymap fetched (`/entities/10/buttons` + `/devices/10/commands`); VOL_UP / VOL_DOWN / MUTE enabled, 17 keys disabled, Commands drawer lists the 4 commands with the filter; tapping "Mute" sent `10/2` |
+| power button | not offered: every device on this hub has `idle_behavior` null, the same gate as the HA projection |
+| pick "Powered Off" | `POST /activities/102/stop`; hub idle; all keys dimmed |
+| `POST .../disable` with the page open | banner shown; first run blamed connectivity ("GET /activity -> 409"), fixed the same session (see below); after the fix the banner reads "not controllable", the catalog is kept |
+| `POST .../enable` | the page recovered by itself from `hub_enabled` on the stream; select and keys back within the hub's reconnect |
+| server stopped and started with the page open (headless observer sampling every second) | socket closed at t=12 s, the page kept its last state with no false alarm, one failed reconnect attempt while the server was down, reconnected at t=19 s and reloaded |
+| cleanup | long-press pair and favourite removed through the server; `/entities/102/buttons` and favourites back to the starting state |
+
+One defect found and fixed: the adapter read `/activity` alongside
+`/status` on every status refresh and on load, and a disabled hub
+answers 409 to everything but `/status`, so the page reported the hub
+as unreachable instead of disabled. The adapter now reads `/status`
+first and touches the catalog and running activity only while the hub
+is enabled (an app-held hub still answers reads from the cache and is
+read, so the greyed card keeps its catalog); a hub that becomes enabled
+with nothing loaded triggers the full load. Covered by
+`tests/frontend/remote-card-server-backend.test.ts`. Two tooling notes:
+the Browser pane's screenshot moves focus and closes the shimmed
+select's menu (the HA select closes on blur too), and `preview_start`
+navigates the pane's tab, which is why the restart was observed from a
+separate headless browser.
+
+Not covered: macros (this hub has none on Watch TV), X1 and X2 (not in
+the run), a phone or tablet (desktop browser only), and a wheel install
+(the server ran from the editable install).

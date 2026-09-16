@@ -91,11 +91,22 @@ class AckWaitersMixin:
                 # "device not configured for power/inputs yet"). Trip the
                 # event so the wait can exit early instead of timing out
                 # after the full window.
-                self.note_catalog_status_ack(status)
+                consumed_by_burst = self.note_catalog_status_ack(status)
                 with self._activity_inputs_lock:
                     if self._activity_inputs_pending and self._activity_inputs_seen == 0:
                         self._inputs_burst_reject_pending = True
                         self._activity_inputs_event.set()
+                if consumed_by_burst:
+                    # The byte answered a read burst ("table empty") and the
+                    # burst is finished with it. It must not stay consumable:
+                    # the exchange that starts the instant the burst ends
+                    # resets its queue and sends BEFORE this thread would
+                    # append it, then takes it for its own reply, and that
+                    # exchange's real reply later lands on whatever request
+                    # follows (observed live on the X1S, bench_230
+                    # 2026-09-12: a key-sort read, an idle read, a catalog
+                    # request and a delete each answered by the wrong 0x07).
+                    return
         else:
             self._log.info("[ACK] %s (0x%04X) payload_len=%d", name, opcode, len(payload))
         with self._ack_queue_lock:

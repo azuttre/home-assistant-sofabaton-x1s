@@ -10,7 +10,7 @@ import {
   longPressGroupsPatch,
   longPressSelectedGroups,
   longPressSettings,
-} from "../../custom_components/sofabaton_x1s/www/src/remote-card-long-press";
+} from "../../remote-card/src/remote-card-long-press";
 import {
   HOLD_REPEAT_DELAY_MS,
   HOLD_REPEAT_INTERVAL_MS,
@@ -19,7 +19,7 @@ import {
   LONG_PRESS_HOLD_MS,
   LongPressTimer,
   isLongPressEvent,
-} from "../../custom_components/sofabaton_x1s/www/src/remote-card-gestures";
+} from "../../remote-card/src/remote-card-gestures";
 
 // ---------- config helpers ----------
 

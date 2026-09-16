@@ -1,0 +1,82 @@
+# Release pipeline for sofabaton-x-server.
+#
+# Trigger: push a tag named sofabaton-x-server-vX.Y.Z (after setting
+# __version__ in sofabaton-x-server/src/sofabaton_server/__init__.py to
+# X.Y.Z; the verify-version step refuses mismatched tags). The server
+# depends on sofabaton-x from PyPI (>=0.2,<0.3), so the library must be
+# published first.
+#
+# PyPI trusted publishing (OIDC), no tokens. One-time setup on pypi.org
+# -> Publishing -> pending publisher: project sofabaton-x-server, owner
+# m3tac0de, repo home-assistant-sofabaton-x1s, workflow
+# sofabaton-x-server-release.yml, environment pypi.
+name: sofabaton-x-server release
+
+on:
+  push:
+    tags:
+      - "sofabaton-x-server-v*"
+
+jobs:
+  test:
+    name: test before publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - run: pip install pytest zeroconf "websockets>=12" -r sofabaton-x-server/openapi-toolchain.txt
+      - name: Install the library from this checkout (the export script imports it)
+        run: pip install .
+      - name: Server tests
+        run: pytest sofabaton-x-server/tests -q
+      - name: OpenAPI document is current
+        run: |
+          PYTHONPATH=sofabaton-x-server/src python -m sofabaton_server.openapi /tmp/openapi.json
+          diff -u sofabaton-x-server/openapi.json /tmp/openapi.json
+
+  build:
+    name: build distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Verify tag matches the package version
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#sofabaton-x-server-v}"
+          PKG_VERSION="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' sofabaton-x-server/src/sofabaton_server/__init__.py)"
+          echo "tag=$TAG_VERSION package=$PKG_VERSION"
+          test -n "$PKG_VERSION"
+          test "$TAG_VERSION" = "$PKG_VERSION"
+      - run: pip install build
+      - run: python -m build --outdir dist sofabaton-x-server
+      - name: Install the wheel (library from PyPI) and smoke-test
+        run: |
+          pip install dist/*.whl
+          sofabaton-x-server --version
+          sofabaton-x-server --print-settings --data-dir /tmp/sbx
+      - uses: actions/upload-artifact@v6
+        with:
+          name: sofabaton-x-server-dist
+          path: dist/
+
+  publish:
+    name: publish to PyPI
+    needs: [test, build]
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/sofabaton-x-server/
+    permissions:
+      id-token: write  # OIDC for PyPI trusted publishing
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          name: sofabaton-x-server-dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

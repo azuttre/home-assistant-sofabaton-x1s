@@ -13,7 +13,9 @@ import asyncio
 import pytest
 
 import custom_components.sofabaton_x1s.hub as hub_module
+from custom_components.sofabaton_x1s.const import HUB_VERSION_X1
 from custom_components.sofabaton_x1s.hub import SofabatonHub
+from custom_components.sofabaton_x1s.lib.commands import hub_command_label
 from tests.test_hub_commands import FakeHass
 
 OLD_HASH = "oldhash"
@@ -57,12 +59,12 @@ class _Store:
         )
 
 
-def _device_entry(*, label="Command 1"):
+def _device_entry(*, label="Command 1", long_label=None):
     return {
         "device": {"device_id": DEV_ID, "name": "Home Assistant", "brand": f"m3-default-{OLD_HASH}"},
         "commands": [
             {"command_id": 1, "command_label": label},
-            {"command_id": 11, "command_label": f"{label} Long Press"},
+            {"command_id": 11, "command_label": long_label if long_label is not None else f"{label} Long Press"},
         ],
         "input_record": {"entries": []},
         "macros": [
@@ -73,11 +75,11 @@ def _device_entry(*, label="Command 1"):
     }
 
 
-def _payload(*, deployed_port=PORT):
+def _payload(*, deployed_port=PORT, name="Command 1"):
     return {
         "commands": [
             {
-                "name": "Command 1",
+                "name": name,
                 "add_as_favorite": False,
                 "hard_button": "",
                 "long_press_enabled": False,
@@ -102,6 +104,7 @@ def _make_hub(
     run_result=None,
     call_order=None,
     replacement_commands_persist=True,
+    replacement_label_hub_version=None,
 ):
     calls = call_order if call_order is not None else []
     hass = FakeHass(loop)
@@ -142,8 +145,13 @@ def _make_hub(
     async def _create(*_args, **_kwargs):
         calls.append("create")
         if replacement_commands_persist:
+            # A real hub returns labels cut to its fixed-width slot.
             command_rows = {
-                idx + 1: str(command["display_name"])
+                idx + 1: (
+                    hub_command_label(str(command["display_name"]), replacement_label_hub_version)
+                    if replacement_label_hub_version
+                    else str(command["display_name"])
+                )
                 for idx, command in enumerate(_kwargs.get("commands") or [])
             }
             hub._proxy.state.commands[9] = command_rows
@@ -412,4 +420,85 @@ def test_replace_deploy_writes_derived_device_page_bindings(monkeypatch):
             "refresh_after_write": False,
         }),
     ]
+    loop.close()
+
+
+# ── label slot truncation (X1 diagnostics 2026-09-07) ───────────────────────
+
+LONG_NAME = "PC Show Audio Device"  # 20 chars; "+ Long Press" = 31 > 30-char slot
+TRUNCATED_LONG = "PC Show Audio Device Long Pres"
+
+
+def test_truncated_long_press_label_is_not_drift(monkeypatch):
+    """The hub stores "<20-char name> Long Press" cut to 30 characters. That
+    live label must compare equal to the deployed expansion, so the sync
+    stays in place and the planner emits no rename for it."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    store = _Store(deployed_slots=[{"name": LONG_NAME}])
+    calls: list[str] = []
+    hub = _make_hub(
+        monkeypatch, loop, store=store,
+        device_entry=_device_entry(label=LONG_NAME, long_label=TRUNCATED_LONG),
+        call_order=calls,
+    )
+    hub._proxy.hub_version = HUB_VERSION_X1
+
+    result = _run_sync(loop, hub, _payload(name=LONG_NAME))
+
+    assert result["status"] == "success"
+    assert result["inplace"] is True
+    assert "create" not in calls
+    assert [s.kind for s in hub._inplace_plans[0].steps] == ["wifi_head_commit"]
+    loop.close()
+
+
+def test_replacement_readback_accepts_hub_truncated_labels(monkeypatch):
+    """On the replace path the readback compares labels as the hub stores
+    them: the truncated long-press row is the row we wrote, so the sync
+    completes and the old device is deleted."""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    store = _Store(deployed_slots=[{"name": LONG_NAME}])
+    calls: list[str] = []
+    hub = _make_hub(
+        monkeypatch, loop, store=store,
+        device_entry=_device_entry(label=LONG_NAME, long_label=TRUNCATED_LONG),
+        call_order=calls,
+        replacement_label_hub_version=HUB_VERSION_X1,
+    )
+    hub._proxy.hub_version = HUB_VERSION_X1
+
+    # port change forces the replace path
+    result = _run_sync(loop, hub, _payload(name=LONG_NAME, deployed_port=9999))
+
+    assert result["status"] == "success"
+    assert "inplace" not in result
+    assert "create" in calls and f"delete:{DEV_ID}" in calls
+    assert "delete:9" not in calls
+    loop.close()
+
+
+def test_replacement_readback_still_rejects_a_genuinely_different_label(monkeypatch):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    store = _Store()
+    calls: list[str] = []
+    hub = _make_hub(
+        monkeypatch, loop, store=store, device_entry=_device_entry(), call_order=calls,
+    )
+    hub._proxy.hub_version = HUB_VERSION_X1
+
+    async def _create(*_args, **_kwargs):
+        calls.append("create")
+        hub._proxy.state.commands[9] = {1: "Command 1", 2: "Something Else"}
+        hub._proxy._commands_complete.add(9)
+        return {"device_id": 9, "status": "success"}
+
+    monkeypatch.setattr(hub, "async_create_wifi_device", _create)
+
+    with pytest.raises(Exception, match="did not pass command readback"):
+        _run_sync(loop, hub, _payload(deployed_port=9999))
+
+    assert calls == ["create", "delete:9"]
     loop.close()

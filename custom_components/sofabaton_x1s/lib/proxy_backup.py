@@ -17,6 +17,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from .backup_export import now_iso
 from .macros import MacroKeyEntry, MacroRecord
 from .protocol_const import OP_ERASE_CONFIGURATION
 from .state_helpers import normalize_device_entry
@@ -50,7 +51,32 @@ def _entry_restore_raw_body(entry: dict[str, Any]) -> dict[str, Any]:
 
 
 class CacheBackupMixin:
-    """Mixin providing cache export/import and catalog clearing."""
+    """Mixin providing cache export/import, catalog clearing and the
+    snapshot provenance bookkeeping (generation, stale flags)."""
+
+    # -- snapshot provenance (phase 3 plan, W0) ---------------------------
+
+    def bump_cache_generation(self) -> int:
+        """Advance the cache generation counter and return the new value.
+
+        Called on every burst end (wired at construction), every cache
+        clear, every import and by the facade after a write it drove.
+        Consumers compare it to learn the cache moved without hashing the
+        projection.
+        """
+
+        self.state.generation += 1
+        return self.state.generation
+
+    def _note_detail_fetched(self, kind: str, ent_lo: int) -> None:
+        """Stamp a backup-grade fetch of one entity."""
+
+        self.state.detail_fetched_at[kind][ent_lo] = now_iso()
+
+    def _forget_detail(self, kind: str, ent_lo: int) -> None:
+        """Drop the fetch stamp of one entity."""
+
+        self.state.detail_fetched_at[kind].pop(ent_lo, None)
 
     def export_cache_state(self) -> dict[str, Any]:
         def _device_for_export(v: dict[str, Any]) -> dict[str, Any]:
@@ -112,11 +138,16 @@ class CacheBackupMixin:
             "detail_complete": {
                 "commands": sorted(self._commands_complete),
                 "macros": sorted(self._macros_complete),
+                # Devices whose idle read the hub answered "no record".
+                "idle_absent": sorted(getattr(self, "_idle_behavior_absent", ())),
             },
             "detail_fetched_at": {
                 kind: {str(ent_id): stamp for ent_id, stamp in stamps.items()}
                 for kind, stamps in self.state.detail_fetched_at.items()
             },
+            # The cache generation, so a consumer importing this document
+            # continues the count (phase 3 plan, W0).
+            "generation": int(self.state.generation),
             "ip_devices": {str(k): dict(v) for k, v in self.state.ip_devices.items()},
             "ip_buttons": {
                 str(k): {str(btn_id): dict(meta) for btn_id, meta in buttons.items()}
@@ -124,6 +155,14 @@ class CacheBackupMixin:
             },
             "activity_macros": {
                 str(k): list(macros) for k, macros in self.state.activity_macros.items()
+            },
+            # Quick-access display order (family-0x61 slot table) per
+            # activity: without it the projected bundle after an import
+            # lacks ``favorites_order`` and the snapshot id moves across a
+            # restart (found live, bench_210 on the X1, 2026-09-10).
+            "activity_favorites_order": {
+                str(k): [[int(fav_id) & 0xFF, int(slot)] for fav_id, slot in pairs]
+                for k, pairs in self.state.activity_favorites_order.items()
             },
             "activity_command_refs": {
                 str(k): [[dev_id, command_id] for dev_id, command_id in sorted(refs)]
@@ -327,6 +366,26 @@ class CacheBackupMixin:
                     if isinstance(stamp, str) and stamp
                 }
 
+        self.state.activity_favorites_order = {}
+        favorites_order = data.get("activity_favorites_order", {})
+        if isinstance(favorites_order, dict):
+            for key, pairs in favorites_order.items():
+                if not isinstance(pairs, list):
+                    continue
+                parsed = [
+                    (int(pair[0]) & 0xFF, int(pair[1]))
+                    for pair in pairs
+                    if isinstance(pair, (list, tuple)) and len(pair) == 2
+                ]
+                if parsed:
+                    self.state.activity_favorites_order[int(key) & 0xFF] = parsed
+
+
+        generation = data.get("generation")
+        if isinstance(generation, int) and generation > self.state.generation:
+            self.state.generation = generation
+        self.bump_cache_generation()
+
         ip_devices = data.get("ip_devices", {})
         self.state.ip_devices = {
             int(k) & 0xFF: dict(v) for k, v in ip_devices.items() if isinstance(v, dict)
@@ -474,6 +533,9 @@ class CacheBackupMixin:
             macros_complete = detail_complete.get("macros", [])
             if isinstance(macros_complete, list):
                 self._macros_complete |= {int(ent) & 0xFF for ent in macros_complete}
+            idle_absent = detail_complete.get("idle_absent", [])
+            if isinstance(idle_absent, list):
+                self._idle_behavior_absent = {int(ent) & 0xFF for ent in idle_absent}
 
         self._activity_map_complete = {
             act_lo
@@ -495,7 +557,7 @@ class CacheBackupMixin:
             self.state.commands.pop(ent_lo, None)
             self.state.device_key_sorts.pop(ent_lo, None)
             self.state.device_input_records.pop(ent_lo, None)
-            self.state.detail_fetched_at["device"].pop(ent_lo, None)
+            self._forget_detail("device", ent_lo)
             self.state.ip_devices.pop(ent_lo, None)
             self.state.ip_buttons.pop(ent_lo, None)
             self._commands_complete.discard(ent_lo)
@@ -509,9 +571,10 @@ class CacheBackupMixin:
             self.state.activity_favorite_labels.pop(ent_lo, None)
             self.state.activity_keybinding_labels.pop(ent_lo, None)
             self.state.activity_command_refs.pop(ent_lo, None)
-            self.state.detail_fetched_at["activity"].pop(ent_lo, None)
+            self._forget_detail("activity", ent_lo)
             self._macros_complete.discard(ent_lo)
             self.drop_cached_macro_records(ent_lo)
+        self.bump_cache_generation()
 
     def get_known_device_ids(self) -> set[int]:
         """Return the set of device IDs currently known from the catalog."""
@@ -544,6 +607,7 @@ class CacheBackupMixin:
         self.state.devices.clear()
         self.state.ip_devices.clear()
         self._devices_catalog_ready = False
+        self.bump_cache_generation()
 
     def clear_activities_catalog(self) -> None:
         """Clear only the activity name catalog before a fresh activity list fetch.
@@ -557,6 +621,7 @@ class CacheBackupMixin:
         self._activity_row_payloads.clear()
         self.state.set_hint(None)
         self._activities_catalog_ready = False
+        self.bump_cache_generation()
 
     def wipe_all_cached_state(self) -> None:
         """Drop every per-entity cache so a fresh catalog poll is required.

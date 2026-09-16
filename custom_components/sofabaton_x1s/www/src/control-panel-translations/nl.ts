@@ -44,6 +44,7 @@ export const TOOLS_CARD_STRINGS_NL = {
   docs: {
     wifiCommandsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/wifi_commands.md",
     backupUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/backup.md",
+    commandPayloadsUrl: "https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/docs/command_payloads.md",
   },
   tabs: { cache: "Hub", wifiCommands: "Automatisering", backup: "Back-up", settings: "Instellingen", logs: "Logboeken" },
   tabDocs: { wifi_commands: "Documentatie over automatisering", backup: "Documentatie over back-ups" },
@@ -70,7 +71,7 @@ export const TOOLS_CARD_STRINGS_NL = {
     automationBlockedByProxy: "Automatisering kan niet worden gebruikt zolang de Sofabaton-app via de proxy met de hub is verbonden.",
     backupBlockedByProxy: "Back-up kan niet worden gebruikt zolang de Sofabaton-app via de proxy met de hub is verbonden.",
     blockedByFirmware: (installed: string | number, required: string | number) =>
-      `Op deze hub is firmwareversie ${installed} geïnstalleerd. Voor functies van het bedieningspaneel die de hubconfiguratie wijzigen, is minimaal versie ${required} vereist. Werk de hub via Bluetooth bij met de Sofabaton-app. Deze functie wordt automatisch weer beschikbaar zodra de hub de bijgewerkte firmwareversie doorgeeft.`,
+      `Op deze hub is firmwareversie ${installed} geïnstalleerd. Voor functies van het bedieningspaneel die de hubconfiguratie wijzigen, is minimaal versie ${required} vereist. Werk de hub bij met de Sofabaton-app. Deze functie wordt automatisch weer beschikbaar zodra de hub de bijgewerkte firmwareversie doorgeeft.`,
   },
   buttonNames: {
     0x97: "C", 0x98: "B", 0x99: "A", 0x9a: "Afsluiten", 0x9b: "DVR", 0x9c: "Afspelen", 0x9d: "Gids",
@@ -188,7 +189,7 @@ export const TOOLS_CARD_STRINGS_NL = {
     appConnectedTitle: "De Sofabaton-app is verbonden", appConnectedBody: "Sluit de Sofabaton-app om de hubconfiguratie te bewerken.",
     firmwareUnsupportedTitle: "Update van hubfirmware vereist",
     firmwareUnsupportedBody: (installed: string | number, required: string | number) =>
-      `Op deze hub is firmwareversie ${installed} geïnstalleerd. Versie ${required} of nieuwer is vereist om de hubconfiguratie veilig te bewerken. Bewerken is uitgeschakeld om je configuratie te beschermen. Werk de hub via Bluetooth bij met de Sofabaton-app. Bewerken is automatisch weer mogelijk zodra de hub de bijgewerkte firmwareversie doorgeeft.`,
+      `Op deze hub is firmwareversie ${installed} geïnstalleerd. Versie ${required} of nieuwer is vereist om de hubconfiguratie veilig te bewerken. Bewerken is uitgeschakeld om je configuratie te beschermen. Werk de hub bij met de Sofabaton-app. Bewerken is automatisch weer mogelijk zodra de hub de bijgewerkte firmwareversie doorgeeft.`,
     operationRunningTitle: "Er wordt een andere bewerking uitgevoerd", operationRunningBody: "Wacht tot de huidige back-up, herstelbewerking of synchronisatie is voltooid en probeer het daarna opnieuw.",
     captureTitle: "Je hub uitlezen", captureMessage: "Configuratie van je hub uitlezen…",
     captureMessageWithStep: (current: number, total: number) => `Configuratie van je hub uitlezen… (apparaat ${current} van ${total})`,
@@ -337,7 +338,7 @@ export const TOOLS_CARD_STRINGS_NL = {
     moveUpAria: "Omhoog verplaatsen", moveDownAria: "Omlaag verplaatsen", deviceClass: "Apparaatklasse", name: "Naam", nameHelper: "Wordt weergegeven op de afstandsbediening en in elke commandokiezer.",
     verifyPayloadLive: "Controleer een gewijzigde payload vóór het opslaan: Test speelt de huidige bytes op de hub af zonder op te slaan. Opslaan neemt de payload mee bij de volgende synchronisatie van het apparaat.",
     verifyPayloadBackup: "Controleer een gewijzigde payload voordat je erop vertrouwt: Test speelt de bytes op de hub af zonder op te slaan. Sla hier pas op wanneer de payload doet wat je verwacht.",
-    test: "Testen", sendingToHub: "Naar de hub sturen…", sentToHub: "Naar de hub gestuurd voor eenmalig afspelen.", testFailed: "Test mislukt.", rawPayload: "Onbewerkte payload",
+    test: "Testen", payloadDocsLink: "Payload-documentatie", sendingToHub: "Naar de hub sturen…", sentToHub: "Naar de hub gestuurd voor eenmalig afspelen.", testFailed: "Test mislukt.", rawPayload: "Onbewerkte payload",
     rawPayloadDescription: "Voor deze apparaatklasse bestaat geen gestructureerde editor; de onderstaande bytes worden bij het herstellen ongewijzigd naar de hub afgespeeld.",
     payloadHex: "Payload (hex-bytes)", payloadHexHelper: "Byteparen zoals \"0a 4f 22\"; witruimte en 0x-voorvoegsels zijn toegestaan.", rename: "Hernoemen",
     prontoHexTab: "Pronto Hex",
@@ -421,7 +422,7 @@ export const TOOLS_CARD_STRINGS_NL = {
     firmwareUpdateRequired: "Firmware-update vereist",
     firmwareUpdateRecommended: "Firmware-update aanbevolen",
     firmwareUpdateTooltip: (recommended: string | number, required: string | number, unsupported: boolean) => {
-      const update = "Werk de hub via Bluetooth bij met de Sofabaton-app.";
+      const update = "Werk de hub bij met de Sofabaton-app.";
       if (unsupported) {
         const recommendation = String(recommended) === String(required)
           ? ""

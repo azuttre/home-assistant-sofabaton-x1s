@@ -12,13 +12,12 @@ events print as they happen, and every command maps to a facade call.
 import argparse
 import asyncio
 import logging
-import shlex
 import sys
-from typing import Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 from .aio import AsyncXProxy, async_discover_hubs
 from .hub_versions import HVER_BY_HUB_VERSION
-from .protocol_const import BUTTONNAME_BY_CODE, DEVICE_CLASS_IR, ButtonName
+from .protocol_const import BUTTONNAME_BY_CODE, ButtonName
 
 # ----------------- helpers -----------------
 
@@ -70,6 +69,19 @@ def _kv_list_to_dict(items) -> Dict[str, str]:
     return out
 
 
+def resolve_button_code(token: str) -> int:
+    """A button code from a number or a ``ButtonName`` alias (``POWER_ON``)."""
+
+    try:
+        return parse_int(token) & 0xFF
+    except ValueError:
+        pass
+    code = getattr(ButtonName, token.strip().upper(), None)
+    if isinstance(code, int):
+        return code & 0xFF
+    raise ValueError(f"unknown button {token!r} (a code or a ButtonName alias)")
+
+
 def _parse_shell_args(rest: str) -> tuple[Optional[str], Dict[str, str], set[str]]:
     """Split a REPL argument string into (path, key=value opts, bare flags).
 
@@ -86,8 +98,8 @@ def _parse_shell_args(rest: str) -> tuple[Optional[str], Dict[str, str], set[str
         if "=" in tok:
             key, value = tok.split("=", 1)
             opts[key.strip().lower()] = value.strip()
-        elif tok.lower() == "erase":
-            flags.add("erase")
+        elif tok.lower() in ("erase", "plan"):
+            flags.add(tok.lower())
         elif path is None:
             path = tok
     return path, opts, flags
@@ -207,10 +219,16 @@ class AsyncShell:
             "stop": self.cmd_stop,
             "find": self.cmd_find,
             "testir": self.cmd_testir,
-            "addir": self.cmd_addir,
             "proxy": self.cmd_proxy,
             "backup": self.cmd_backup,
             "restore": self.cmd_restore,
+            "snapshot": self.cmd_snapshot,
+            "apply": self.cmd_apply,
+            "refresh": self.cmd_refresh,
+            "rename": self.cmd_rename,
+            "bind": self.cmd_bind,
+            "unbind": self.cmd_unbind,
+            "hubname": self.cmd_hubname,
             "quit": self.cmd_quit,
             "exit": self.cmd_quit,
         }
@@ -235,19 +253,20 @@ class AsyncShell:
             return None
 
     async def cmd_status(self, _args: str) -> None:
-        p = self.p.sync
-        acts, _ = p.get_activities(force_refresh=False)
-        devs, _ = p.get_devices(force_refresh=False)
+        st = await self.p.status()
+        info = await self.p.hub_info()
         print("== status ==")
-        print(f"hub connected   : {p.transport.is_hub_connected}")
-        print(f"app connected   : {p.transport.is_client_connected}")
-        print(f"controllable    : {p.can_issue_commands()}")
-        print(f"hub version     : {p.hub_version}")
-        cur = await self.p.current_activity()
-        running = f"{cur['name'] or '?'} (id {cur['activity_id']})" if cur else "(none)"
+        print(f"hub connected   : {st.hub_connected}")
+        print(f"app connected   : {st.app_connected}")
+        print(f"controllable    : {st.controllable}  ({st.mode} mode)")
+        print(f"hub version     : {st.hub_version}")
+        if info.known:
+            print(f"hub name        : {info.name or '?'}  (fw {info.firmware_version}, mac {info.mac or '?'})")
+        cur = st.running_activity
+        running = f"{cur.name or '?'} (id {cur.activity_id})" if cur else "(none)"
         print(f"running activity: {running}")
-        print(f"activities      : {len(acts)} cached")
-        print(f"devices         : {len(devs)} cached")
+        print(f"activities      : {st.activities_cached} cached")
+        print(f"devices         : {st.devices_cached} cached")
 
     async def cmd_activities(self, _args: str) -> None:
         acts = await self._safe("activities", self.p.activities())
@@ -255,17 +274,18 @@ class AsyncShell:
             print("no activities (need control mode?)")
             return
         print("activity_id  active  name")
-        for act_id, info in sorted(acts.items()):
-            print(f"{act_id:<11}  {'*' if info.get('active') else ' ':^6}  {info.get('name', '')}")
+        for act in acts:
+            print(f"{act.activity_id:<11}  {'*' if act.active else ' ':^6}  {act.name}")
 
     async def cmd_devices(self, _args: str) -> None:
         devs = await self._safe("devices", self.p.devices())
         if not devs:
             print("no devices (need control mode?)")
             return
-        print("device_id  name  (brand)")
-        for dev_id, info in sorted(devs.items()):
-            print(f"{dev_id:<9}  {info.get('name', '?')}  ({info.get('brand', '')})")
+        print("device_id  name  (brand)  [class]  power")
+        for dev in devs:
+            power = "?" if dev.power_state is None else ("on" if dev.power_state else "off")
+            print(f"{dev.device_id:<9}  {dev.name or '?'}  ({dev.brand or ''})  [{dev.device_class or '?'}]  {power}")
 
     async def cmd_commands(self, args: str) -> None:
         if not args.strip():
@@ -278,7 +298,7 @@ class AsyncShell:
             return
         print(f"send with: press {dev} <command_id>")
         for c in cmds:
-            print(f"  command_id={c['command_id']:<5} {c['label']}")
+            print(f"  command_id={c.command_id:<5} {c.label}")
 
     async def cmd_buttons(self, args: str) -> None:
         if not args.strip():
@@ -292,9 +312,9 @@ class AsyncShell:
         print(f"send with: press {ent} <button_code>")
         for b in btns:
             target = ""
-            if b.get("device_id") and b.get("command_id") is not None:
-                target = f"   -> device_id={b['device_id']} command_id={b['command_id']}"
-            print(f"  button_code={b['button_code']:<5} {b.get('name') or '':<10}{target}")
+            if b.device_id and b.command_id is not None:
+                target = f"   -> device_id={b.device_id} command_id={b.command_id}"
+            print(f"  button_code={b.button_code:<5} {b.name or '':<10}{target}")
 
     async def cmd_macros(self, args: str) -> None:
         if not args.strip():
@@ -307,7 +327,7 @@ class AsyncShell:
             return
         print(f"send with: press {act} <command_id>")
         for m in macros:
-            print(f"  command_id={m['command_id']:<5} {m.get('label') or ''}")
+            print(f"  command_id={m.command_id:<5} {m.label or ''}")
 
     async def cmd_favorites(self, args: str) -> None:
         if not args.strip():
@@ -320,7 +340,7 @@ class AsyncShell:
             return
         print("send with: press <device_id> <command_id>")
         for f in favs:
-            print(f"  device_id={f['device_id']:<5} command_id={f['command_id']:<5} {f.get('label') or ''}")
+            print(f"  device_id={f.device_id:<5} command_id={f.command_id:<5} {f.label or ''}")
 
     # ----- control commands -------------------------------------------------
 
@@ -368,69 +388,12 @@ class AsyncShell:
         if len(payload) < 10:
             print(f"payload too short ({len(payload)}B) to be a stored IR payload")
             return
-        ok = await self.p.play_ir_blob(payload)
-        if ok:
-            print(f"played {len(payload)}B payload -- check the target device reacted")
-        else:
-            print("refused or rejected (need control mode, or the hub NACKed the payload)")
-
-    async def cmd_addir(self, args: str) -> None:
-        usage = (
-            'usage: addir <device_id> <name> <hex payload>\n'
-            '       e.g. addir 3 "Power Toggle" 01 20 00 10 01 00 94 ac ...\n'
-            "saves the payload as a new IR command on the device (test first with: testir)"
-        )
         try:
-            tokens = shlex.split(args)
-        except ValueError as err:
-            print(f"bad quoting: {err}")
+            await self.p.play(payload)
+        except (RuntimeError, ValueError) as err:
+            print(f"not played: {err}")
             return
-        if len(tokens) < 3:
-            print(usage)
-            return
-        try:
-            dev = parse_int(tokens[0])
-        except ValueError:
-            print(usage)
-            return
-        name = tokens[1]
-        try:
-            payload = parse_payload_hex(" ".join(tokens[2:]))
-        except ValueError as err:
-            print(f"not a valid hex payload: {err}")
-            return
-        if len(payload) < 10:
-            print(f"payload too short ({len(payload)}B) to be a stored IR payload")
-            return
-
-        # The save path writes the IR codec; refuse a known non-IR target.
-        devs = await self._safe("addir", self.p.devices())
-        if devs is None:
-            return
-        info = devs.get(dev)
-        if info is None:
-            print(f"device {dev} not found on the hub")
-            return
-        device_class = info.get("device_class")
-        if device_class not in (None, DEVICE_CLASS_IR):
-            print(f"device {dev} ({info.get('name')}) is {device_class!r}, not IR")
-            return
-
-        # Refresh occupancy so the auto-picked command id comes from the
-        # hub's authoritative command list, never a stale cache.
-        if await self._safe("addir", self.p.commands(dev)) is None:
-            return
-        result = await self._safe(
-            "addir",
-            self.p.persist_ir_blob(device_id=dev, command_name=name, blob=payload),
-        )
-        if not result:
-            print("save failed (need control mode, hub rejected the write, or an ack timed out)")
-            return
-        print(
-            f"saved {result['command_name']!r} as command_id={result['command_id']} "
-            f"on device {dev}   send with: press {dev} {result['command_id']}"
-        )
+        print(f"played {len(payload)}B payload -- check the target device reacted")
 
     async def cmd_proxy(self, args: str) -> None:
         arg = args.strip().lower()
@@ -456,7 +419,11 @@ class AsyncShell:
         else:
             print("backing up the whole hub (this fetches every device + activity)...")
         bundle = await self._safe(
-            "backup", self.p.backup_hub_bundle(device_ids=device_ids or None)
+            "backup",
+            self.p.backup(
+                device_ids=device_ids or None,
+                progress=lambda p: print(f"  {p.message}"),
+            ),
         )
         if bundle is None:
             return
@@ -511,15 +478,256 @@ class AsyncShell:
         # lay the (possibly subset) bundle down on a clean slate.
         if "erase" in flags:
             print("erasing the hub's configuration first (wipes all devices + activities)...")
-            erased = await self._safe("erase", self.p.erase_configuration())
-            if not erased:
-                print("erase failed or refused (need control mode) — restore aborted")
-                return
-
         print(f"restoring {path} onto the hub...")
-        result = await self._safe("restore", self.p.restore_hub_bundle(bundle))
+        result = await self._safe(
+            "restore",
+            self.p.restore(
+                bundle, replace="erase" in flags, progress=lambda p: print(f"  {p.message}")
+            ),
+        )
         if result is not None:
-            print("restore result:", result)
+            print("restore result:", result.to_dict())
+
+    # ----- snapshot / edits (phase 3) ----------------------------------------
+    #
+    # Edits are snapshot-based: take the snapshot, apply a pure helper from
+    # ``sofabaton.edits`` to its bundle, sync the pair. The snapshot id rides
+    # along so an edit made on a stale snapshot is refused before any write.
+
+    async def cmd_snapshot(self, args: str) -> None:
+        import json
+
+        _path, opts, _flags = _parse_shell_args(args)
+        snap = await self._safe("snapshot", self.p.snapshot())
+        if snap is None:
+            return
+        out = opts.get("out")
+        if out:
+            # The document a later ``apply`` needs as its baseline.
+            with open(out, "w", encoding="utf-8") as fh:
+                json.dump(snap.to_dict(), fh, indent=2)
+            print(f"wrote {out}: snapshot {snap.snapshot_id[:12]}, "
+                  f"{len(snap.devices)} devices, {len(snap.activities)} activities, complete={snap.complete}")
+            return
+        print(
+            f"snapshot {snap.snapshot_id[:12]}  complete={snap.complete}  "
+            f"generation={snap.engine_generation}"
+        )
+        for entity in snap.devices + snap.activities:
+            flags = []
+            if not entity.complete:
+                flags.append("incomplete")
+            print(
+                f"  {entity.kind:8} {entity.entity_id:4}  {entity.name or '?':30} "
+                f"{' '.join(flags) or 'editable'}"
+            )
+
+    async def cmd_apply(self, args: str) -> None:
+        """Whole-document write (phase 4): ``apply <edited> baseline=<snapshot> [plan]``
+        or ``apply resume=<record>``. The baseline is the file ``snapshot out=``
+        wrote; the record ``<edited>.apply.json`` is written after every item and
+        is what ``resume=`` takes. A desired file alone is refused: an edited
+        document and a hash of its baseline are not the baseline."""
+
+        import json
+
+        from . import build_hub_sync_plan
+        from .hub_apply import ApplyState
+        from .hub_sync import DocumentError
+
+        path, opts, flags = _parse_shell_args(args)
+        resume = opts.get("resume")
+        if not resume and (not path or not opts.get("baseline")):
+            print("usage: apply <edited.json> baseline=<snapshot.json> [plan]")
+            print("       apply resume=<file.apply.json>")
+            return
+
+        def _load(file: str):
+            try:
+                with open(file, encoding="utf-8") as fh:
+                    return json.load(fh)
+            except (OSError, ValueError) as err:
+                print(f"cannot read {file}: {err}")
+                return None
+
+        def _report(result) -> None:
+            print(f"apply {result.apply_id[:12]}: {result.status}"
+                  + (f" ({result.failed_at}: {result.message})" if result.failed_at else ""))
+            for item in result.items:
+                where = item.entity_id if item.entity_id is not None else item.placeholder_id
+                steps = f" {item.completed_steps}/{item.total_steps}" if item.total_steps else ""
+                print(f"  {item.index:3} {item.kind:18} {where if where is not None else '':>5}  {item.status}{steps}"
+                      + (f"  {item.message}" if item.message and item.status != 'done' else ""))
+            if result.id_map:
+                print("  ids: " + ", ".join(f"{p} -> {v}" for p, v in sorted(result.id_map.items())))
+            print(f"  remote sync: {result.remote_sync}; snapshot {result.snapshot_id[:12] if result.snapshot_id else '?'}"
+                  + ("; resume with: apply resume=<record>" if result.resumable else ""))
+
+        if resume:
+            doc = _load(resume)
+            if doc is None:
+                return
+            try:
+                state = ApplyState.from_dict(doc)
+            except ValueError as err:
+                print(f"{resume}: {err}")
+                return
+            record_path = resume
+            kwargs: Dict[str, Any] = {"state": state}
+        else:
+            desired = _load(path)
+            baseline = _load(opts["baseline"])
+            if desired is None or baseline is None:
+                return
+            if "plan" in flags:
+                try:
+                    plan = build_hub_sync_plan(baseline, desired)
+                except DocumentError as err:
+                    print(f"refused ({err.code}): {err}")
+                    return
+                print(f"{len(plan.items)} item(s), {plan.step_count} step(s), "
+                      f"{len(plan.live_check)} entity re-read(s) before the first write; nothing written")
+                for item in plan.items:
+                    where = item.entity_id if item.entity_id is not None else item.placeholder_id
+                    print(f"  {item.index:3} {item.kind:18} {where if where is not None else '':>5}  {item.label}")
+                    for step in item.steps:
+                        print(f"        - {step.kind}: {step.label}")
+                for note in plan.notes:
+                    print(f"  note: {note}")
+                if plan.provisional_ids:
+                    print("  provisional ids: " + ", ".join(f"{p} -> {v}" for p, v in plan.provisional_ids.items()))
+                return
+            record_path = f"{path}.apply.json"
+            kwargs = {"baseline": baseline, "desired": desired, "snapshot_id": desired.get("snapshot_id")}
+
+        def _save(state) -> None:
+            with open(record_path, "w", encoding="utf-8") as fh:
+                json.dump(state.to_dict(), fh, indent=2)
+
+        try:
+            result = await self.p.sync_hub(
+                progress=lambda p: print(f"  [{p.item_index if p.item_index is not None else '-'}] {p.message}"),
+                on_state=_save, **kwargs,
+            )
+        except DocumentError as err:
+            print(f"refused ({err.code}): {err}")
+            return
+        except (RuntimeError, TimeoutError, ValueError) as err:
+            print(f"[apply] {err}")
+            return
+        _report(result)
+        print(f"record: {record_path}")
+
+    async def cmd_refresh(self, args: str) -> None:
+        _path, opts, _flags = _parse_shell_args(args)
+        kwargs: Dict[str, Any] = {}
+        if opts.get("dev"):
+            kwargs["device_id"] = parse_int(opts["dev"])
+        elif opts.get("act"):
+            kwargs["activity_id"] = parse_int(opts["act"])
+        else:
+            print("refreshing the whole hub (every device and activity; this takes a while)...")
+        snap = await self._safe(
+            "refresh", self.p.refresh(progress=lambda p: print(f"  {p.message}"), **kwargs)
+        )
+        if snap is not None:
+            print(f"snapshot {snap.snapshot_id[:12]}  complete={snap.complete}")
+
+    async def _apply_edit(self, kind: str, entity_id: int, edit) -> None:
+        """Snapshot, edit, sync; ``edit(bundle) -> bundle``."""
+
+        from . import edits as _edits  # noqa: F401  (helpers are passed in)
+
+        snap = await self._safe("snapshot", self.p.snapshot())
+        if snap is None:
+            return
+        entity = snap.entity(kind, entity_id)
+        if entity is None:
+            print(f"{kind} {entity_id} is not on the hub")
+            return
+        if not entity.editable:
+            print(f"{kind} {entity_id} was never fully read; run: refresh {'dev' if kind == 'device' else 'act'}={entity_id}")
+            return
+        try:
+            edited = edit(snap.bundle)
+        except (KeyError, ValueError) as err:
+            print(f"cannot edit: {err}")
+            return
+        sync = self.p.sync_device if kind == "device" else self.p.sync_activity
+        key = "device_id" if kind == "device" else "activity_id"
+        result = await self._safe(
+            "sync",
+            sync(
+                baseline=snap.bundle, edited=edited, snapshot_id=snap.snapshot_id,
+                progress=lambda p: print(f"  {p.message}"), **{key: entity_id},
+            ),
+        )
+        if result is None:
+            return
+        if result.ok:
+            print(f"done ({result.completed_steps} step(s)); snapshot {str(result.snapshot_id)[:12]}")
+        else:
+            print(f"failed at {result.failed_at}: {result.message}")
+
+    async def cmd_rename(self, args: str) -> None:
+        from . import edits as _edits
+
+        parts = args.split(None, 2)
+        if len(parts) < 3 or parts[0] not in ("dev", "act"):
+            print("usage: rename dev|act <id> <new name>")
+            return
+        entity_id = parse_int(parts[1])
+        name = parts[2].strip()
+        if parts[0] == "dev":
+            await self._apply_edit("device", entity_id, lambda b: _edits.rename_device(b, entity_id, name))
+        else:
+            await self._apply_edit("activity", entity_id, lambda b: _edits.rename_activity(b, entity_id, name))
+
+    async def cmd_bind(self, args: str) -> None:
+        from . import edits as _edits
+
+        parts = args.split()
+        if len(parts) not in (4, 6):
+            print("usage: bind <act> <button> <dev> <cmd> [<lp_dev> <lp_cmd>]")
+            print("       button = code or name (POWER_ON, VOLUME_UP ...); lp = long press")
+            return
+        act = parse_int(parts[0])
+        try:
+            button = resolve_button_code(parts[1])
+        except ValueError as err:
+            print(err)
+            return
+        dev, cmd = parse_int(parts[2]), parse_int(parts[3])
+        long_press = (parse_int(parts[4]), parse_int(parts[5])) if len(parts) == 6 else None
+        await self._apply_edit(
+            "activity", act,
+            lambda b: _edits.bind_button(b, act, button, dev, cmd, long_press=long_press),
+        )
+
+    async def cmd_unbind(self, args: str) -> None:
+        from . import edits as _edits
+
+        parts = args.split()
+        if len(parts) != 2:
+            print("usage: unbind <act> <button>")
+            return
+        act = parse_int(parts[0])
+        try:
+            button = resolve_button_code(parts[1])
+        except ValueError as err:
+            print(err)
+            return
+        await self._apply_edit("activity", act, lambda b: _edits.clear_button(b, act, button))
+
+    async def cmd_hubname(self, args: str) -> None:
+        name = args.strip()
+        if not name:
+            print("usage: hubname <new name>")
+            return
+        if await self._safe("hubname", self.p.set_hub_name(name)) is not None or True:
+            info = await self._safe("hub_info", self.p.hub_info())
+            if info is not None:
+                print(f"hub is now named {info.name!r}")
 
     # ----- meta -------------------------------------------------------------
 
@@ -534,11 +742,19 @@ class AsyncShell:
         print("  start <act> | stop <act>       switch activity power")
         print("  find                           find-my-remote")
         print("  testir <hex..>                 play an IR payload once (nothing saved)")
-        print("  addir <dev> <name> <hex..>     save a new IR command (quote multi-word names)")
         print("  proxy on|off                   toggle pass-through")
         print("  backup [file] [devices=ID,..]  back up the hub (subset = devices only)")
         print("  restore <file> [devices=ID,..] [activities=ID,..] [erase]")
         print("                                 restore a bundle; optionally a subset / erase-first")
+        print("  snapshot [out=FILE]            the cached configuration: every entity + its provenance")
+        print("  apply <edited.json> baseline=<snapshot.json> [plan]")
+        print("                                 write a whole edited snapshot document (plan = preview only)")
+        print("  apply resume=<file.apply.json> continue a stopped or cancelled apply")
+        print("  refresh [dev=ID|act=ID]        re-read one entity, or the whole hub (slow)")
+        print("  rename dev|act <id> <name>     rename a device / activity")
+        print("  bind <act> <button> <dev> <cmd> [<lp_dev> <lp_cmd>]   bind a button (+ long press)")
+        print("  unbind <act> <button>          clear a button")
+        print("  hubname <name>                 rename the hub")
         print("  quit                           exit")
         print("\nBrowse to get (entity_id, command_id); send with: press <entity_id> <command_id>.")
         print("Reads/sends need control mode (no app attached through the proxy).")
@@ -729,9 +945,9 @@ async def _main_run(argv: list[str]) -> None:
             # it. This reads the hub's connect banner (authoritative for the
             # version and name) and brings the mDNS advertisement up.
             await proxy.wait_until_discoverable(timeout=5.0)
-            version = proxy.sync.hub_version
-            mode = "control mode" if proxy.sync.can_issue_commands() else "observe mode — an app is attached"
-            print(f"hub connected — version {version} ({mode})")
+            st = await proxy.status()
+            mode = "control mode" if st.controllable else "observe mode — an app is attached"
+            print(f"hub connected — version {st.hub_version} ({mode})")
         else:
             print("hub not connected yet (the shell still works; events appear when it connects)")
         try:

@@ -12,18 +12,18 @@ import {
   normalizedGroupOrder,
   normalizedShortcutSlot,
   shortcutsRowEnabled,
-} from "../../custom_components/sofabaton_x1s/www/src/remote-card-layout";
+} from "../../remote-card/src/remote-card-layout";
 import {
   applyLayoutConfigPatch,
   applyShortcutSlotPatch,
-} from "../../custom_components/sofabaton_x1s/www/src/remote-card-editor-layout";
-import { renderShortcutsRow } from "../../custom_components/sofabaton_x1s/www/src/sections/key-groups";
+} from "../../remote-card/src/remote-card-editor-layout";
+import { renderShortcutsRow } from "../../remote-card/src/sections/key-groups";
 import {
   renderShortcutsRowPanel,
   renderShortcutsSlotStrip,
-} from "../../custom_components/sofabaton_x1s/www/src/editor-sections/shortcuts";
-import { SofabatonRemoteCardEditor } from "../../custom_components/sofabaton_x1s/www/src/remote-card-editor-element";
-import type { RemoteCardConfig } from "../../custom_components/sofabaton_x1s/www/src/remote-card-types";
+} from "../../remote-card/src/editor-sections/shortcuts";
+import { SofabatonRemoteCardEditor } from "../../remote-card/src/remote-card-editor-element";
+import type { RemoteCardConfig } from "../../remote-card/src/remote-card-types";
 
 // The editor dispatches window events for the preview-activity handshake;
 // give Node a minimal window so setConfig/selection changes can run.
