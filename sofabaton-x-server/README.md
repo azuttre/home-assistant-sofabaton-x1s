@@ -723,8 +723,8 @@ The [live-hub testing notes](https://github.com/m3tac0de/home-assistant-sofabato
 hardware coverage; the document-write bench covers library operations on
 X1/X1S, with X2 and the corresponding server-route bench still pending.
 
-To release: set `__version__` in `src/sofabaton_server/__init__.py`, put
-the notes on the GitHub release, and push the tag `sofabaton-x-server-vX.Y.Z`.
+To release: set `__version__` in `src/sofabaton_server/__init__.py`, update
+the documentation, and push the tag `sofabaton-x-server-vX.Y.Z`.
 The release workflow re-runs the tests, checks the tag against the
 version and publishes to PyPI; a compatible `sofabaton-x` version must be
 on PyPI first (see the repository's CONTRIBUTING).

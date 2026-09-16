@@ -811,9 +811,9 @@ output or traceback, the package and Python versions, and a small
 reproduction snippet if possible.
 
 See the [changelog](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/blob/main/sofabaton-x/CHANGELOG.md)
-for library changes and migration instructions. Library versions are tagged
-`sofabaton-x-vX.Y.Z`; published releases are listed on the
-[GitHub releases page](https://github.com/m3tac0de/home-assistant-sofabaton-x1s/releases).
+for library changes and migration instructions. Pushing a tag named
+`sofabaton-x-vX.Y.Z` triggers automated publication to PyPI. Published versions
+are listed in the [PyPI release history](https://pypi.org/project/sofabaton-x/#history).
 
 ## License
 

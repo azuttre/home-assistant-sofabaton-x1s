@@ -193,12 +193,14 @@ touches `lib/`, so the PyPI package never falls behind the engine):
 1. Bump `custom_components/sofabaton_x1s/lib/version.py` (minor for any
    surface change before 1.0; patch for engine-only fixes).
 2. Update `sofabaton-x/README.md` for anything the surface gained or lost,
-   and `tests/lib/test_public_api.py` for root exports.
+   and `tests/lib/test_public_api.py` for root exports. Record changes and
+   migration guidance in `sofabaton-x/CHANGELOG.md` under the version and date.
 3. `pytest tests/lib -q` (boundary lint, facade tiers, public API), then
    the full suite.
 4. Commit, then `git tag sofabaton-x-vX.Y.Z && git push origin sofabaton-x-vX.Y.Z`.
    The release workflow refuses a tag that does not match `version.py`.
-5. Paste the release notes on the GitHub release created for the tag.
+5. Confirm the publishing workflow succeeded and the version is available
+   on PyPI. The tag triggers publication; no GitHub Release is created.
 
 Server release checklist (after the library it depends on is on PyPI):
 
@@ -212,8 +214,10 @@ Server release checklist (after the library it depends on is on PyPI):
    renders it outside the repository).
 4. `pytest sofabaton-x-server/tests -q`, `npm run test:frontend`, and the
    Playwright specs `server-panel.spec.js` and `web-remote.spec.js`.
-5. Commit, then `git tag sofabaton-x-server-vX.Y.Z && git push origin sofabaton-x-server-vX.Y.Z`,
-   and paste the release notes on the GitHub release.
+5. Update the server documentation, commit, then
+   `git tag sofabaton-x-server-vX.Y.Z && git push origin sofabaton-x-server-vX.Y.Z`.
+   Confirm the publishing workflow succeeded and the version is available
+   on PyPI. No GitHub Release is created.
 
 CI (`sofabaton-x-ci.yml`) runs on PRs and pushes to `main`/`dev` that touch
 the library, the packaging metadata, or the tests: boundary lint, lib tests
