@@ -347,12 +347,17 @@ def test_restore_style_create_with_zero_commands(monkeypatch, device_class: str)
     assert result["restored_inputs"] == 0
     assert result["command_id_map"] == {}
     assert [step.label for step in sequence_calls[0]] == ["device-create"]
-    # The restore-style (X1S/X2) create commits in the create record itself
-    # (tail_marker 1); with nothing to replay the post phase is empty.
+    # Even an empty restore crosses the family-0x08 durable-catalog boundary
+    # using the id allocated by the family-0x07 acknowledgement.
     families = [step.family for step in sequence_calls[1]]
     assert 0x0E not in families  # no command pages
     assert 0x3E not in families  # no bindings
-    assert families == []
+    assert families == [0x08]
+    finalize = parse_device_record(
+        sequence_calls[1][0].payload[3:],
+        hub_version=HUB_VERSION_X1S,
+    )
+    assert finalize.device_id == 0x23
     # The proxy learned the new device and its class right away.
     assert proxy.state.devices[0x23]["device_class"] == device_class
     assert proxy.state.commands[0x23] == {}

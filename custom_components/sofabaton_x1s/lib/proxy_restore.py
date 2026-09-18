@@ -27,6 +27,7 @@ from .hub_versions import (
 )
 from .device_create import (
     FAMILY_ACTIVITY_CREATE,
+    CreateStep,
     DeviceCreateRequest,
     DeviceCreateResult,
     build_button_binding_step,
@@ -821,6 +822,28 @@ class RestoreMixin:
             command_id_map=dict(command_id_map),
         )
 
+    def _build_restore_device_finalize_step(
+        self,
+        *,
+        device_block: dict[str, Any],
+        assigned_device_id: int,
+    ) -> CreateStep:
+        """Build the final device update for the id assigned by the hub.
+
+        Both restore profiles cross the same family-0x08 persistence boundary.
+        The final record must replace any source or provisional id from the
+        backup with the id returned by the family-0x07 create acknowledgement.
+        """
+
+        finalize_config = replace(
+            device_config_from_backup(device_block, for_create=False),
+            device_id=assigned_device_id & 0xFF,
+        )
+        return build_device_update_step(
+            finalize_config,
+            hub_version=self.hub_version,
+        )
+
     def _refresh_destination_catalog(self, *, timeout: float = 5.0) -> None:
         """Synchronously refresh the destination hub's device + activity lists.
 
@@ -1241,6 +1264,13 @@ class RestoreMixin:
                 kwargs["long_press_button_id"] = long_press_command_id
             post_steps.append(build_button_binding_step(**kwargs))
 
+        post_steps.append(
+            self._build_restore_device_finalize_step(
+                device_block=device_block,
+                assigned_device_id=new_device_id,
+            )
+        )
+
         self.reset_ack_queues()
         post_result = _run_create_sequence(self, post_steps)
         if not post_result.success:
@@ -1474,14 +1504,10 @@ class RestoreMixin:
                 )
             )
 
-        finalize_config = replace(
-            device_config_from_backup(device_block, for_create=False),
-            device_id=new_device_id,
-        )
         post_steps.append(
-            build_device_update_step(
-                finalize_config,
-                hub_version=self.hub_version,
+            self._build_restore_device_finalize_step(
+                device_block=device_block,
+                assigned_device_id=new_device_id,
             )
         )
 

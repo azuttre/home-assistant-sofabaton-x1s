@@ -78,6 +78,34 @@ Observed properties:
   (X1S/X2) record body as family `0x07`; the main semantic difference is that
   it targets the real assigned `device_id`
 
+### Backup-restore profiles
+
+The restore implementation preserves two profile-specific replay orders while
+sharing the same final persistence boundary:
+
+- X1 import: commands, button bindings, idle behavior, macros, an inputs page
+  (captured or default), then family `0x08`.
+- X1S/X2 restore style: optional idle behavior, commands, optional key sort,
+  optional captured inputs, macros, button bindings, then family `0x08`.
+
+For both profiles, the final family-`0x08` body must use the id returned by the
+family-`0x07` create acknowledgement, even when that differs from the source id
+or the id targeted in the provisional create record. The create acknowledgement
+alone is not evidence that the catalog row is durable. Restore reports success
+and updates its local cache only after the final update receives a successful
+`0x0103` acknowledgement. A rejection or timeout fails the restore and triggers
+best-effort removal of the provisional device.
+
+### Maintainability disposition (2026-09-18)
+
+`done` — `RestoreMixin._build_restore_device_finalize_step()` owns the shared
+family-`0x08` construction for both restore profiles and delegates the bytes to
+the existing `build_device_update_step()` protocol builder. The profile methods
+retain only their intentionally different replay ordering. Durable-catalog and
+profile-order tests cover the persistence seam, so adding another device class
+does not require another finalization implementation. No follow-up refactor is
+deferred by this change.
+
 ---
 
 ## ◇ Standard activity-create sequence
