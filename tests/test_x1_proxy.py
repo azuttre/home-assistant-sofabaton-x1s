@@ -1334,9 +1334,18 @@ def test_restore_device_x1s_keeps_restore_style_sequence(monkeypatch) -> None:
     post_families = [step.family for step in sequence_calls[1]]
     assert post_families[0] == 0x41
     assert 0x61 in post_families
-    assert 0x08 not in post_families
+    assert post_families[-1] == 0x08
     assert 0x64 not in post_families
-    assert post_families.index(0x61) < post_families.index(0x46)
+    assert (
+        post_families.index(0x61)
+        < post_families.index(0x46)
+        < post_families.index(0x08)
+    )
+    finalize_config = parse_device_record(
+        sequence_calls[1][-1].payload[3:],
+        hub_version=HUB_VERSION_X1S,
+    )
+    assert finalize_config.device_id == 0x22
     assert all(step.timeout == 5.0 for step in sequence_calls[1] if step.family == 0x0E)
 
 

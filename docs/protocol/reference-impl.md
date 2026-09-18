@@ -47,7 +47,7 @@ All paths are relative to `custom_components/sofabaton_x1s/lib/`.
 | Status-ack classifier | `x1_proxy.py` | `X1Proxy._send_step()` |
 | Activity-inputs burst wait (typed result) | `proxy_ack_waiters.py` | `wait_for_activity_inputs_burst()` |
 | Unified device/activity-create orchestrator | `device_create.py` | `DeviceCreateRequest`, `DeviceCreateResult`, `run_device_create()` |
-| IR / BT / RF create pipeline | `proxy_restore.py` | `_run_ir_device_create()` |
+| IR / BT / RF create pipeline | `proxy_restore.py` | `_run_ir_device_create()`, `_build_restore_device_finalize_step()` |
 | WiFi-commands create pipeline | `proxy_wifi_device.py` | `_run_network_callback_create()` |
 | Activity-create pipeline (family-0x37) | `proxy_restore.py` | `_run_activity_create()` |
 | Public adapter — create WiFi device | `proxy_wifi_device.py` | `create_wifi_device()` |
@@ -134,6 +134,13 @@ The public adapters (`create_wifi_device`, `restore_device`,
 `DeviceCreateRequest`, call `run_device_create`, translate the
 typed result back to the legacy dict surface the service / WS
 layer expects.
+
+Device restore has two version-specific pipelines: X1 import and X1S/X2
+restore style. Both obtain their last family-`0x08` step from
+`RestoreMixin._build_restore_device_finalize_step()`, which replaces any source
+or provisional id with the family-`0x07` acknowledgement's assigned id. Neither
+pipeline calls `_finalize_restore_device_result()` until that last step is
+acknowledged, so an unconfirmed update cannot become local success state.
 
 ---
 
