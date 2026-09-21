@@ -329,7 +329,6 @@ sync_command_config:
     inplace_only:
       required: false
       default: false
-      description: Refuse the sync if it cannot update the existing managed Wifi Device in place.
       selector:
         boolean:
 
