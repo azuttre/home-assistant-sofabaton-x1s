@@ -8,6 +8,10 @@ from __future__ import annotations
 
 import pytest
 
+from custom_components.sofabaton_x1s.lib.hub_versions import (
+    HUB_VERSION_X1,
+    HUB_VERSION_X1S,
+)
 from custom_components.sofabaton_x1s.lib.wifi_inplace_plan import (
     ManagedWifiSnapshot,
     WifiActivityRefs,
@@ -15,6 +19,7 @@ from custom_components.sofabaton_x1s.lib.wifi_inplace_plan import (
     baseline_snapshot_from_bundle,
     build_wifi_inplace_plan,
     desired_snapshot_from_config,
+    normalize_wifi_command_label,
 )
 
 DEV = 8
@@ -396,6 +401,39 @@ def test_desired_adapter_slots_and_expansion():
     assert snap.slots[11].label == "Dim Long Press"
     assert snap.slots[4].label == "Command 4"
     assert snap.power_on_command_id == 1 and snap.power_off_command_id == 2
+
+
+def test_command_labels_are_normalized_to_the_hub_wire_schema():
+    x1_label = normalize_wifi_command_label(
+        "Bedroom light toggle Long Press",
+        hub_version=HUB_VERSION_X1,
+    )
+    x1s_label = normalize_wifi_command_label(
+        "Éclairage chambre très lumineux",
+        hub_version=HUB_VERSION_X1S,
+    )
+
+    assert x1_label == "Bedroom light toggle Long Pres"
+    assert len(x1_label.encode("ascii")) == 30
+    assert len(x1s_label.encode("utf-16-be")) <= 60
+    assert x1s_label == "Éclairage chambre très lumineu"
+
+
+def test_desired_adapter_uses_wire_normalized_long_labels():
+    config = store_config()
+    config["commands"][0]["name"] = "Bedroom light toggle"
+
+    snap = desired_snapshot_from_config(
+        config,
+        device_id=DEV,
+        device_name="HA",
+        brand="m3-k-h",
+        hard_button_codes=HARD_BUTTONS,
+        hub_version=HUB_VERSION_X1,
+    )
+
+    assert snap.slots[1].label == "Bedroom light toggle"
+    assert snap.slots[11].label == "Bedroom light toggle Long Pres"
 
 
 def test_desired_adapter_inputs_first_slot_wins():

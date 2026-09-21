@@ -56,6 +56,8 @@ from .activity_sync import (
     POWER_OFF_MACRO_BUTTON_ID,
     SyncStep,
 )
+from .hub_versions import HUB_VERSION_X1
+from .wire_schema import schema_for
 
 __all__ = [
     "WifiCommandSlot",
@@ -66,12 +68,26 @@ __all__ = [
     "derive_device_level_bindings",
     "desired_snapshot_from_config",
     "baseline_snapshot_from_bundle",
+    "normalize_wifi_command_label",
 ]
 
 # Deploy constants (mirror hub.py's _WIFI_COMMAND_SLOT_COUNT / long offset —
 # kept local so this module stays pure and import-light).
 WIFI_COMMAND_SLOT_COUNT = 10
 WIFI_COMMAND_LONG_PRESS_OFFSET = 10
+
+
+def normalize_wifi_command_label(value: str, *, hub_version: str) -> str:
+    """Return the schema-encoded label retained by the hub command record."""
+
+    schema = schema_for(hub_version)
+    return str(value).encode(
+        schema.command_label_encoding,
+        errors="replace",
+    )[: schema.command_label_slot_len].decode(
+        schema.command_label_encoding,
+        errors="ignore",
+    ).rstrip("\x00")
 
 
 @dataclass(frozen=True)
@@ -594,6 +610,7 @@ def desired_snapshot_from_config(
     hard_button_codes: Mapping[str, int],
     slot_count: int = WIFI_COMMAND_SLOT_COUNT,
     long_press_offset: int = WIFI_COMMAND_LONG_PRESS_OFFSET,
+    hub_version: str = HUB_VERSION_X1,
 ) -> ManagedWifiSnapshot:
     """Store command-config payload → desired :class:`ManagedWifiSnapshot`.
 
@@ -630,10 +647,18 @@ def desired_snapshot_from_config(
     # N+1..2N long — grounded against a live managed device.
     for idx in range(len(commands)):
         short_id = idx + 1
-        slots[short_id] = WifiCommandSlot(command_id=short_id, label=names[idx])
+        slots[short_id] = WifiCommandSlot(
+            command_id=short_id,
+            label=normalize_wifi_command_label(names[idx], hub_version=hub_version),
+        )
         long_id = idx + 1 + long_press_offset
         slots[long_id] = WifiCommandSlot(
-            command_id=long_id, label=f"{names[idx]} Long Press", press_type="long"
+            command_id=long_id,
+            label=normalize_wifi_command_label(
+                f"{names[idx]} Long Press",
+                hub_version=hub_version,
+            ),
+            press_type="long",
         )
 
     # device input list + per-activity ordinal (first-slot-wins)
