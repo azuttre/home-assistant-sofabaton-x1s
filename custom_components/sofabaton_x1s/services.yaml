@@ -326,6 +326,11 @@ sync_command_config:
       default: Home Assistant
       selector:
         text:
+    inplace_only:
+      required: false
+      default: false
+      selector:
+        boolean:
 
 get_favorites:
   fields:

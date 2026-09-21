@@ -631,6 +631,9 @@ def test_async_setup_entry_reregisters_storage_resources_after_last_hub_reenable
     assert hass.data["sofabaton_x1s"]["storage_resources_registered"] is True
     assert hass.data["sofabaton_x1s"]["entry-1"].started is True
     assert listener.registered == [("entry-1", False)]
+    assert hass.services._registered[("sofabaton_x1s", "sync_command_config")][
+        "supports_response"
+    ] == "optional"
 
 
 def test_async_setup_entry_keeps_yaml_loader_path_unchanged(monkeypatch) -> None:

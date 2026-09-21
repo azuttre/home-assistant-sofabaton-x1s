@@ -4540,7 +4540,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not hass.services.has_service(DOMAIN, "command_to_button"):
         hass.services.async_register(DOMAIN, "command_to_button", _async_handle_command_to_button)
     if not hass.services.has_service(DOMAIN, "sync_command_config"):
-        hass.services.async_register(DOMAIN, "sync_command_config", _async_handle_sync_command_config)
+        hass.services.async_register(
+            DOMAIN,
+            "sync_command_config",
+            _async_handle_sync_command_config,
+            supports_response=SupportsResponse.OPTIONAL,
+        )
     if not hass.services.has_service(DOMAIN, "export_snapshot"):
         hass.services.async_register(
             DOMAIN,
@@ -5215,12 +5220,16 @@ async def _async_handle_sync_command_config(call: ServiceCall):
     )
     request_port = roku_listen_port
     device_name = str(call.data.get("device_name") or payload.get("device_name") or "Home Assistant").strip() or "Home Assistant"
+    inplace_only = call.data.get("inplace_only", False)
+    if not isinstance(inplace_only, bool):
+        raise ValueError("inplace_only must be a boolean")
 
     return await hub.async_sync_command_config(
         command_payload=payload,
         request_port=request_port,
         device_key=str(payload.get("device_key") or device_key or ""),
         device_name=device_name,
+        inplace_only=inplace_only,
     )
 
 

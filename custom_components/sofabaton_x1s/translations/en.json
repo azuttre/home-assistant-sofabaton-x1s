@@ -541,7 +541,7 @@
     },
     "sync_command_config": {
       "name": "Synchronize command configuration",
-      "description": "Deploys the saved command-slot configuration by recreating the managed Wi-Fi device and applying activity mappings.",
+      "description": "Deploys the saved command-slot configuration. Normal calls may recreate the managed Wi-Fi device; callers can request an in-place-only update that refuses replacement.",
       "fields": {
         "device": {
           "name": "Sofabaton hub",
@@ -550,6 +550,10 @@
         "device_name": {
           "name": "Device name",
           "description": "Optional Wi-Fi device name. The default is Home Assistant."
+        },
+        "inplace_only": {
+          "name": "Require in-place update",
+          "description": "Refuse the synchronization if the existing managed Wi-Fi device cannot be updated in place."
         }
       }
     },
