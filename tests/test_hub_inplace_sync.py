@@ -9,12 +9,16 @@ the replace path, and a rejected write raises instead of double-applying.
 from __future__ import annotations
 
 import asyncio
+import importlib
+from types import SimpleNamespace
 
 import pytest
 
 import custom_components.sofabaton_x1s.hub as hub_module
 from custom_components.sofabaton_x1s.hub import SofabatonHub
 from tests.test_hub_commands import FakeHass
+
+integration = importlib.import_module("custom_components.sofabaton_x1s.__init__")
 
 OLD_HASH = "oldhash"
 NEW_HASH = "newhash"
@@ -102,6 +106,7 @@ def _make_hub(
     run_result=None,
     call_order=None,
     replacement_commands_persist=True,
+    device_snapshot=None,
 ):
     calls = call_order if call_order is not None else []
     hass = FakeHass(loop)
@@ -111,7 +116,9 @@ def _make_hub(
     hub.roku_server_enabled = True
     hub.activities = {}
 
-    snapshot = {DEV_ID: {"brand": f"m3-default-{OLD_HASH}", "name": "Home Assistant"}}
+    snapshot = device_snapshot if device_snapshot is not None else {
+        DEV_ID: {"brand": f"m3-default-{OLD_HASH}", "name": "Home Assistant"}
+    }
 
     async def _snapshot(*_args, **_kwargs):
         return dict(snapshot)
@@ -181,9 +188,13 @@ def _async_return(value):
     return _inner
 
 
-def _run_sync(loop, hub, payload):
+def _run_sync(loop, hub, payload, *, inplace_only=False):
     return loop.run_until_complete(
-        hub.async_sync_command_config(command_payload=payload, request_port=PORT)
+        hub.async_sync_command_config(
+            command_payload=payload,
+            request_port=PORT,
+            inplace_only=inplace_only,
+        )
     )
 
 
@@ -205,6 +216,162 @@ def test_inplace_path_runs_and_skips_replace(monkeypatch):
     assert store.saved and store.saved[0]["request_port"] == PORT
     assert store.saved[0]["deployed_device_id"] == DEV_ID
     loop.close()
+
+
+def test_inplace_only_path_returns_verifiable_device_identity(monkeypatch):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    store = _Store()
+    calls: list[str] = []
+    hub = _make_hub(monkeypatch, loop, store=store, device_entry=_device_entry(), call_order=calls)
+
+    result = _run_sync(loop, hub, _payload(), inplace_only=True)
+
+    assert result == {
+        "status": "success",
+        "wifi_device_id": DEV_ID,
+        "commands_hash": NEW_HASH,
+        "activities": [],
+        "inplace": True,
+        "steps": 1,
+    }
+    assert calls == ["inplace_run"]
+    loop.close()
+
+
+@pytest.mark.parametrize(
+    ("payload", "store", "device_entry"),
+    [
+        (_payload(deployed_port=9999), _Store(), _device_entry()),
+        (_payload(), _Store(deployed_slots=[]), _device_entry()),
+        (_payload(), _Store(), _device_entry(label="Renamed In App")),
+    ],
+    ids=["port-mismatch", "missing-snapshot", "foreign-drift"],
+)
+def test_inplace_only_declines_without_replacement(
+    monkeypatch, payload, store, device_entry
+):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    calls: list[str] = []
+    hub = _make_hub(
+        monkeypatch,
+        loop,
+        store=store,
+        device_entry=device_entry,
+        call_order=calls,
+    )
+
+    with pytest.raises(
+        hub_module.HomeAssistantError,
+        match="In-place-only sync refused",
+    ):
+        _run_sync(loop, hub, payload, inplace_only=True)
+
+    assert "inplace_run" not in calls
+    assert "create" not in calls
+    assert not any(call.startswith("delete:") for call in calls)
+    loop.close()
+
+
+def test_inplace_only_zero_config_refuses_without_delete(monkeypatch):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    store = _Store()
+    calls: list[str] = []
+    hub = _make_hub(monkeypatch, loop, store=store, device_entry=_device_entry(), call_order=calls)
+    payload = _payload()
+    payload["commands"] = []
+
+    with pytest.raises(
+        hub_module.HomeAssistantError,
+        match="zero configured slots would remove",
+    ):
+        _run_sync(loop, hub, payload, inplace_only=True)
+
+    assert "create" not in calls
+    assert not any(call.startswith("delete:") for call in calls)
+    assert not store.saved
+    loop.close()
+
+
+def test_inplace_only_ambiguous_match_refuses_without_create_or_delete(monkeypatch):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    store = _Store()
+    calls: list[str] = []
+    duplicate_hash_snapshot = {
+        DEV_ID: {"brand": f"m3-default-{OLD_HASH}", "name": "Home Assistant"},
+        12: {"brand": f"m3-other-{OLD_HASH}", "name": "Another managed device"},
+    }
+    hub = _make_hub(
+        monkeypatch,
+        loop,
+        store=store,
+        device_entry=_device_entry(),
+        call_order=calls,
+        device_snapshot=duplicate_hash_snapshot,
+    )
+    payload = _payload()
+    payload["deployed_device_id"] = None
+
+    with pytest.raises(
+        hub_module.HomeAssistantError,
+        match="multiple matches found",
+    ):
+        _run_sync(loop, hub, payload, inplace_only=True)
+
+    assert "inplace_run" not in calls
+    assert "create" not in calls
+    assert not any(call.startswith("delete:") for call in calls)
+    loop.close()
+
+
+def test_sync_service_passes_inplace_only_and_returns_hub_receipt(monkeypatch):
+    expected = {
+        "status": "success",
+        "inplace": True,
+        "wifi_device_id": DEV_ID,
+    }
+    calls: list[dict] = []
+
+    class _Hub:
+        entry_id = "entry-id"
+
+        async def async_sync_command_config(self, **kwargs):
+            calls.append(kwargs)
+            return expected
+
+    class _ServiceStore:
+        async def async_get_hub_config(self, *_args, **_kwargs):
+            return {"device_key": "office", "device_name": "Office"}
+
+    async def _resolve(*_args, **_kwargs):
+        return _Hub()
+
+    async def _store(*_args, **_kwargs):
+        return _ServiceStore()
+
+    monkeypatch.setattr(integration, "_async_resolve_hub_from_call", _resolve)
+    monkeypatch.setattr(integration, "_async_get_command_config_store", _store)
+    monkeypatch.setattr(integration, "_resolve_roku_listen_port", lambda *_args: PORT)
+    call = SimpleNamespace(
+        hass=SimpleNamespace(),
+        data={"device_key": "office", "inplace_only": True},
+    )
+
+    result = asyncio.run(integration._async_handle_sync_command_config(call))
+
+    assert result is expected
+    assert calls == [
+        {
+            "command_payload": {"device_key": "office", "device_name": "Office"},
+            "request_port": PORT,
+            "device_key": "office",
+            "device_name": "Office",
+            "inplace_only": True,
+        }
+    ]
 
 
 def test_port_change_falls_back_to_replace(monkeypatch):

@@ -4545,6 +4545,7 @@ class SofabatonHub:
         request_port: int,
         device_key: str = DEFAULT_WIFI_DEVICE_KEY,
         device_name: str = "Home Assistant",
+        inplace_only: bool = False,
     ) -> dict[str, Any]:
         if self._command_sync_lock.locked():
             raise HomeAssistantError("sync_in_progress")
@@ -4717,6 +4718,11 @@ class SofabatonHub:
                         "Unable to safely identify existing managed Wifi Device; multiple matches found"
                     )
                 if configured_slots == 0:
+                    if inplace_only:
+                        raise HomeAssistantError(
+                            "In-place-only sync refused: zero configured slots would "
+                            "remove the managed Wifi Device"
+                        )
                     self._set_command_sync_progress(
                         device_key=normalized_device_key,
                         current_step=2,
@@ -4789,6 +4795,16 @@ class SofabatonHub:
                     )
                     if inplace_result is not None:
                         return inplace_result
+                    if inplace_only:
+                        raise HomeAssistantError(
+                            "In-place-only sync refused: the managed Wifi Device "
+                            "is not eligible for an in-place update"
+                        )
+                elif inplace_only:
+                    raise HomeAssistantError(
+                        "In-place-only sync refused: expected exactly one managed "
+                        f"Wifi Device, found {len(managed)}"
+                    )
 
                 command_defs: list[dict[str, Any]] = []
                 input_command_ids: list[int] = []
