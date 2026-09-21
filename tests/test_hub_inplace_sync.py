@@ -61,12 +61,15 @@ class _Store:
         )
 
 
-def _device_entry(*, label="Command 1"):
+def _device_entry(*, label="Command 1", long_label=None):
     return {
         "device": {"device_id": DEV_ID, "name": "Home Assistant", "brand": f"m3-default-{OLD_HASH}"},
         "commands": [
             {"command_id": 1, "command_label": label},
-            {"command_id": 11, "command_label": f"{label} Long Press"},
+            {
+                "command_id": 11,
+                "command_label": long_label or f"{label} Long Press",
+            },
         ],
         "input_record": {"entries": []},
         "macros": [
@@ -236,6 +239,37 @@ def test_inplace_only_path_returns_verifiable_device_identity(monkeypatch):
         "steps": 1,
     }
     assert calls == ["inplace_run"]
+    loop.close()
+
+
+def test_x1_wire_truncated_long_label_is_not_foreign_drift(monkeypatch):
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    label = "Bedroom light toggle"
+    store = _Store(deployed_slots=[{"name": label}])
+    payload = _payload()
+    payload["commands"][0]["name"] = label
+    calls: list[str] = []
+    hub = _make_hub(
+        monkeypatch,
+        loop,
+        store=store,
+        device_entry=_device_entry(
+            label=label,
+            long_label="Bedroom light toggle Long Pres",
+        ),
+        call_order=calls,
+    )
+
+    result = _run_sync(loop, hub, payload, inplace_only=True)
+
+    assert result["status"] == "success"
+    assert result["inplace"] is True
+    assert result["wifi_device_id"] == DEV_ID
+    assert calls == ["inplace_run"]
+    assert [step.kind for step in hub._inplace_plans[0].steps] == [
+        "wifi_head_commit"
+    ]
     loop.close()
 
 

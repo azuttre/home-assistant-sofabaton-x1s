@@ -82,6 +82,7 @@ from .lib.wifi_inplace_plan import (
     build_wifi_inplace_plan,
     derive_device_level_bindings,
     desired_snapshot_from_config,
+    normalize_wifi_command_label,
 )
 from .lib.x1_proxy import X1Proxy
 from .command_config import (
@@ -4345,8 +4346,14 @@ class SofabatonHub:
         expected_labels: dict[int, str] = {}
         for idx, slot in enumerate(deployed_slots[:slot_count]):
             name = str(slot.get("name") or f"Command {idx + 1}").strip() or f"Command {idx + 1}"
-            expected_labels[idx + 1] = name
-            expected_labels[idx + 1 + slot_count] = f"{name} Long Press"
+            expected_labels[idx + 1] = normalize_wifi_command_label(
+                name,
+                hub_version=self._proxy.hub_version,
+            )
+            expected_labels[idx + 1 + slot_count] = normalize_wifi_command_label(
+                f"{name} Long Press",
+                hub_version=self._proxy.hub_version,
+            )
         desired = desired_snapshot_from_config(
             command_payload,
             device_id=dev_id,
@@ -4355,6 +4362,7 @@ class SofabatonHub:
             hard_button_codes=_HARD_BUTTON_TO_CODE,
             slot_count=slot_count,
             long_press_offset=slot_count,
+            hub_version=self._proxy.hub_version,
         )
 
         # Classify every live record that disagrees with the deployed
@@ -4403,6 +4411,7 @@ class SofabatonHub:
             hard_button_codes=_HARD_BUTTON_TO_CODE,
             slot_count=slot_count,
             long_press_offset=slot_count,
+            hub_version=self._proxy.hub_version,
         )
         plan = build_wifi_inplace_plan(baseline, desired, deployed=deployed_snapshot)
         if plan.is_fallback:
